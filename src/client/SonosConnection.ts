@@ -8,35 +8,68 @@ import { ConnectionError } from '../errors/ConnectionError.js';
 import { CommandError } from '../errors/CommandError.js';
 import { ErrorCode } from '../types/errors.js';
 
+/**
+ * The four possible states of a {@link SonosConnection}.
+ *
+ * - `disconnected` -- no active connection
+ * - `connecting` -- a connection attempt is in progress
+ * - `connected` -- the WebSocket is open and ready
+ * - `reconnecting` -- the connection was lost and a reconnect is pending
+ */
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
 
+/** Events emitted by {@link SonosConnection}. */
 export interface ConnectionEvents {
+  /** Fired when the WebSocket connection is successfully established. */
   connected: () => void;
+  /** Fired when the connection is closed, with a human-readable reason. */
   disconnected: (reason: string) => void;
+  /** Fired before each reconnect attempt, with the attempt number and delay in ms. */
   reconnecting: (attempt: number, delay: number) => void;
+  /** Fired when an unsolicited message (event) is received from the speaker. */
   message: (data: SonosResponse) => void;
+  /** Fired when a connection or WebSocket error occurs. */
   error: (error: Error) => void;
 }
 
+/** Configuration for automatic reconnection behavior. */
 export interface ReconnectOptions {
+  /** Whether auto-reconnect is active. */
   enabled: boolean;
+  /** Base delay in milliseconds before the first reconnect attempt. */
   initialDelay: number;
+  /** Maximum delay in milliseconds between reconnect attempts. */
   maxDelay: number;
+  /** Exponential backoff multiplier applied to the delay after each attempt. */
   factor: number;
+  /** Maximum number of reconnect attempts before giving up. Use `Infinity` for unlimited. */
   maxAttempts: number;
 }
 
+/** Low-level options passed to the {@link SonosConnection} constructor. */
 export interface ConnectionOptions {
+  /** IP address or hostname of the Sonos speaker. */
   host: string;
+  /** WebSocket port on the Sonos device. */
   port: number;
+  /** Reconnection configuration. */
   reconnect: ReconnectOptions;
+  /** Timeout in milliseconds for individual request/response correlation. */
   requestTimeout: number;
+  /** Logger instance for debug, info, warn, and error output. */
   logger: Logger;
 }
 
 const SUB_PROTOCOL = 'v1.api.smartspeaker.audio';
 const API_KEY = '123e4567-e89b-12d3-a456-426655440000';
 
+/**
+ * Manages the WebSocket lifecycle for a single Sonos speaker.
+ *
+ * Handles TLS connection establishment (accepting the speaker's self-signed
+ * certificate), exponential-backoff reconnection, and request/response
+ * correlation via {@link MessageCorrelator}.
+ */
 export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
   private ws: WebSocket | null = null;
   private _state: ConnectionState = 'disconnected';
@@ -56,10 +89,19 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
     this.correlator = new MessageCorrelator(options.requestTimeout);
   }
 
+  /** Current connection state. */
   get state(): ConnectionState {
     return this._state;
   }
 
+  /**
+   * Establishes the WebSocket connection to the Sonos speaker over TLS.
+   *
+   * The speaker uses a self-signed certificate, so TLS verification is
+   * intentionally disabled. If already connected, this method returns
+   * immediately. If a connection attempt is already in progress, the
+   * existing promise is returned.
+   */
   async connect(): Promise<void> {
     if (this._state === 'connected') return;
     if (this.connectPromise) return this.connectPromise;
@@ -131,6 +173,12 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
     return this.connectPromise;
   }
 
+  /**
+   * Intentionally closes the WebSocket connection.
+   *
+   * All pending requests are rejected with a {@link ConnectionError}, the
+   * reconnect timer is cancelled, and no automatic reconnection will occur.
+   */
   async disconnect(): Promise<void> {
     this.intentionalClose = true;
     this.clearReconnectTimer();
@@ -151,6 +199,18 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
     this.emit('disconnected', 'client disconnect');
   }
 
+  /**
+   * Sends a request to the Sonos speaker and waits for the correlated response.
+   *
+   * The request headers must include `cmdId`, `namespace`, and `command`.
+   * The response is matched by `cmdId` via {@link MessageCorrelator}.
+   *
+   * @param request - The `[headers, body]` tuple to send.
+   * @returns The correlated `[headers, body]` response from the speaker.
+   * @throws {ConnectionError} If the WebSocket is not connected.
+   * @throws {CommandError} If the speaker returns a failure response.
+   * @throws {TimeoutError} If no response is received within the configured timeout.
+   */
   async send(request: SonosRequest): Promise<SonosResponse> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new ConnectionError(ErrorCode.CONNECTION_LOST, 'Not connected');
