@@ -80,7 +80,7 @@ out
 
 # Nuxt.js build / generate output
 .nuxt
-dist
+# dist — committed for GitHub-based installs (bun/npm don't run devDeps build scripts)
 
 # Gatsby files
 .cache/
