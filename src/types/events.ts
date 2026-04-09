@@ -8,24 +8,49 @@ import type { HomeTheaterOptions } from './homeTheater.js';
 import type { SonosResponse } from './messages.js';
 import type { SonosError } from '../errors/SonosError.js';
 
+/**
+ * All events emitted by {@link SonosClient}.
+ *
+ * Includes connection lifecycle events, real-time subscription updates
+ * from the Sonos device, and a raw message event for debugging.
+ */
 export interface SonosEvents {
+  /** Emitted when the WebSocket connection is established. */
   connected: () => void;
+  /** Emitted when the WebSocket connection is lost, with a human-readable reason string. */
   disconnected: (reason: string) => void;
+  /** Emitted before each reconnect attempt, with the attempt number and delay in milliseconds before the attempt. */
   reconnecting: (attempt: number, delay: number) => void;
+  /** Emitted on connection or command errors. */
   error: (error: SonosError | Error) => void;
 
+  /** Emitted when the group volume or mute state changes. */
   groupVolumeChanged: (data: GroupVolumeStatus) => void;
+  /** Emitted when an individual player's volume or mute state changes. */
   playerVolumeChanged: (data: PlayerVolumeStatus) => void;
+  /** Emitted when group membership or topology changes (players grouped/ungrouped). */
   groupsChanged: (data: GroupsResponse) => void;
+  /** Emitted when the playback state, position, or play modes change. */
   playbackStatusChanged: (data: PlaybackStatus) => void;
+  /** Emitted when the currently playing track or next track metadata changes. */
   metadataStatusChanged: (data: MetadataStatus) => void;
+  /** Emitted when the user's favorites list is modified. */
   favoritesChanged: (data: FavoritesResponse) => void;
+  /** Emitted when the user's playlists are modified. */
   playlistsChanged: (data: PlaylistsResponse) => void;
+  /** Emitted when home theater settings (night mode, dialog enhancement) change. */
   homeTheaterChanged: (data: HomeTheaterOptions) => void;
 
+  /** Emitted for every raw WebSocket message received from the Sonos device. Useful for debugging. */
   rawMessage: (message: SonosResponse) => void;
 }
 
+/**
+ * Maps Sonos API namespace strings to their corresponding {@link SonosEvents} event names.
+ *
+ * Used internally to route subscription events from the WebSocket connection
+ * to the appropriate typed event emitter.
+ */
 export const NAMESPACE_EVENT_MAP: Record<string, keyof SonosEvents> = {
   'groupVolume:1': 'groupVolumeChanged',
   'playerVolume:1': 'playerVolumeChanged',

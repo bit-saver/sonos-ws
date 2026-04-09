@@ -1,26 +1,52 @@
 import { createSocket } from 'node:dgram';
 import { get as httpGet } from 'node:http';
 
+/** Configuration options for Sonos device discovery. */
 export interface DiscoveryOptions {
+  /** How long to listen for SSDP responses, in milliseconds. Defaults to 5000. */
   timeout?: number;
+  /** Network interface IP address to bind the SSDP socket to. Useful on multi-homed systems. */
   interfaceAddress?: string;
 }
 
+/** A Sonos device discovered via SSDP/UPnP on the local network. */
 export interface DiscoveredDevice {
+  /** IP address of the discovered device. */
   host: string;
+  /** WebSocket port for the Sonos Control API (always 1443). */
   port: number;
+  /** Model name of the device (e.g. "Sonos Arc", "Sonos Era 300"). */
   model?: string;
+  /** Hardware model number. */
   modelNumber?: string;
+  /** Device serial number. */
   serialNumber?: string;
+  /** Room name assigned to the device in the Sonos app. */
   roomName?: string;
+  /** UPnP device description URL returned in the SSDP response. */
   location: string;
 }
 
+/** @internal SSDP multicast address. */
 const SSDP_ADDRESS = '239.255.255.250';
+/** @internal SSDP multicast port. */
 const SSDP_PORT = 1900;
+/** @internal UPnP search target for Sonos ZonePlayer devices. */
 const SEARCH_TARGET = 'urn:schemas-upnp-org:device:ZonePlayer:1';
 
+/**
+ * Discovers Sonos devices on the local network using SSDP (Simple Service Discovery Protocol).
+ *
+ * Sends an M-SEARCH multicast message and collects responses from Sonos ZonePlayers,
+ * then fetches each device's UPnP description to obtain model and room information.
+ */
 export class SonosDiscovery {
+  /**
+   * Send an SSDP M-SEARCH and collect all responding Sonos devices.
+   *
+   * @param options - Discovery configuration (timeout, network interface).
+   * @returns An array of discovered Sonos devices on the local network.
+   */
   static async discover(options?: DiscoveryOptions): Promise<DiscoveredDevice[]> {
     const timeout = options?.timeout ?? 5000;
     const devices = new Map<string, DiscoveredDevice>();
@@ -88,12 +114,25 @@ export class SonosDiscovery {
     });
   }
 
+  /**
+   * Convenience method that discovers Sonos devices and returns the first one found.
+   *
+   * @param options - Discovery configuration (timeout, network interface).
+   * @returns The first discovered device, or `undefined` if none were found.
+   */
   static async discoverOne(options?: DiscoveryOptions): Promise<DiscoveredDevice | undefined> {
     const devices = await SonosDiscovery.discover(options);
     return devices[0];
   }
 }
 
+/**
+ * Fetch and parse a UPnP device description XML to extract model and room information.
+ *
+ * @internal
+ * @param location - The UPnP device description URL from the SSDP response.
+ * @returns Partial device info extracted from the XML, or `null` on failure.
+ */
 function fetchDeviceDescription(
   location: string,
 ): Promise<Partial<DiscoveredDevice> | null> {

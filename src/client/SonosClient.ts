@@ -18,14 +18,29 @@ import { HomeTheaterNamespace } from '../namespaces/HomeTheaterNamespace.js';
 import { SettingsNamespace } from '../namespaces/SettingsNamespace.js';
 import type { BaseNamespace } from '../namespaces/BaseNamespace.js';
 
+/**
+ * Configuration options for creating a {@link SonosClient} instance.
+ */
 export interface SonosClientOptions {
+  /** IP address or hostname of the Sonos speaker to connect to. */
   host: string;
+  /** WebSocket port on the Sonos device. @defaultValue 1443 */
   port?: number;
+  /** Sonos household ID. Auto-discovered from the device if omitted. */
   householdId?: string;
+  /** Target group ID. Auto-discovered from group topology if omitted. */
   groupId?: string;
+  /** Target player ID. Auto-discovered from group topology if omitted. */
   playerId?: string;
+  /**
+   * Reconnection configuration. Pass `true` to enable with default settings,
+   * `false` to disable, or a partial {@link ReconnectOptions} object to
+   * override specific defaults.
+   */
   reconnect?: Partial<ReconnectOptions> | boolean;
+  /** Custom logger implementation. Falls back to a silent no-op logger if omitted. */
   logger?: Logger;
+  /** Timeout in milliseconds for commands sent to the speaker. @defaultValue 5000 */
   requestTimeout?: number;
 }
 
@@ -37,25 +52,54 @@ const DEFAULT_RECONNECT: ReconnectOptions = {
   maxAttempts: Infinity,
 };
 
+/**
+ * Main entry point for the sonos-ws library.
+ *
+ * `SonosClient` manages the WebSocket connection to a Sonos speaker and
+ * exposes namespace accessors for controlling volume, playback, groups,
+ * favorites, and more.
+ *
+ * @example
+ * ```typescript
+ * const client = new SonosClient({ host: '192.168.68.96' });
+ * await client.connect();
+ * await client.groupVolume.setRelativeVolume(5);
+ * await client.disconnect();
+ * ```
+ */
 export class SonosClient extends TypedEventEmitter<SonosEvents> {
   private readonly connection: SonosConnection;
   private readonly log: Logger;
   private readonly allNamespaces: BaseNamespace[];
 
+  /** Sonos household ID. Populated during {@link connect} if not provided in options. */
   householdId: string | undefined;
+  /** Target group ID. Populated during {@link connect} if not provided in options. */
   groupId: string | undefined;
+  /** Target player ID. Populated during {@link connect} if not provided in options. */
   playerId: string | undefined;
+  /** Coordinator player ID for the active group. Populated during {@link refreshGroups}. */
   coordinatorId: string | undefined;
 
+  /** Provides access to the group volume namespace (get/set volume for the entire group). */
   readonly groupVolume: GroupVolumeNamespace;
+  /** Provides access to the player volume namespace (get/set volume for an individual player). */
   readonly playerVolume: PlayerVolumeNamespace;
+  /** Provides access to the groups namespace (group topology and management). */
   readonly groups: GroupsNamespace;
+  /** Provides access to the playback namespace (play, pause, skip, seek, etc.). */
   readonly playback: PlaybackNamespace;
+  /** Provides access to the playback metadata namespace (current track info). */
   readonly playbackMetadata: PlaybackMetadataNamespace;
+  /** Provides access to the favorites namespace (list and load Sonos favorites). */
   readonly favorites: FavoritesNamespace;
+  /** Provides access to the playlists namespace (list and load Sonos playlists). */
   readonly playlists: PlaylistsNamespace;
+  /** Provides access to the audio clip namespace (play notification sounds). */
   readonly audioClip: AudioClipNamespace;
+  /** Provides access to the home theater namespace (night mode, dialog enhancement, etc.). */
   readonly homeTheater: HomeTheaterNamespace;
+  /** Provides access to the settings namespace (player settings and properties). */
   readonly settings: SettingsNamespace;
 
   constructor(options: SonosClientOptions) {
@@ -114,14 +158,23 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
     this.connection.on('message', (msg) => this.handleEvent(msg));
   }
 
+  /** Whether the WebSocket connection is currently open and ready. */
   get connected(): boolean {
     return this.connection.state === 'connected';
   }
 
+  /** Current connection state (`disconnected`, `connecting`, `connected`, or `reconnecting`). */
   get connectionState() {
     return this.connection.state;
   }
 
+  /**
+   * Connects to the Sonos speaker over WebSocket.
+   *
+   * If `householdId`, `groupId`, or `playerId` were not provided in the
+   * constructor options, they are automatically discovered from the device
+   * during this call.
+   */
   async connect(): Promise<void> {
     await this.connection.connect();
 
@@ -165,10 +218,17 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
     }
   }
 
+  /** Gracefully closes the WebSocket connection to the Sonos speaker. */
   async disconnect(): Promise<void> {
     await this.connection.disconnect();
   }
 
+  /**
+   * Re-fetches the group topology from the speaker and updates
+   * {@link groupId}, {@link playerId}, and {@link coordinatorId}.
+   *
+   * @returns The groups response from the device.
+   */
   async refreshGroups() {
     const result = await this.groups.getGroups();
     this.log.debug('Refreshing group topology');
