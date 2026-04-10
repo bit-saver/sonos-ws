@@ -37,10 +37,12 @@ __export(index_exports, {
   ErrorCode: () => ErrorCode,
   NAMESPACE_EVENT_MAP: () => NAMESPACE_EVENT_MAP,
   PlaybackState: () => PlaybackState,
+  PlayerHandle: () => PlayerHandle,
   QueueAction: () => QueueAction,
   SonosClient: () => SonosClient,
   SonosDiscovery: () => SonosDiscovery,
   SonosError: () => SonosError,
+  SonosHousehold: () => SonosHousehold,
   TimeoutError: () => TimeoutError,
   consoleLogger: () => consoleLogger,
   noopLogger: () => noopLogger
@@ -155,6 +157,8 @@ var ErrorCode = /* @__PURE__ */ ((ErrorCode2) => {
   ErrorCode2["ERROR_COMMAND_FAILED"] = "ERROR_COMMAND_FAILED";
   ErrorCode2["ERROR_NOT_CAPABLE"] = "ERROR_NOT_CAPABLE";
   ErrorCode2["ERROR_NO_CONTENT"] = "ERROR_NO_CONTENT";
+  ErrorCode2["PLAYER_NOT_FOUND"] = "PLAYER_NOT_FOUND";
+  ErrorCode2["GROUP_OPERATION_FAILED"] = "GROUP_OPERATION_FAILED";
   return ErrorCode2;
 })(ErrorCode || {});
 
@@ -1078,6 +1082,14 @@ var SonosClient = class extends TypedEventEmitter {
     return this.connection.state;
   }
   /**
+   * The underlying WebSocket connection.
+   * Exposed for advanced use cases like {@link SonosHousehold}.
+   * @internal
+   */
+  get rawConnection() {
+    return this.connection;
+  }
+  /**
    * Connects to the Sonos speaker over WebSocket.
    *
    * If `householdId`, `groupId`, or `playerId` were not provided in the
@@ -1197,6 +1209,380 @@ function resolveReconnectOptions(input) {
   }
   return { ...DEFAULT_RECONNECT, ...input };
 }
+
+// src/household/PlayerHandle.ts
+var PlayerHandle = class {
+  /** RINCON player ID. */
+  id;
+  /** Display name (e.g. "Arc", "Office"). */
+  name;
+  /** Player capabilities from the Sonos API. */
+  capabilities;
+  _group;
+  householdId;
+  context;
+  /** Group volume control — targets this player's group. */
+  groupVolume;
+  /** Individual player volume control. */
+  playerVolume;
+  /** Group topology management. */
+  groups;
+  /** Playback control — targets this player's group. */
+  playback;
+  /** Playback metadata — targets this player's group. */
+  playbackMetadata;
+  /** Favorites access. */
+  favorites;
+  /** Playlists access. */
+  playlists;
+  /** Audio clip playback. */
+  audioClip;
+  /** Home theater settings (only meaningful for HT players like Arc). */
+  homeTheater;
+  /** Player settings. */
+  settings;
+  constructor(player, group, householdId, connection) {
+    this.id = player.id;
+    this.name = player.name;
+    this.capabilities = player.capabilities;
+    this._group = group;
+    this.householdId = householdId;
+    this.context = {
+      connection,
+      getHouseholdId: () => this.householdId,
+      getGroupId: () => this._group.id,
+      getPlayerId: () => this.id
+    };
+    this.groupVolume = new GroupVolumeNamespace(this.context);
+    this.playerVolume = new PlayerVolumeNamespace(this.context);
+    this.groups = new GroupsNamespace(this.context);
+    this.playback = new PlaybackNamespace(this.context);
+    this.playbackMetadata = new PlaybackMetadataNamespace(this.context);
+    this.favorites = new FavoritesNamespace(this.context);
+    this.playlists = new PlaylistsNamespace(this.context);
+    this.audioClip = new AudioClipNamespace(this.context);
+    this.homeTheater = new HomeTheaterNamespace(this.context);
+    this.settings = new SettingsNamespace(this.context);
+  }
+  /** Current group ID this player belongs to. Updated automatically on topology changes. */
+  get groupId() {
+    return this._group.id;
+  }
+  /** Whether this player is the coordinator of its current group. */
+  get isCoordinator() {
+    return this._group.coordinatorId === this.id;
+  }
+  /**
+   * Updates the group this player belongs to.
+   * Called internally by {@link SonosHousehold} when topology changes.
+   * @internal
+   */
+  updateGroup(group) {
+    this._group = group;
+  }
+};
+
+// src/household/SonosHousehold.ts
+var SonosHousehold = class extends TypedEventEmitter {
+  client;
+  log;
+  _players = /* @__PURE__ */ new Map();
+  _groups = [];
+  _rawPlayers = [];
+  constructor(options) {
+    super();
+    this.log = options.logger ?? noopLogger;
+    this.client = new SonosClient({
+      host: options.host,
+      port: options.port,
+      reconnect: options.reconnect,
+      logger: options.logger,
+      requestTimeout: options.requestTimeout
+    });
+    this.client.on("connected", () => {
+      this.refreshTopology().catch((err) => {
+        this.log.warn("Failed to refresh topology on reconnect", err);
+      });
+      this.emit("connected");
+    });
+    this.client.on("disconnected", (reason) => this.emit("disconnected", reason));
+    this.client.on("reconnecting", (attempt, delay) => this.emit("reconnecting", attempt, delay));
+    this.client.on("error", (err) => this.emit("error", err));
+    this.client.on("rawMessage", (msg) => this.emit("rawMessage", msg));
+    this.client.on("groupVolumeChanged", (data) => this.emit("groupVolumeChanged", data));
+    this.client.on("playerVolumeChanged", (data) => this.emit("playerVolumeChanged", data));
+    this.client.on("groupsChanged", (data) => this.emit("groupsChanged", data));
+    this.client.on("playbackStatusChanged", (data) => this.emit("playbackStatusChanged", data));
+    this.client.on("metadataStatusChanged", (data) => this.emit("metadataStatusChanged", data));
+    this.client.on("favoritesChanged", (data) => this.emit("favoritesChanged", data));
+    this.client.on("playlistsChanged", (data) => this.emit("playlistsChanged", data));
+    this.client.on("homeTheaterChanged", (data) => this.emit("homeTheaterChanged", data));
+    this.client.on("groupCoordinatorChanged", (data) => {
+      this.emit("groupCoordinatorChanged", data);
+      this.refreshTopology().catch((err) => {
+        this.log.warn("Failed to refresh topology after coordinator change", err);
+      });
+    });
+  }
+  /** All discovered players in the household, keyed by RINCON player ID. */
+  get players() {
+    return this._players;
+  }
+  /** All current groups in the household. */
+  get groups() {
+    return this._groups;
+  }
+  /** The Sonos household ID. */
+  get householdId() {
+    return this.client.householdId;
+  }
+  /** Whether the WebSocket connection is currently open. */
+  get connected() {
+    return this.client.connected;
+  }
+  /**
+   * Connects to the Sonos speaker and discovers the household topology.
+   * Populates {@link players} and {@link groups}.
+   */
+  async connect() {
+    await this.client.connect();
+    await this.refreshTopology();
+  }
+  /** Gracefully closes the WebSocket connection. */
+  async disconnect() {
+    await this.client.disconnect();
+  }
+  /**
+   * Gets a player handle by display name (case-insensitive) or RINCON ID.
+   *
+   * @param nameOrId - Player display name (e.g. "Arc") or RINCON ID.
+   * @returns The player handle.
+   * @throws {SonosError} With code `PLAYER_NOT_FOUND` if not found.
+   */
+  player(nameOrId) {
+    const byId = this._players.get(nameOrId);
+    if (byId) return byId;
+    const lower = nameOrId.toLowerCase();
+    for (const handle of this._players.values()) {
+      if (handle.name.toLowerCase() === lower) return handle;
+    }
+    throw new SonosError(
+      "PLAYER_NOT_FOUND" /* PLAYER_NOT_FOUND */,
+      `Player not found: "${nameOrId}". Available: ${[...this._players.values()].map((p) => p.name).join(", ")}`
+    );
+  }
+  /**
+   * Refreshes the household topology from the Sonos device.
+   * Updates all player handles with their current group assignments.
+   * @internal
+   */
+  async refreshTopology() {
+    const result = await this.client.groups.getGroups();
+    this._groups = result.groups;
+    this._rawPlayers = result.players;
+    const connection = this.client.rawConnection;
+    const householdId = this.client.householdId ?? "";
+    for (const player of result.players) {
+      const group = result.groups.find((g) => g.playerIds.includes(player.id));
+      if (!group) continue;
+      const existing = this._players.get(player.id);
+      if (existing) {
+        existing.updateGroup(group);
+      } else {
+        this._players.set(player.id, new PlayerHandle(player, group, householdId, connection));
+      }
+    }
+    for (const [id] of this._players) {
+      if (!result.players.some((p) => p.id === id)) {
+        this._players.delete(id);
+      }
+    }
+    this.emit("topologyChanged", this._groups, this._rawPlayers);
+    this.log.debug(`Topology refreshed: ${this._players.size} players, ${this._groups.length} groups`);
+    return result;
+  }
+  /**
+   * Groups the specified players. The first player in the array becomes the coordinator.
+   *
+   * @param players - Players to group. First player becomes coordinator.
+   * @param options - Grouping options including audio transfer behavior.
+   * @throws {SonosError} With code `INVALID_PARAMETER` if players array is empty.
+   */
+  async group(players, options) {
+    if (players.length === 0) {
+      throw new SonosError("ERROR_INVALID_PARAMETER" /* ERROR_INVALID_PARAMETER */, "INVALID_PARAMETER: group() requires at least one player");
+    }
+    if (players.length === 1) {
+      const player = players[0];
+      const group = this._groups.find((g) => g.playerIds.includes(player.id));
+      if (group && group.playerIds.length === 1) return;
+      await this.client.groups.createGroup([player.id]);
+      await this.refreshTopology();
+      return;
+    }
+    const desiredCoordinator = players[0];
+    const desiredMemberIds = players.map((p) => p.id);
+    const currentGroup = this._groups.find((g) => g.playerIds.includes(desiredCoordinator.id));
+    if (currentGroup && currentGroup.coordinatorId === desiredCoordinator.id && currentGroup.playerIds.length === desiredMemberIds.length && desiredMemberIds.every((id) => currentGroup.playerIds.includes(id))) {
+      if (!options?.transfer) return;
+    }
+    let audioSource;
+    if (options?.transfer) {
+      audioSource = this.resolveAudioSource(players, options.transfer);
+    }
+    if (audioSource && audioSource.id !== desiredCoordinator.id) {
+      await this.transferAudio(audioSource, desiredCoordinator, desiredMemberIds);
+    } else {
+      await this.simpleGroup(desiredCoordinator, desiredMemberIds);
+    }
+    await this.refreshTopology();
+  }
+  /**
+   * Removes a player from its current group. No-op if already solo.
+   *
+   * @param player - The player to ungroup.
+   */
+  async ungroup(player) {
+    const group = this._groups.find((g) => g.playerIds.includes(player.id));
+    if (!group || group.playerIds.length === 1) return;
+    await this.client.groups.createGroup([player.id]);
+    await this.refreshTopology();
+  }
+  /**
+   * Ungroups all players in the household. Each becomes its own group.
+   */
+  async ungroupAll() {
+    const multiPlayerGroups = this._groups.filter((g) => g.playerIds.length > 1);
+    for (const group of multiPlayerGroups) {
+      for (const playerId of group.playerIds) {
+        if (playerId !== group.coordinatorId) {
+          await this.client.groups.createGroup([playerId]);
+        }
+      }
+    }
+    if (multiPlayerGroups.length > 0) {
+      await this.refreshTopology();
+    }
+  }
+  /**
+   * Resolves the audio source player based on the `transfer` option.
+   * @returns The player with audio, or undefined if nothing is playing.
+   */
+  resolveAudioSource(targetPlayers, transfer) {
+    if (typeof transfer === "object") {
+      const source = this._players.get(transfer.id);
+      if (!source) {
+        throw new SonosError("PLAYER_NOT_FOUND" /* PLAYER_NOT_FOUND */, `Transfer source not found: ${transfer.id}`);
+      }
+      const sourceGroup = this._groups.find((g) => g.playerIds.includes(source.id));
+      if (!sourceGroup || sourceGroup.playbackState === "PLAYBACK_STATE_IDLE") {
+        throw new SonosError("ERROR_NO_CONTENT" /* ERROR_NO_CONTENT */, `Transfer source "${source.name}" has no content`);
+      }
+      return source;
+    }
+    const targetIds = new Set(targetPlayers.map((p) => p.id));
+    for (const player of targetPlayers) {
+      const group = this._groups.find((g) => g.playerIds.includes(player.id));
+      if (group?.playbackState === "PLAYBACK_STATE_PLAYING") return player;
+    }
+    for (const player of targetPlayers) {
+      const group = this._groups.find((g) => g.playerIds.includes(player.id));
+      if (group?.playbackState === "PLAYBACK_STATE_PAUSED") return player;
+    }
+    for (const group of this._groups) {
+      if (group.playbackState === "PLAYBACK_STATE_PLAYING") {
+        const coordinatorHandle = this._players.get(group.coordinatorId);
+        if (coordinatorHandle && !targetIds.has(coordinatorHandle.id)) return coordinatorHandle;
+      }
+    }
+    for (const group of this._groups) {
+      if (group.playbackState === "PLAYBACK_STATE_PAUSED") {
+        const coordinatorHandle = this._players.get(group.coordinatorId);
+        if (coordinatorHandle && !targetIds.has(coordinatorHandle.id)) return coordinatorHandle;
+      }
+    }
+    return void 0;
+  }
+  /**
+   * Performs a simple group operation: ensures the coordinator owns a group
+   * with exactly the desired members.
+   */
+  async simpleGroup(coordinator, memberIds) {
+    const currentGroup = this._groups.find((g) => g.playerIds.includes(coordinator.id));
+    if (!currentGroup) return;
+    if (currentGroup.coordinatorId !== coordinator.id) {
+      await this.client.groups.createGroup([coordinator.id]);
+      await this.refreshTopology();
+    }
+    const othersToAdd = memberIds.filter((id) => id !== coordinator.id);
+    if (othersToAdd.length > 0) {
+      const coordGroup = this._groups.find((g) => g.coordinatorId === coordinator.id);
+      if (coordGroup) {
+        const currentGroupId = this.client.groupId;
+        this.client.groupId = coordGroup.id;
+        try {
+          const currentMembers = coordGroup.playerIds.filter((id) => id !== coordinator.id);
+          const toRemove = currentMembers.filter((id) => !memberIds.includes(id));
+          const toAdd = othersToAdd.filter((id) => !coordGroup.playerIds.includes(id));
+          if (toAdd.length > 0 || toRemove.length > 0) {
+            await this.client.groups.modifyGroupMembers(
+              toAdd.length > 0 ? toAdd : void 0,
+              toRemove.length > 0 ? toRemove : void 0
+            );
+          }
+        } finally {
+          this.client.groupId = currentGroupId;
+        }
+      }
+    }
+  }
+  /**
+   * Transfers audio from a source player to a target coordinator using
+   * the coordinator shuffle technique.
+   *
+   * 1. Add target to source's group
+   * 2. Remove source from group (expected ~8s timeout)
+   * 3. Target inherits audio
+   * 4. Add remaining members
+   */
+  async transferAudio(source, targetCoordinator, allMemberIds) {
+    const sourceGroup = this._groups.find((g) => g.coordinatorId === source.id) ?? this._groups.find((g) => g.playerIds.includes(source.id));
+    if (!sourceGroup) {
+      throw new SonosError("GROUP_OPERATION_FAILED" /* GROUP_OPERATION_FAILED */, `Could not find group for source player "${source.name}"`);
+    }
+    const savedGroupId = this.client.groupId;
+    this.client.groupId = sourceGroup.id;
+    try {
+      if (!sourceGroup.playerIds.includes(targetCoordinator.id)) {
+        await this.client.groups.modifyGroupMembers([targetCoordinator.id]);
+      }
+      try {
+        await this.client.groups.modifyGroupMembers([], [source.id]);
+      } catch (err) {
+        if (!(err instanceof TimeoutError)) throw err;
+        this.log.debug("Expected timeout during coordinator transfer");
+      }
+    } finally {
+      this.client.groupId = savedGroupId;
+    }
+    await this.refreshTopology();
+    const remaining = allMemberIds.filter((id) => id !== targetCoordinator.id && id !== source.id);
+    if (remaining.length > 0) {
+      const targetGroup = this._groups.find((g) => g.coordinatorId === targetCoordinator.id);
+      if (targetGroup) {
+        const toAdd = remaining.filter((id) => !targetGroup.playerIds.includes(id));
+        if (toAdd.length > 0) {
+          this.client.groupId = targetGroup.id;
+          try {
+            await this.client.groups.modifyGroupMembers(toAdd);
+          } finally {
+            this.client.groupId = savedGroupId;
+          }
+        }
+      }
+    }
+  }
+};
 
 // src/discovery/SsdpDiscovery.ts
 var import_node_dgram = require("dgram");
@@ -1340,10 +1726,12 @@ var ClipPriority = /* @__PURE__ */ ((ClipPriority2) => {
   ErrorCode,
   NAMESPACE_EVENT_MAP,
   PlaybackState,
+  PlayerHandle,
   QueueAction,
   SonosClient,
   SonosDiscovery,
   SonosError,
+  SonosHousehold,
   TimeoutError,
   consoleLogger,
   noopLogger

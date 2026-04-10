@@ -2,6 +2,10 @@ export { SonosClient } from './client/SonosClient.js';
 export type { SonosClientOptions } from './client/SonosClient.js';
 export type { ReconnectOptions, ConnectionState } from './client/SonosConnection.js';
 
+export { SonosHousehold } from './household/SonosHousehold.js';
+export type { SonosHouseholdOptions } from './household/SonosHousehold.js';
+export { PlayerHandle } from './household/PlayerHandle.js';
+
 export { SonosDiscovery } from './discovery/SsdpDiscovery.js';
 export type { DiscoveryOptions, DiscoveredDevice } from './discovery/SsdpDiscovery.js';
 
