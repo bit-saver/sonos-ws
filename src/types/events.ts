@@ -8,6 +8,19 @@ import type { HomeTheaterOptions } from './homeTheater.js';
 import type { SonosResponse } from './messages.js';
 import type { SonosError } from '../errors/SonosError.js';
 
+/** Event data emitted when a group's coordinator changes (speakers grouped or ungrouped). */
+export interface GroupCoordinatorChangedEvent {
+  _objectType: 'groupCoordinatorChanged';
+  /** Status of the group change (e.g. `"GROUP_STATUS_MOVED"`). */
+  groupStatus: string;
+  /** Name of the new group (e.g. `"Bedroom + 1"`). */
+  groupName: string;
+  /** WebSocket URL of the new group coordinator. */
+  websocketUrl: string;
+  /** Player ID of the new group coordinator. */
+  playerId: string;
+}
+
 /**
  * All events emitted by {@link SonosClient}.
  *
@@ -40,6 +53,13 @@ export interface SonosEvents {
   playlistsChanged: (data: PlaylistsResponse) => void;
   /** Emitted when home theater settings (night mode, dialog enhancement) change. */
   homeTheaterChanged: (data: HomeTheaterOptions) => void;
+
+  /**
+   * Emitted when the group coordinator changes (e.g. speakers grouped/ungrouped).
+   * The client automatically calls {@link SonosClient.refreshGroups} to update
+   * its internal groupId. Listen to this event to react to topology changes.
+   */
+  groupCoordinatorChanged: (data: GroupCoordinatorChangedEvent) => void;
 
   /** Emitted for every raw WebSocket message received from the Sonos device. Useful for debugging. */
   rawMessage: (message: SonosResponse) => void;

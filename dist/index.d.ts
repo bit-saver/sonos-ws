@@ -589,6 +589,18 @@ declare class SonosError extends Error {
     });
 }
 
+/** Event data emitted when a group's coordinator changes (speakers grouped or ungrouped). */
+interface GroupCoordinatorChangedEvent {
+    _objectType: 'groupCoordinatorChanged';
+    /** Status of the group change (e.g. `"GROUP_STATUS_MOVED"`). */
+    groupStatus: string;
+    /** Name of the new group (e.g. `"Bedroom + 1"`). */
+    groupName: string;
+    /** WebSocket URL of the new group coordinator. */
+    websocketUrl: string;
+    /** Player ID of the new group coordinator. */
+    playerId: string;
+}
 /**
  * All events emitted by {@link SonosClient}.
  *
@@ -620,6 +632,12 @@ interface SonosEvents {
     playlistsChanged: (data: PlaylistsResponse) => void;
     /** Emitted when home theater settings (night mode, dialog enhancement) change. */
     homeTheaterChanged: (data: HomeTheaterOptions) => void;
+    /**
+     * Emitted when the group coordinator changes (e.g. speakers grouped/ungrouped).
+     * The client automatically calls {@link SonosClient.refreshGroups} to update
+     * its internal groupId. Listen to this event to react to topology changes.
+     */
+    groupCoordinatorChanged: (data: GroupCoordinatorChangedEvent) => void;
     /** Emitted for every raw WebSocket message received from the Sonos device. Useful for debugging. */
     rawMessage: (message: SonosResponse) => void;
 }
@@ -1145,6 +1163,9 @@ declare class SonosClient extends TypedEventEmitter<SonosEvents> {
      * Re-fetches the group topology from the speaker and updates
      * {@link groupId}, {@link playerId}, and {@link coordinatorId}.
      *
+     * Finds the group containing the connected player (by {@link playerId}).
+     * If no player ID is known yet, falls back to the first group.
+     *
      * @returns The groups response from the device.
      */
     refreshGroups(): Promise<GroupsResponse>;
@@ -1267,4 +1288,4 @@ declare class TimeoutError extends SonosError {
     });
 }
 
-export { type AudioClipResponse, ClipPriority, ClipType, CommandError, ConnectionError, type ConnectionState, type Container, type CreateGroupResponse, type DiscoveredDevice, type DiscoveryOptions, ErrorCode, type Favorite, type FavoritesResponse, type Group, type GroupVolumeStatus, type GroupsResponse, type HomeTheaterOptions, type LoadAudioClipOptions, type LoadFavoriteOptions, type LoadLineInOptions, type LoadPlaylistOptions, type LogLevel, type Logger, type MessageHeaders, type MetadataStatus, type ModifyGroupResponse, NAMESPACE_EVENT_MAP, type PlayModes, type PlaybackActions, PlaybackState, type PlaybackStatus, type Player, type PlayerCapability, type PlayerSettings, type PlayerVolumeStatus, type Playlist, type PlaylistResponse, type PlaylistTrack, type PlaylistsResponse, QueueAction, type ReconnectOptions, type ServiceInfo, SonosClient, type SonosClientOptions, SonosDiscovery, SonosError, type SonosEvents, type SonosRequest, type SonosResponse, TimeoutError, type Track, type TrackInfo, type VolumeResponse, consoleLogger, noopLogger };
+export { type AudioClipResponse, ClipPriority, ClipType, CommandError, ConnectionError, type ConnectionState, type Container, type CreateGroupResponse, type DiscoveredDevice, type DiscoveryOptions, ErrorCode, type Favorite, type FavoritesResponse, type Group, type GroupCoordinatorChangedEvent, type GroupVolumeStatus, type GroupsResponse, type HomeTheaterOptions, type LoadAudioClipOptions, type LoadFavoriteOptions, type LoadLineInOptions, type LoadPlaylistOptions, type LogLevel, type Logger, type MessageHeaders, type MetadataStatus, type ModifyGroupResponse, NAMESPACE_EVENT_MAP, type PlayModes, type PlaybackActions, PlaybackState, type PlaybackStatus, type Player, type PlayerCapability, type PlayerSettings, type PlayerVolumeStatus, type Playlist, type PlaylistResponse, type PlaylistTrack, type PlaylistsResponse, QueueAction, type ReconnectOptions, type ServiceInfo, SonosClient, type SonosClientOptions, SonosDiscovery, SonosError, type SonosEvents, type SonosRequest, type SonosResponse, TimeoutError, type Track, type TrackInfo, type VolumeResponse, consoleLogger, noopLogger };

@@ -227,20 +227,27 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
    * Re-fetches the group topology from the speaker and updates
    * {@link groupId}, {@link playerId}, and {@link coordinatorId}.
    *
+   * Finds the group containing the connected player (by {@link playerId}).
+   * If no player ID is known yet, falls back to the first group.
+   *
    * @returns The groups response from the device.
    */
   async refreshGroups() {
     const result = await this.groups.getGroups();
     this.log.debug('Refreshing group topology');
 
-    const firstGroup = result.groups[0];
-    if (firstGroup) {
-      if (!this.groupId) this.groupId = firstGroup.id;
-      if (!this.coordinatorId) this.coordinatorId = firstGroup.coordinatorId;
-      if (!this.playerId) this.playerId = firstGroup.coordinatorId;
+    // Find the group containing our player, or fall back to the first group
+    const targetGroup = this.playerId
+      ? result.groups.find((g) => g.playerIds.includes(this.playerId!))
+      : undefined;
+    const group = targetGroup ?? result.groups[0];
 
-      // Derive householdId from the group ID (format: "RINCON_xxx:nnn")
-      // or from the response if available
+    if (group) {
+      const oldGroupId = this.groupId;
+      this.groupId = group.id;
+      this.coordinatorId = group.coordinatorId;
+      if (!this.playerId) this.playerId = group.coordinatorId;
+
       if (!this.householdId) {
         const responseHouseholdId = (result as unknown as Record<string, unknown>).householdId as string | undefined;
         if (responseHouseholdId) {
@@ -248,8 +255,12 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
         }
       }
 
+      if (oldGroupId && oldGroupId !== this.groupId) {
+        this.log.info(`Group changed: ${oldGroupId} → ${this.groupId}`);
+      }
+
       this.log.debug(
-        `Topology: household=${this.householdId ?? 'unknown'} group=${this.groupId} player=${this.playerId}`,
+        `Topology: household=${this.householdId ?? 'unknown'} group=${this.groupId} coordinator=${this.coordinatorId} player=${this.playerId}`,
       );
     }
 
@@ -279,6 +290,18 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
     if (!this.householdId && headers.householdId) {
       this.householdId = headers.householdId;
       this.log.debug(`Discovered householdId: ${this.householdId}`);
+    }
+
+    // Handle group coordinator changes — refresh topology automatically
+    const objectType = body?._objectType as string | undefined;
+    if (objectType === 'groupCoordinatorChanged') {
+      this.log.info(`Group coordinator changed: ${body?.groupStatus} — refreshing topology`);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (this.emit as any)('groupCoordinatorChanged', body);
+      this.refreshGroups().catch((err) => {
+        this.log.warn('Failed to refresh groups after coordinator change', err);
+      });
+      return;
     }
 
     const eventName = NAMESPACE_EVENT_MAP[namespace];
