@@ -169,6 +169,15 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
   }
 
   /**
+   * The underlying WebSocket connection.
+   * Exposed for advanced use cases like {@link SonosHousehold}.
+   * @internal
+   */
+  get rawConnection(): SonosConnection {
+    return this.connection;
+  }
+
+  /**
    * Connects to the Sonos speaker over WebSocket.
    *
    * If `householdId`, `groupId`, or `playerId` were not provided in the
