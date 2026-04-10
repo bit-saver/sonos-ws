@@ -1612,11 +1612,8 @@ var SonosHousehold = class extends TypedEventEmitter {
     }
     await new Promise((r) => setTimeout(r, 500));
     await this.refreshTopology();
-    this.log.debug(`After shuffle: target ${targetCoordinator.name} groupId=${targetCoordinator.groupId}`);
     const targetGroup = this._groups.find((g) => g.coordinatorId === targetCoordinator.id);
-    this.log.debug(`Target group: ${targetGroup?.id} members=${targetGroup?.playerIds?.length}`);
     const remaining = allMemberIds.filter((id) => id !== targetCoordinator.id);
-    this.log.debug(`Remaining to add: ${remaining.length} ids`);
     if (remaining.length > 0) {
       const toAdd = remaining.filter((id) => !targetGroup?.playerIds.includes(id));
       this.log.debug(`toAdd after filter: ${toAdd.length} ids`);
