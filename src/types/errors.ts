@@ -32,4 +32,8 @@ export enum ErrorCode {
   ERROR_NOT_CAPABLE = 'ERROR_NOT_CAPABLE',
   /** The requested content is not available or has no playable items. */
   ERROR_NO_CONTENT = 'ERROR_NO_CONTENT',
+  /** The specified player name or ID was not found in the household topology. */
+  PLAYER_NOT_FOUND = 'PLAYER_NOT_FOUND',
+  /** A multi-step group operation failed partway through. */
+  GROUP_OPERATION_FAILED = 'GROUP_OPERATION_FAILED',
 }

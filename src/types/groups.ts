@@ -79,3 +79,19 @@ export interface ModifyGroupResponse {
   /** The modified group. */
   group: Group;
 }
+
+/**
+ * Options for {@link SonosHousehold.group}.
+ */
+export interface GroupOptions {
+  /**
+   * Audio transfer behavior:
+   * - `undefined` (default): just group; if a target player is playing, its audio continues.
+   * - `true`: automatically find the active audio source and transfer it.
+   *   Checks target players first (by array order), then the rest of the household.
+   *   Prefers `PLAYING` over `PAUSED`. If nothing is playing anywhere, groups silently.
+   * - A player handle reference: transfer audio from that specific player.
+   *   Throws if that player is not actively playing or paused.
+   */
+  transfer?: boolean | { readonly id: string };
+}

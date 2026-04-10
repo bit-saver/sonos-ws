@@ -1,5 +1,5 @@
 import type { GroupVolumeStatus, PlayerVolumeStatus } from './volume.js';
-import type { GroupsResponse } from './groups.js';
+import type { Group, Player, GroupsResponse } from './groups.js';
 import type { PlaybackStatus } from './playback.js';
 import type { MetadataStatus } from './metadata.js';
 import type { FavoritesResponse } from './favorites.js';
@@ -63,6 +63,15 @@ export interface SonosEvents {
 
   /** Emitted for every raw WebSocket message received from the Sonos device. Useful for debugging. */
   rawMessage: (message: SonosResponse) => void;
+}
+
+/**
+ * Events emitted by {@link SonosHousehold}.
+ * Extends all {@link SonosEvents} and adds household-level topology events.
+ */
+export interface SonosHouseholdEvents extends SonosEvents {
+  /** Emitted when group topology changes (groups/players added/removed/reorganized). */
+  topologyChanged: (groups: Group[], players: Player[]) => void;
 }
 
 /**
