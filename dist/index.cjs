@@ -30,24 +30,34 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/index.ts
 var index_exports = {};
 __export(index_exports, {
+  AudioClipControl: () => AudioClipControl,
   ClipPriority: () => ClipPriority,
   ClipType: () => ClipType,
   CommandError: () => CommandError,
   ConnectionError: () => ConnectionError,
   ErrorCode: () => ErrorCode,
+  FavoritesAccess: () => FavoritesAccess,
+  HomeTheaterControl: () => HomeTheaterControl,
   NAMESPACE_EVENT_MAP: () => NAMESPACE_EVENT_MAP,
+  PlaybackControl: () => PlaybackControl,
   PlaybackState: () => PlaybackState,
   PlayerHandle: () => PlayerHandle,
+  PlaylistsAccess: () => PlaylistsAccess,
   QueueAction: () => QueueAction,
+  SettingsControl: () => SettingsControl,
   SonosClient: () => SonosClient,
   SonosDiscovery: () => SonosDiscovery,
   SonosError: () => SonosError,
   SonosHousehold: () => SonosHousehold,
   TimeoutError: () => TimeoutError,
+  VolumeControl: () => VolumeControl,
   consoleLogger: () => consoleLogger,
   noopLogger: () => noopLogger
 });
 module.exports = __toCommonJS(index_exports);
+
+// src/client/SonosConnection.ts
+var import_ws = __toESM(require("ws"), 1);
 
 // src/util/TypedEventEmitter.ts
 var import_node_events = require("events");
@@ -138,9 +148,6 @@ var consoleLogger = {
   info: (msg, ...args) => console.info(`[sonos-ws] ${msg}`, ...args),
   debug: (msg, ...args) => console.debug(`[sonos-ws] ${msg}`, ...args)
 };
-
-// src/client/SonosConnection.ts
-var import_ws = __toESM(require("ws"), 1);
 
 // src/types/errors.ts
 var ErrorCode = /* @__PURE__ */ ((ErrorCode2) => {
@@ -472,7 +479,6 @@ var SonosConnection = class extends TypedEventEmitter {
     this.ws.send(JSON.stringify(request));
     const response = await promise;
     const [resHeaders, resBody] = response;
-    this.emit("message", response);
     if (resHeaders.success === false) {
       const errorCode = resBody?.errorCode ?? resHeaders.response ?? "UNKNOWN";
       const reason = resBody?.reason ?? `Command failed: ${namespace}.${command}`;
@@ -555,11 +561,11 @@ var SonosConnection = class extends TypedEventEmitter {
 
 // src/types/events.ts
 var NAMESPACE_EVENT_MAP = {
-  "groupVolume:1": "groupVolumeChanged",
+  "groupVolume:1": "volumeChanged",
   "playerVolume:1": "playerVolumeChanged",
   "groups:1": "groupsChanged",
-  "playback:1": "playbackStatusChanged",
-  "playbackMetadata:1": "metadataStatusChanged",
+  "playback:1": "playbackChanged",
+  "playbackMetadata:1": "metadataChanged",
   "favorites:1": "favoritesChanged",
   "playlists:1": "playlistsChanged",
   "homeTheater:1": "homeTheaterChanged"
@@ -637,6 +643,52 @@ var BaseNamespace = class {
   /** Extract the body (second element) from a response. */
   body(response) {
     return response[1];
+  }
+};
+
+// src/namespaces/GroupsNamespace.ts
+var GroupsNamespace = class extends BaseNamespace {
+  namespace = "groups:1";
+  /**
+   * Gets all groups and players in the household.
+   *
+   * @returns The complete list of groups, their member players, and all known players.
+   */
+  async getGroups() {
+    const response = await this.send("getGroups");
+    return this.body(response);
+  }
+  /**
+   * Creates a new group from the specified player IDs.
+   *
+   * @param playerIds - The IDs of the players to include in the new group.
+   * @returns The newly created group's details.
+   */
+  async createGroup(playerIds) {
+    const response = await this.send("createGroup", { playerIds });
+    return this.body(response);
+  }
+  /**
+   * Adds or removes players from the current group.
+   *
+   * @param playerIdsToAdd - Player IDs to add to the group.
+   * @param playerIdsToRemove - Player IDs to remove from the group.
+   * @returns The modified group's details.
+   */
+  async modifyGroupMembers(playerIdsToAdd, playerIdsToRemove) {
+    const body = {};
+    if (playerIdsToAdd) body.playerIdsToAdd = playerIdsToAdd;
+    if (playerIdsToRemove) body.playerIdsToRemove = playerIdsToRemove;
+    const response = await this.send("modifyGroupMembers", body);
+    return this.body(response);
+  }
+  /**
+   * Replaces all members of the current group with the specified players.
+   *
+   * @param playerIds - The player IDs that should form the new membership of the group.
+   */
+  async setGroupMembers(playerIds) {
+    await this.send("setGroupMembers", { playerIds });
   }
 };
 
@@ -723,50 +775,93 @@ var PlayerVolumeNamespace = class extends BaseNamespace {
   }
 };
 
-// src/namespaces/GroupsNamespace.ts
-var GroupsNamespace = class extends BaseNamespace {
-  namespace = "groups:1";
-  /**
-   * Gets all groups and players in the household.
-   *
-   * @returns The complete list of groups, their member players, and all known players.
-   */
-  async getGroups() {
-    const response = await this.send("getGroups");
-    return this.body(response);
+// src/player/VolumeControl.ts
+var VolumeControl = class {
+  group;
+  _player;
+  constructor(context) {
+    this.group = new GroupVolumeNamespace(context);
+    this._player = new PlayerVolumeNamespace(context);
+  }
+  /** Gets the current group volume level and mute status. */
+  async get() {
+    return this.group.getVolume();
   }
   /**
-   * Creates a new group from the specified player IDs.
-   *
-   * @param playerIds - The IDs of the players to include in the new group.
-   * @returns The newly created group's details.
+   * Sets the absolute group volume.
+   * @param volume - Volume level (0–100).
    */
-  async createGroup(playerIds) {
-    const response = await this.send("createGroup", { playerIds });
-    return this.body(response);
+  async set(volume) {
+    return this.group.setVolume(volume);
   }
   /**
-   * Adds or removes players from the current group.
-   *
-   * @param playerIdsToAdd - Player IDs to add to the group.
-   * @param playerIdsToRemove - Player IDs to remove from the group.
-   * @returns The modified group's details.
+   * Adjusts the group volume by a relative amount.
+   * @param delta - Amount to adjust (positive to increase, negative to decrease).
+   * @returns The resulting volume level.
    */
-  async modifyGroupMembers(playerIdsToAdd, playerIdsToRemove) {
-    const body = {};
-    if (playerIdsToAdd) body.playerIdsToAdd = playerIdsToAdd;
-    if (playerIdsToRemove) body.playerIdsToRemove = playerIdsToRemove;
-    const response = await this.send("modifyGroupMembers", body);
-    return this.body(response);
+  async relative(delta) {
+    return this.group.setRelativeVolume(delta);
   }
   /**
-   * Replaces all members of the current group with the specified players.
-   *
-   * @param playerIds - The player IDs that should form the new membership of the group.
+   * Mutes or unmutes the entire group.
+   * @param muted - `true` to mute, `false` to unmute.
    */
-  async setGroupMembers(playerIds) {
-    await this.send("setGroupMembers", { playerIds });
+  async mute(muted) {
+    return this.group.setMute(muted);
   }
+  /**
+   * Subscribes to real-time group volume change events.
+   * After subscribing, the household emits `volumeChanged` events.
+   */
+  async subscribe() {
+    return this.group.subscribe();
+  }
+  /** Unsubscribes from group volume events. */
+  async unsubscribe() {
+    return this.group.unsubscribe();
+  }
+  /**
+   * Per-speaker volume control.
+   * Controls this individual speaker independently within its group.
+   * Use this to adjust one speaker's volume without affecting others in the group.
+   */
+  player = {
+    /** Gets the current volume and mute status for this individual speaker. */
+    get: () => {
+      return this._player.getVolume();
+    },
+    /**
+     * Sets the absolute volume for this speaker.
+     * @param volume - Volume level (0–100).
+     * @param muted - Optionally set mute state simultaneously.
+     */
+    set: (volume, muted) => {
+      return this._player.setVolume(volume, muted);
+    },
+    /**
+     * Adjusts this speaker's volume by a relative amount.
+     * @param delta - Amount to adjust.
+     * @returns The resulting volume level.
+     */
+    relative: (delta) => {
+      return this._player.setRelativeVolume(delta);
+    },
+    /**
+     * Mutes or unmutes this individual speaker.
+     * @param muted - `true` to mute, `false` to unmute.
+     */
+    mute: (muted) => {
+      return this._player.setMute(muted);
+    },
+    /** Subscribes to per-speaker volume events. */
+    subscribe: () => {
+      return this._player.subscribe();
+    },
+    /** Unsubscribes from per-speaker volume events. */
+    unsubscribe: () => {
+      return this._player.unsubscribe();
+    }
+  };
 };
 
 // src/namespaces/PlaybackNamespace.ts
@@ -853,6 +948,84 @@ var PlaybackMetadataNamespace = class extends BaseNamespace {
   }
 };
 
+// src/player/PlaybackControl.ts
+var PlaybackControl = class {
+  pb;
+  meta;
+  constructor(context) {
+    this.pb = new PlaybackNamespace(context);
+    this.meta = new PlaybackMetadataNamespace(context);
+  }
+  /** Starts or resumes playback. */
+  async play() {
+    return this.pb.play();
+  }
+  /** Pauses playback. */
+  async pause() {
+    return this.pb.pause();
+  }
+  /** Toggles between play and pause. */
+  async togglePlayPause() {
+    return this.pb.togglePlayPause();
+  }
+  /** Stops playback entirely. */
+  async stop() {
+    return this.pb.stop();
+  }
+  /** Skips to the next track in the queue. */
+  async skipToNextTrack() {
+    return this.pb.skipToNextTrack();
+  }
+  /** Skips to the previous track. */
+  async skipToPreviousTrack() {
+    return this.pb.skipToPreviousTrack();
+  }
+  /**
+   * Seeks to an absolute position in the current track.
+   * @param positionMillis - Position in milliseconds.
+   */
+  async seek(positionMillis) {
+    return this.pb.seek(positionMillis);
+  }
+  /**
+   * Seeks forward or backward by a relative amount.
+   * @param deltaMillis - Amount in milliseconds (positive = forward, negative = backward).
+   */
+  async seekRelative(deltaMillis) {
+    return this.pb.seekRelative(deltaMillis);
+  }
+  /** Gets the current playback state, position, and play modes. */
+  async getStatus() {
+    return this.pb.getPlaybackStatus();
+  }
+  /**
+   * Sets shuffle, repeat, crossfade modes.
+   * @param modes - Partial play modes to update.
+   */
+  async setPlayModes(modes) {
+    return this.pb.setPlayModes(modes);
+  }
+  /**
+   * Switches playback to a line-in source.
+   * @param options - Optional line-in configuration.
+   */
+  async loadLineIn(options) {
+    return this.pb.loadLineIn(options);
+  }
+  /** Gets metadata for the current track, container, and next item. */
+  async getMetadata() {
+    return this.meta.getMetadataStatus();
+  }
+  /** Subscribes to playback state change events. */
+  async subscribe() {
+    await this.pb.subscribe();
+  }
+  /** Unsubscribes from playback state events. */
+  async unsubscribe() {
+    await this.pb.unsubscribe();
+  }
+};
+
 // src/namespaces/FavoritesNamespace.ts
 var FavoritesNamespace = class extends BaseNamespace {
   namespace = "favorites:1";
@@ -873,6 +1046,26 @@ var FavoritesNamespace = class extends BaseNamespace {
    */
   async loadFavorite(favoriteId, options) {
     await this.send("loadFavorite", { favoriteId, ...options });
+  }
+};
+
+// src/player/FavoritesAccess.ts
+var FavoritesAccess = class {
+  ns;
+  constructor(context) {
+    this.ns = new FavoritesNamespace(context);
+  }
+  /** Retrieves the list of Sonos favorites. */
+  async get() {
+    return this.ns.getFavorites();
+  }
+  /**
+   * Loads a favorite into the queue.
+   * @param id - Favorite ID.
+   * @param options - Queue action and playback options.
+   */
+  async load(id, options) {
+    return this.ns.loadFavorite(id, options);
   }
 };
 
@@ -909,6 +1102,33 @@ var PlaylistsNamespace = class extends BaseNamespace {
   }
 };
 
+// src/player/PlaylistsAccess.ts
+var PlaylistsAccess = class {
+  ns;
+  constructor(context) {
+    this.ns = new PlaylistsNamespace(context);
+  }
+  /** Retrieves all Sonos playlists. */
+  async get() {
+    return this.ns.getPlaylists();
+  }
+  /**
+   * Retrieves a specific playlist with its tracks.
+   * @param id - Playlist ID.
+   */
+  async getPlaylist(id) {
+    return this.ns.getPlaylist(id);
+  }
+  /**
+   * Loads a playlist into the queue.
+   * @param id - Playlist ID.
+   * @param options - Playback options.
+   */
+  async load(id, options) {
+    return this.ns.loadPlaylist(id, options);
+  }
+};
+
 // src/namespaces/AudioClipNamespace.ts
 var AudioClipNamespace = class extends BaseNamespace {
   namespace = "audioClip:1";
@@ -932,6 +1152,28 @@ var AudioClipNamespace = class extends BaseNamespace {
    */
   async cancelAudioClip(clipId) {
     await this.send("cancelAudioClip", { id: clipId });
+  }
+};
+
+// src/player/AudioClipControl.ts
+var AudioClipControl = class {
+  ns;
+  constructor(context) {
+    this.ns = new AudioClipNamespace(context);
+  }
+  /**
+   * Plays an audio clip.
+   * @param options - Clip configuration (name, appId, streamUrl, priority, volume).
+   */
+  async load(options) {
+    return this.ns.loadAudioClip(options);
+  }
+  /**
+   * Cancels a currently playing audio clip.
+   * @param clipId - ID of the clip to cancel.
+   */
+  async cancel(clipId) {
+    return this.ns.cancelAudioClip(clipId);
   }
 };
 
@@ -960,6 +1202,25 @@ var HomeTheaterNamespace = class extends BaseNamespace {
   }
 };
 
+// src/player/HomeTheaterControl.ts
+var HomeTheaterControl = class {
+  ns;
+  constructor(context) {
+    this.ns = new HomeTheaterNamespace(context);
+  }
+  /** Gets the current home theater settings. */
+  async get() {
+    return this.ns.getOptions();
+  }
+  /**
+   * Updates home theater settings.
+   * @param options - Settings to update (nightMode, enhanceDialog).
+   */
+  async set(options) {
+    return this.ns.setOptions(options);
+  }
+};
+
 // src/namespaces/SettingsNamespace.ts
 var SettingsNamespace = class extends BaseNamespace {
   namespace = "settings:1";
@@ -985,232 +1246,26 @@ var SettingsNamespace = class extends BaseNamespace {
   }
 };
 
-// src/client/SonosClient.ts
-var DEFAULT_RECONNECT = {
-  enabled: true,
-  initialDelay: 1e3,
-  maxDelay: 3e4,
-  factor: 2,
-  maxAttempts: Infinity
-};
-var SonosClient = class extends TypedEventEmitter {
-  connection;
-  log;
-  allNamespaces;
-  /** Sonos household ID. Populated during {@link connect} if not provided in options. */
-  householdId;
-  /** Target group ID. Populated during {@link connect} if not provided in options. */
-  groupId;
-  /** Target player ID. Populated during {@link connect} if not provided in options. */
-  playerId;
-  /** Coordinator player ID for the active group. Populated during {@link refreshGroups}. */
-  coordinatorId;
-  /** Provides access to the group volume namespace (get/set volume for the entire group). */
-  groupVolume;
-  /** Provides access to the player volume namespace (get/set volume for an individual player). */
-  playerVolume;
-  /** Provides access to the groups namespace (group topology and management). */
-  groups;
-  /** Provides access to the playback namespace (play, pause, skip, seek, etc.). */
-  playback;
-  /** Provides access to the playback metadata namespace (current track info). */
-  playbackMetadata;
-  /** Provides access to the favorites namespace (list and load Sonos favorites). */
-  favorites;
-  /** Provides access to the playlists namespace (list and load Sonos playlists). */
-  playlists;
-  /** Provides access to the audio clip namespace (play notification sounds). */
-  audioClip;
-  /** Provides access to the home theater namespace (night mode, dialog enhancement, etc.). */
-  homeTheater;
-  /** Provides access to the settings namespace (player settings and properties). */
-  settings;
-  constructor(options) {
-    super();
-    this.log = options.logger ?? noopLogger;
-    const reconnectOpts = resolveReconnectOptions(options.reconnect);
-    this.connection = new SonosConnection({
-      host: options.host,
-      port: options.port ?? 1443,
-      reconnect: reconnectOpts,
-      requestTimeout: options.requestTimeout ?? 5e3,
-      logger: this.log
-    });
-    this.householdId = options.householdId;
-    this.groupId = options.groupId;
-    this.playerId = options.playerId;
-    const context = {
-      connection: this.connection,
-      getHouseholdId: () => this.householdId,
-      getGroupId: () => this.groupId,
-      getPlayerId: () => this.playerId
-    };
-    this.groupVolume = new GroupVolumeNamespace(context);
-    this.playerVolume = new PlayerVolumeNamespace(context);
-    this.groups = new GroupsNamespace(context);
-    this.playback = new PlaybackNamespace(context);
-    this.playbackMetadata = new PlaybackMetadataNamespace(context);
-    this.favorites = new FavoritesNamespace(context);
-    this.playlists = new PlaylistsNamespace(context);
-    this.audioClip = new AudioClipNamespace(context);
-    this.homeTheater = new HomeTheaterNamespace(context);
-    this.settings = new SettingsNamespace(context);
-    this.allNamespaces = [
-      this.groupVolume,
-      this.playerVolume,
-      this.groups,
-      this.playback,
-      this.playbackMetadata,
-      this.favorites,
-      this.playlists,
-      this.audioClip,
-      this.homeTheater,
-      this.settings
-    ];
-    this.connection.on("connected", () => this.handleConnected());
-    this.connection.on("disconnected", (reason) => this.emit("disconnected", reason));
-    this.connection.on("reconnecting", (attempt, delay) => this.emit("reconnecting", attempt, delay));
-    this.connection.on("error", (err) => this.emit("error", err));
-    this.connection.on("message", (msg) => this.handleEvent(msg));
+// src/player/SettingsControl.ts
+var SettingsControl = class {
+  ns;
+  constructor(context) {
+    this.ns = new SettingsNamespace(context);
   }
-  /** Whether the WebSocket connection is currently open and ready. */
-  get connected() {
-    return this.connection.state === "connected";
-  }
-  /** Current connection state (`disconnected`, `connecting`, `connected`, or `reconnecting`). */
-  get connectionState() {
-    return this.connection.state;
+  /** Gets the current player settings. */
+  async get() {
+    return this.ns.getPlayerSettings();
   }
   /**
-   * The underlying WebSocket connection.
-   * Exposed for advanced use cases like {@link SonosHousehold}.
-   * @internal
+   * Updates player settings.
+   * @param settings - Settings to update.
    */
-  get rawConnection() {
-    return this.connection;
-  }
-  /**
-   * Connects to the Sonos speaker over WebSocket.
-   *
-   * If `householdId`, `groupId`, or `playerId` were not provided in the
-   * constructor options, they are automatically discovered from the device
-   * during this call.
-   */
-  async connect() {
-    await this.connection.connect();
-    if (!this.householdId) {
-      await this.discoverHouseholdId();
-    }
-    if (!this.groupId || !this.playerId) {
-      await this.refreshGroups();
-    }
-  }
-  async discoverHouseholdId() {
-    this.log.debug("Discovering householdId...");
-    const request = [
-      {
-        namespace: "groups:1",
-        command: "getGroups",
-        cmdId: crypto.randomUUID()
-      },
-      {}
-    ];
-    try {
-      const [headers] = await this.connection.send(request);
-      if (headers.householdId) {
-        this.householdId = headers.householdId;
-      }
-    } catch {
-    }
-    if (this.householdId) {
-      this.log.debug(`Discovered householdId: ${this.householdId}`);
-    } else {
-      this.log.warn("Could not discover householdId \u2014 provide it in SonosClientOptions");
-    }
-  }
-  /** Gracefully closes the WebSocket connection to the Sonos speaker. */
-  async disconnect() {
-    await this.connection.disconnect();
-  }
-  /**
-   * Re-fetches the group topology from the speaker and updates
-   * {@link groupId}, {@link playerId}, and {@link coordinatorId}.
-   *
-   * Finds the group containing the connected player (by {@link playerId}).
-   * If no player ID is known yet, falls back to the first group.
-   *
-   * @returns The groups response from the device.
-   */
-  async refreshGroups() {
-    const result = await this.groups.getGroups();
-    this.log.debug("Refreshing group topology");
-    const targetGroup = this.playerId ? result.groups.find((g) => g.playerIds.includes(this.playerId)) : void 0;
-    const group = targetGroup ?? result.groups[0];
-    if (group) {
-      const oldGroupId = this.groupId;
-      this.groupId = group.id;
-      this.coordinatorId = group.coordinatorId;
-      if (!this.playerId) this.playerId = group.coordinatorId;
-      if (!this.householdId) {
-        const responseHouseholdId = result.householdId;
-        if (responseHouseholdId) {
-          this.householdId = responseHouseholdId;
-        }
-      }
-      if (oldGroupId && oldGroupId !== this.groupId) {
-        this.log.info(`Group changed: ${oldGroupId} \u2192 ${this.groupId}`);
-      }
-      this.log.debug(
-        `Topology: household=${this.householdId ?? "unknown"} group=${this.groupId} coordinator=${this.coordinatorId} player=${this.playerId}`
-      );
-    }
-    return result;
-  }
-  async handleConnected() {
-    this.emit("connected");
-    for (const ns of this.allNamespaces) {
-      try {
-        await ns.resubscribe();
-      } catch (err) {
-        this.log.warn(`Failed to resubscribe to ${ns.namespace}`, err);
-      }
-    }
-  }
-  handleEvent(message) {
-    this.emit("rawMessage", message);
-    const [headers, body] = message;
-    const namespace = headers?.namespace;
-    if (!namespace) return;
-    if (!this.householdId && headers.householdId) {
-      this.householdId = headers.householdId;
-      this.log.debug(`Discovered householdId: ${this.householdId}`);
-    }
-    const objectType = body?._objectType;
-    if (objectType === "groupCoordinatorChanged") {
-      this.log.info(`Group coordinator changed: ${body?.groupStatus} \u2014 refreshing topology`);
-      this.emit("groupCoordinatorChanged", body);
-      this.refreshGroups().catch((err) => {
-        this.log.warn("Failed to refresh groups after coordinator change", err);
-      });
-      return;
-    }
-    const eventName = NAMESPACE_EVENT_MAP[namespace];
-    if (eventName) {
-      this.emit(eventName, body);
-    }
+  async set(settings) {
+    return this.ns.setPlayerSettings(settings);
   }
 };
-function resolveReconnectOptions(input) {
-  if (input === false) {
-    return { ...DEFAULT_RECONNECT, enabled: false };
-  }
-  if (input === true || input === void 0) {
-    return { ...DEFAULT_RECONNECT };
-  }
-  return { ...DEFAULT_RECONNECT, ...input };
-}
 
-// src/household/PlayerHandle.ts
+// src/player/PlayerHandle.ts
 var PlayerHandle = class {
   /** RINCON player ID. */
   id;
@@ -1220,49 +1275,42 @@ var PlayerHandle = class {
   capabilities;
   _group;
   householdId;
-  context;
-  /** Group volume control — targets this player's group. */
-  groupVolume;
-  /** Individual player volume control. */
-  playerVolume;
-  /** Group topology management. */
-  groups;
-  /** Playback control — targets this player's group. */
+  /** Unified volume control (group volume + per-speaker volume). */
+  volume;
+  /** Playback and metadata control. */
   playback;
-  /** Playback metadata — targets this player's group. */
-  playbackMetadata;
-  /** Favorites access. */
+  /** Sonos favorites. */
   favorites;
-  /** Playlists access. */
+  /** Sonos playlists. */
   playlists;
   /** Audio clip playback. */
   audioClip;
-  /** Home theater settings (only meaningful for HT players like Arc). */
+  /** Home theater settings. */
   homeTheater;
   /** Player settings. */
   settings;
+  /** Raw group operations (used internally by SonosHousehold for grouping). */
+  groups;
   constructor(player, group, householdId, connection) {
     this.id = player.id;
     this.name = player.name;
     this.capabilities = player.capabilities;
     this._group = group;
     this.householdId = householdId;
-    this.context = {
+    const context = {
       connection,
       getHouseholdId: () => this.householdId,
       getGroupId: () => this._group.id,
       getPlayerId: () => this.id
     };
-    this.groupVolume = new GroupVolumeNamespace(this.context);
-    this.playerVolume = new PlayerVolumeNamespace(this.context);
-    this.groups = new GroupsNamespace(this.context);
-    this.playback = new PlaybackNamespace(this.context);
-    this.playbackMetadata = new PlaybackMetadataNamespace(this.context);
-    this.favorites = new FavoritesNamespace(this.context);
-    this.playlists = new PlaylistsNamespace(this.context);
-    this.audioClip = new AudioClipNamespace(this.context);
-    this.homeTheater = new HomeTheaterNamespace(this.context);
-    this.settings = new SettingsNamespace(this.context);
+    this.volume = new VolumeControl(context);
+    this.playback = new PlaybackControl(context);
+    this.favorites = new FavoritesAccess(context);
+    this.playlists = new PlaylistsAccess(context);
+    this.audioClip = new AudioClipControl(context);
+    this.homeTheater = new HomeTheaterControl(context);
+    this.settings = new SettingsControl(context);
+    this.groups = new GroupsNamespace(context);
   }
   /** Current group ID this player belongs to. Updated automatically on topology changes. */
   get groupId() {
@@ -1274,7 +1322,7 @@ var PlayerHandle = class {
   }
   /**
    * Updates the group this player belongs to.
-   * Called internally by {@link SonosHousehold} when topology changes.
+   * Called internally by SonosHousehold when topology changes.
    * @internal
    */
   updateGroup(group) {
@@ -1283,49 +1331,40 @@ var PlayerHandle = class {
 };
 
 // src/household/SonosHousehold.ts
+var DEFAULT_RECONNECT = {
+  enabled: true,
+  initialDelay: 1e3,
+  maxDelay: 3e4,
+  factor: 2,
+  maxAttempts: Infinity
+};
 var SonosHousehold = class extends TypedEventEmitter {
-  client;
+  connection;
   log;
   _players = /* @__PURE__ */ new Map();
   _groups = [];
   _rawPlayers = [];
+  _householdId;
   _initialConnectDone = false;
+  /** Household-scoped GroupsNamespace for createGroup calls (no groupId/playerId). */
+  householdGroups;
   constructor(options) {
     super();
     this.log = options.logger ?? noopLogger;
-    this.client = new SonosClient({
+    this.connection = new SonosConnection({
       host: options.host,
-      port: options.port,
-      reconnect: options.reconnect,
-      logger: options.logger,
-      requestTimeout: options.requestTimeout
+      port: options.port ?? 1443,
+      reconnect: resolveReconnectOptions(options.reconnect),
+      requestTimeout: options.requestTimeout ?? 5e3,
+      logger: this.log
     });
-    this.client.on("connected", () => {
-      if (this._initialConnectDone) {
-        this.refreshTopology().catch((err) => {
-          this.log.warn("Failed to refresh topology on reconnect", err);
-        });
-      }
-      this.emit("connected");
-    });
-    this.client.on("disconnected", (reason) => this.emit("disconnected", reason));
-    this.client.on("reconnecting", (attempt, delay) => this.emit("reconnecting", attempt, delay));
-    this.client.on("error", (err) => this.emit("error", err));
-    this.client.on("rawMessage", (msg) => this.emit("rawMessage", msg));
-    this.client.on("groupVolumeChanged", (data) => this.emit("groupVolumeChanged", data));
-    this.client.on("playerVolumeChanged", (data) => this.emit("playerVolumeChanged", data));
-    this.client.on("groupsChanged", (data) => this.emit("groupsChanged", data));
-    this.client.on("playbackStatusChanged", (data) => this.emit("playbackStatusChanged", data));
-    this.client.on("metadataStatusChanged", (data) => this.emit("metadataStatusChanged", data));
-    this.client.on("favoritesChanged", (data) => this.emit("favoritesChanged", data));
-    this.client.on("playlistsChanged", (data) => this.emit("playlistsChanged", data));
-    this.client.on("homeTheaterChanged", (data) => this.emit("homeTheaterChanged", data));
-    this.client.on("groupCoordinatorChanged", (data) => {
-      this.emit("groupCoordinatorChanged", data);
-      this.refreshTopology().catch((err) => {
-        this.log.warn("Failed to refresh topology after coordinator change", err);
-      });
-    });
+    const householdContext = {
+      connection: this.connection,
+      getHouseholdId: () => this._householdId,
+      getGroupId: () => void 0,
+      getPlayerId: () => void 0
+    };
+    this.householdGroups = new GroupsNamespace(householdContext);
   }
   /** All discovered players in the household, keyed by RINCON player ID. */
   get players() {
@@ -1337,24 +1376,31 @@ var SonosHousehold = class extends TypedEventEmitter {
   }
   /** The Sonos household ID. */
   get householdId() {
-    return this.client.householdId;
+    return this._householdId;
   }
   /** Whether the WebSocket connection is currently open. */
   get connected() {
-    return this.client.connected;
+    return this.connection.state === "connected";
   }
   /**
    * Connects to the Sonos speaker and discovers the household topology.
    * Populates {@link players} and {@link groups}.
    */
   async connect() {
-    await this.client.connect();
+    this._initialConnectDone = false;
+    this.connection.on("connected", () => this.handleReconnected());
+    this.connection.on("disconnected", (r) => this.emit("disconnected", r));
+    this.connection.on("reconnecting", (a, d) => this.emit("reconnecting", a, d));
+    this.connection.on("error", (e) => this.emit("error", e));
+    this.connection.on("message", (msg) => this.handleMessage(msg));
+    await this.connection.connect();
+    await this.discoverHouseholdId();
     await this.refreshTopology();
     this._initialConnectDone = true;
   }
   /** Gracefully closes the WebSocket connection. */
   async disconnect() {
-    await this.client.disconnect();
+    await this.connection.disconnect();
   }
   /**
    * Gets a player handle by display name (case-insensitive) or RINCON ID.
@@ -1381,11 +1427,10 @@ var SonosHousehold = class extends TypedEventEmitter {
    * @internal
    */
   async refreshTopology() {
-    const result = await this.client.groups.getGroups();
+    const result = await this.householdGroups.getGroups();
     this._groups = result.groups;
     this._rawPlayers = result.players;
-    const connection = this.client.rawConnection;
-    const householdId = this.client.householdId ?? "";
+    const householdId = this._householdId ?? "";
     for (const player of result.players) {
       const group = result.groups.find((g) => g.playerIds.includes(player.id));
       if (!group) continue;
@@ -1393,7 +1438,7 @@ var SonosHousehold = class extends TypedEventEmitter {
       if (existing) {
         existing.updateGroup(group);
       } else {
-        this._players.set(player.id, new PlayerHandle(player, group, householdId, connection));
+        this._players.set(player.id, new PlayerHandle(player, group, householdId, this.connection));
       }
     }
     for (const [id] of this._players) {
@@ -1420,7 +1465,7 @@ var SonosHousehold = class extends TypedEventEmitter {
       const player = players[0];
       const group = this._groups.find((g) => g.playerIds.includes(player.id));
       if (group && group.playerIds.length === 1) return;
-      await this.client.groups.createGroup([player.id]);
+      await this.householdGroups.createGroup([player.id]);
       await this.refreshTopology();
       return;
     }
@@ -1449,7 +1494,7 @@ var SonosHousehold = class extends TypedEventEmitter {
   async ungroup(player) {
     const group = this._groups.find((g) => g.playerIds.includes(player.id));
     if (!group || group.playerIds.length === 1) return;
-    await this.client.groups.createGroup([player.id]);
+    await this.householdGroups.createGroup([player.id]);
     await this.refreshTopology();
   }
   /**
@@ -1460,13 +1505,67 @@ var SonosHousehold = class extends TypedEventEmitter {
     for (const group of multiPlayerGroups) {
       for (const playerId of group.playerIds) {
         if (playerId !== group.coordinatorId) {
-          await this.client.groups.createGroup([playerId]);
+          await this.householdGroups.createGroup([playerId]);
         }
       }
     }
     if (multiPlayerGroups.length > 0) {
       await this.refreshTopology();
     }
+  }
+  /**
+   * Discovers the householdId by sending a raw getGroups request.
+   */
+  async discoverHouseholdId() {
+    const request = [
+      { namespace: "groups:1", command: "getGroups", cmdId: crypto.randomUUID() },
+      {}
+    ];
+    try {
+      const [headers] = await this.connection.send(request);
+      if (headers.householdId) this._householdId = headers.householdId;
+    } catch {
+    }
+  }
+  /**
+   * Routes incoming unsolicited messages to typed events.
+   * Filters by `_objectType` to avoid double-firing and Volume: undefined.
+   */
+  handleMessage(message) {
+    this.emit("rawMessage", message);
+    const [headers, body] = message;
+    const namespace = headers?.namespace;
+    if (!namespace) return;
+    if (!this._householdId && headers.householdId) {
+      this._householdId = headers.householdId;
+    }
+    const objectType = body?._objectType;
+    if (objectType === "groupCoordinatorChanged") {
+      this.emit("coordinatorChanged", body);
+      this.refreshTopology().catch((err) => this.log.warn("Failed to refresh topology", err));
+      return;
+    }
+    if (!objectType) return;
+    const eventName = NAMESPACE_EVENT_MAP[namespace];
+    if (eventName) {
+      this.emit(eventName, body);
+    }
+  }
+  /**
+   * Handles reconnection events. Only refreshes topology on reconnect,
+   * not on initial connect (which is handled by connect() directly).
+   */
+  async handleReconnected() {
+    if (this._initialConnectDone) {
+      await this.refreshTopology().catch((err) => this.log.warn("Failed to refresh topology on reconnect", err));
+      for (const handle of this._players.values()) {
+        try {
+          await handle.volume.subscribe();
+        } catch {
+        }
+      }
+    }
+    this.emit("connected");
   }
   /**
    * Resolves the audio source player based on the `transfer` option.
@@ -1569,6 +1668,141 @@ var SonosHousehold = class extends TypedEventEmitter {
     }
   }
 };
+function resolveReconnectOptions(input) {
+  if (input === false) {
+    return { ...DEFAULT_RECONNECT, enabled: false };
+  }
+  if (input === true || input === void 0) {
+    return { ...DEFAULT_RECONNECT };
+  }
+  return { ...DEFAULT_RECONNECT, ...input };
+}
+
+// src/client/SonosClient.ts
+var DEFAULT_RECONNECT2 = {
+  enabled: true,
+  initialDelay: 1e3,
+  maxDelay: 3e4,
+  factor: 2,
+  maxAttempts: Infinity
+};
+var SonosClient = class extends TypedEventEmitter {
+  connection;
+  log;
+  _handle;
+  _householdId;
+  constructor(options) {
+    super();
+    this.log = options.logger ?? noopLogger;
+    this.connection = new SonosConnection({
+      host: options.host,
+      port: options.port ?? 1443,
+      reconnect: resolveReconnectOptions2(options.reconnect),
+      requestTimeout: options.requestTimeout ?? 5e3,
+      logger: this.log
+    });
+  }
+  get connected() {
+    return this.connection.state === "connected";
+  }
+  get connectionState() {
+    return this.connection.state;
+  }
+  get householdId() {
+    return this._householdId;
+  }
+  get volume() {
+    return this.handle.volume;
+  }
+  get playback() {
+    return this.handle.playback;
+  }
+  get favorites() {
+    return this.handle.favorites;
+  }
+  get playlists() {
+    return this.handle.playlists;
+  }
+  get audioClip() {
+    return this.handle.audioClip;
+  }
+  get homeTheater() {
+    return this.handle.homeTheater;
+  }
+  get settings() {
+    return this.handle.settings;
+  }
+  get handle() {
+    if (!this._handle) throw new Error("Not connected \u2014 call connect() first");
+    return this._handle;
+  }
+  async connect() {
+    this.connection.on("connected", () => this.handleConnected());
+    this.connection.on("disconnected", (r) => this.emit("disconnected", r));
+    this.connection.on("reconnecting", (a, d) => this.emit("reconnecting", a, d));
+    this.connection.on("error", (e) => this.emit("error", e));
+    this.connection.on("message", (msg) => this.handleMessage(msg));
+    await this.connection.connect();
+    await this.discoverAndCreateHandle();
+    this.emit("connected");
+  }
+  async disconnect() {
+    await this.connection.disconnect();
+  }
+  async discoverAndCreateHandle() {
+    const request = [
+      { namespace: "groups:1", command: "getGroups", cmdId: crypto.randomUUID() },
+      {}
+    ];
+    try {
+      const [headers, body] = await this.connection.send(request);
+      if (headers.householdId) this._householdId = headers.householdId;
+      const result = body;
+      const group = result.groups?.[0];
+      const player = result.players?.find((p) => p.id === group?.coordinatorId) ?? result.players?.[0];
+      if (group && player) {
+        this._handle = new PlayerHandle(player, group, this._householdId ?? "", this.connection);
+      }
+    } catch {
+      this.log.warn("Could not discover player \u2014 provide host of a specific speaker");
+    }
+  }
+  async handleConnected() {
+    if (this._handle) {
+      try {
+        await this.discoverAndCreateHandle();
+      } catch (err) {
+        this.log.warn("Failed to re-discover on reconnect", err);
+      }
+    }
+    this.emit("connected");
+  }
+  handleMessage(message) {
+    this.emit("rawMessage", message);
+    const [headers, body] = message;
+    const namespace = headers?.namespace;
+    if (!namespace) return;
+    if (!this._householdId && headers.householdId) {
+      this._householdId = headers.householdId;
+    }
+    const objectType = body?._objectType;
+    if (objectType === "groupCoordinatorChanged") {
+      this.emit("coordinatorChanged", body);
+      this.discoverAndCreateHandle().catch((err) => this.log.warn("Failed to refresh after coordinator change", err));
+      return;
+    }
+    if (!objectType) return;
+    const eventName = NAMESPACE_EVENT_MAP[namespace];
+    if (eventName) {
+      this.emit(eventName, body);
+    }
+  }
+};
+function resolveReconnectOptions2(input) {
+  if (input === false) return { ...DEFAULT_RECONNECT2, enabled: false };
+  if (input === true || input === void 0) return { ...DEFAULT_RECONNECT2 };
+  return { ...DEFAULT_RECONNECT2, ...input };
+}
 
 // src/discovery/SsdpDiscovery.ts
 var import_node_dgram = require("dgram");
@@ -1705,20 +1939,27 @@ var ClipPriority = /* @__PURE__ */ ((ClipPriority2) => {
 })(ClipPriority || {});
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  AudioClipControl,
   ClipPriority,
   ClipType,
   CommandError,
   ConnectionError,
   ErrorCode,
+  FavoritesAccess,
+  HomeTheaterControl,
   NAMESPACE_EVENT_MAP,
+  PlaybackControl,
   PlaybackState,
   PlayerHandle,
+  PlaylistsAccess,
   QueueAction,
+  SettingsControl,
   SonosClient,
   SonosDiscovery,
   SonosError,
   SonosHousehold,
   TimeoutError,
+  VolumeControl,
   consoleLogger,
   noopLogger
 });

@@ -638,15 +638,15 @@ interface SonosEvents {
     /** Emitted on connection or command errors. */
     error: (error: SonosError | Error) => void;
     /** Emitted when the group volume or mute state changes. */
-    groupVolumeChanged: (data: GroupVolumeStatus) => void;
+    volumeChanged: (data: GroupVolumeStatus) => void;
     /** Emitted when an individual player's volume or mute state changes. */
     playerVolumeChanged: (data: PlayerVolumeStatus) => void;
     /** Emitted when group membership or topology changes (players grouped/ungrouped). */
     groupsChanged: (data: GroupsResponse) => void;
     /** Emitted when the playback state, position, or play modes change. */
-    playbackStatusChanged: (data: PlaybackStatus) => void;
+    playbackChanged: (data: PlaybackStatus) => void;
     /** Emitted when the currently playing track or next track metadata changes. */
-    metadataStatusChanged: (data: MetadataStatus) => void;
+    metadataChanged: (data: MetadataStatus) => void;
     /** Emitted when the user's favorites list is modified. */
     favoritesChanged: (data: FavoritesResponse) => void;
     /** Emitted when the user's playlists are modified. */
@@ -658,7 +658,7 @@ interface SonosEvents {
      * The client automatically calls {@link SonosClient.refreshGroups} to update
      * its internal groupId. Listen to this event to react to topology changes.
      */
-    groupCoordinatorChanged: (data: GroupCoordinatorChangedEvent) => void;
+    coordinatorChanged: (data: GroupCoordinatorChangedEvent) => void;
     /** Emitted for every raw WebSocket message received from the Sonos device. Useful for debugging. */
     rawMessage: (message: SonosResponse) => void;
 }
@@ -748,75 +748,6 @@ declare abstract class BaseNamespace {
 }
 
 /**
- * Controls volume for an entire Sonos group (all speakers in the group).
- *
- * Maps to the Sonos WebSocket Control API `groupVolume:1` namespace.
- */
-declare class GroupVolumeNamespace extends BaseNamespace {
-    readonly namespace = "groupVolume:1";
-    /**
-     * Gets the current group volume level and mute status.
-     *
-     * @returns The current volume and mute state for the group.
-     */
-    getVolume(): Promise<GroupVolumeStatus>;
-    /**
-     * Sets the absolute group volume.
-     *
-     * @param volume - The desired volume level (0--100).
-     */
-    setVolume(volume: number): Promise<void>;
-    /**
-     * Adjusts the group volume by a relative amount.
-     *
-     * @param volumeDelta - The amount to adjust (positive to increase, negative to decrease).
-     * @returns The resulting volume level after the adjustment.
-     */
-    setRelativeVolume(volumeDelta: number): Promise<VolumeResponse>;
-    /**
-     * Mutes or unmutes the entire group.
-     *
-     * @param muted - `true` to mute, `false` to unmute.
-     */
-    setMute(muted: boolean): Promise<void>;
-}
-
-/**
- * Controls volume for an individual Sonos player (single speaker).
- *
- * Maps to the Sonos WebSocket Control API `playerVolume:1` namespace.
- */
-declare class PlayerVolumeNamespace extends BaseNamespace {
-    readonly namespace = "playerVolume:1";
-    /**
-     * Gets the current player volume level and mute status.
-     *
-     * @returns The current volume and mute state for this player.
-     */
-    getVolume(): Promise<PlayerVolumeStatus>;
-    /**
-     * Sets the absolute player volume, optionally setting the mute state at the same time.
-     *
-     * @param volume - The desired volume level (0--100).
-     * @param muted - If provided, simultaneously sets the mute state (`true` to mute, `false` to unmute).
-     */
-    setVolume(volume: number, muted?: boolean): Promise<void>;
-    /**
-     * Adjusts the player volume by a relative amount.
-     *
-     * @param volumeDelta - The amount to adjust (positive to increase, negative to decrease).
-     * @returns The resulting volume level after the adjustment.
-     */
-    setRelativeVolume(volumeDelta: number): Promise<VolumeResponse>;
-    /**
-     * Mutes or unmutes the player.
-     *
-     * @param muted - `true` to mute, `false` to unmute.
-     */
-    setMute(muted: boolean): Promise<void>;
-}
-
-/**
  * Manages Sonos player groups (grouping and ungrouping speakers).
  *
  * Maps to the Sonos WebSocket Control API `groups:1` namespace.
@@ -853,120 +784,156 @@ declare class GroupsNamespace extends BaseNamespace {
 }
 
 /**
- * Controls playback for a Sonos group.
+ * Unified volume control for a Sonos player.
  *
- * Maps to the Sonos WebSocket Control API `playback:1` namespace.
+ * Primary methods control the group volume (all speakers in this player's group).
+ * The {@link player} sub-object controls this individual speaker within its group.
  */
-declare class PlaybackNamespace extends BaseNamespace {
-    readonly namespace = "playback:1";
-    /** Starts or resumes playback for the group. */
+declare class VolumeControl {
+    private readonly group;
+    private readonly _player;
+    constructor(context: NamespaceContext);
+    /** Gets the current group volume level and mute status. */
+    get(): Promise<GroupVolumeStatus>;
+    /**
+     * Sets the absolute group volume.
+     * @param volume - Volume level (0–100).
+     */
+    set(volume: number): Promise<void>;
+    /**
+     * Adjusts the group volume by a relative amount.
+     * @param delta - Amount to adjust (positive to increase, negative to decrease).
+     * @returns The resulting volume level.
+     */
+    relative(delta: number): Promise<VolumeResponse>;
+    /**
+     * Mutes or unmutes the entire group.
+     * @param muted - `true` to mute, `false` to unmute.
+     */
+    mute(muted: boolean): Promise<void>;
+    /**
+     * Subscribes to real-time group volume change events.
+     * After subscribing, the household emits `volumeChanged` events.
+     */
+    subscribe(): Promise<void>;
+    /** Unsubscribes from group volume events. */
+    unsubscribe(): Promise<void>;
+    /**
+     * Per-speaker volume control.
+     * Controls this individual speaker independently within its group.
+     * Use this to adjust one speaker's volume without affecting others in the group.
+     */
+    readonly player: {
+        /** Gets the current volume and mute status for this individual speaker. */
+        get: () => Promise<PlayerVolumeStatus>;
+        /**
+         * Sets the absolute volume for this speaker.
+         * @param volume - Volume level (0–100).
+         * @param muted - Optionally set mute state simultaneously.
+         */
+        set: (volume: number, muted?: boolean) => Promise<void>;
+        /**
+         * Adjusts this speaker's volume by a relative amount.
+         * @param delta - Amount to adjust.
+         * @returns The resulting volume level.
+         */
+        relative: (delta: number) => Promise<VolumeResponse>;
+        /**
+         * Mutes or unmutes this individual speaker.
+         * @param muted - `true` to mute, `false` to unmute.
+         */
+        mute: (muted: boolean) => Promise<void>;
+        /** Subscribes to per-speaker volume events. */
+        subscribe: () => Promise<void>;
+        /** Unsubscribes from per-speaker volume events. */
+        unsubscribe: () => Promise<void>;
+    };
+}
+
+/**
+ * Playback and metadata control for a Sonos player's group.
+ *
+ * Combines the `playback:1` and `playbackMetadata:1` namespaces into
+ * a single interface — playback state and track metadata are always
+ * about the same thing (what's currently playing).
+ */
+declare class PlaybackControl {
+    private readonly pb;
+    private readonly meta;
+    constructor(context: NamespaceContext);
+    /** Starts or resumes playback. */
     play(): Promise<void>;
-    /** Pauses playback for the group. */
+    /** Pauses playback. */
     pause(): Promise<void>;
-    /** Toggles between play and pause for the group. */
+    /** Toggles between play and pause. */
     togglePlayPause(): Promise<void>;
-    /** Stops playback entirely for the group. */
+    /** Stops playback entirely. */
     stop(): Promise<void>;
     /** Skips to the next track in the queue. */
     skipToNextTrack(): Promise<void>;
-    /** Skips to the previous track in the queue. */
+    /** Skips to the previous track. */
     skipToPreviousTrack(): Promise<void>;
     /**
      * Seeks to an absolute position in the current track.
-     *
-     * @param positionMillis - The target position in milliseconds from the start of the track.
+     * @param positionMillis - Position in milliseconds.
      */
     seek(positionMillis: number): Promise<void>;
     /**
-     * Seeks forward or backward by a relative amount in the current track.
-     *
-     * @param deltaMillis - The offset in milliseconds (positive to seek forward, negative to seek backward).
+     * Seeks forward or backward by a relative amount.
+     * @param deltaMillis - Amount in milliseconds (positive = forward, negative = backward).
      */
     seekRelative(deltaMillis: number): Promise<void>;
+    /** Gets the current playback state, position, and play modes. */
+    getStatus(): Promise<PlaybackStatus>;
     /**
-     * Gets the current playback state, track position, and play modes.
-     *
-     * @returns The current playback status for the group.
+     * Sets shuffle, repeat, crossfade modes.
+     * @param modes - Partial play modes to update.
      */
-    getPlaybackStatus(): Promise<PlaybackStatus>;
-    /**
-     * Sets the play modes for the group (shuffle, repeat, crossfade).
-     *
-     * @param playModes - An object containing the play mode properties to update.
-     */
-    setPlayModes(playModes: Partial<PlayModes>): Promise<void>;
+    setPlayModes(modes: Partial<PlayModes>): Promise<void>;
     /**
      * Switches playback to a line-in source.
-     *
-     * @param options - Optional configuration for the line-in source.
+     * @param options - Optional line-in configuration.
      */
     loadLineIn(options?: LoadLineInOptions): Promise<void>;
+    /** Gets metadata for the current track, container, and next item. */
+    getMetadata(): Promise<MetadataStatus>;
+    /** Subscribes to playback state change events. */
+    subscribe(): Promise<void>;
+    /** Unsubscribes from playback state events. */
+    unsubscribe(): Promise<void>;
 }
 
-/**
- * Retrieves metadata about the currently playing content for a Sonos group.
- *
- * Maps to the Sonos WebSocket Control API `playbackMetadata:1` namespace.
- */
-declare class PlaybackMetadataNamespace extends BaseNamespace {
-    readonly namespace = "playbackMetadata:1";
+/** Access and load Sonos favorites. */
+declare class FavoritesAccess {
+    private readonly ns;
+    constructor(context: NamespaceContext);
+    /** Retrieves the list of Sonos favorites. */
+    get(): Promise<FavoritesResponse>;
     /**
-     * Gets metadata for the current track, its container, and the next queued item.
-     *
-     * @returns The metadata status including current track info, container details, and next item.
+     * Loads a favorite into the queue.
+     * @param id - Favorite ID.
+     * @param options - Queue action and playback options.
      */
-    getMetadataStatus(): Promise<MetadataStatus>;
+    load(id: string, options?: LoadFavoriteOptions): Promise<void>;
 }
 
-/**
- * Accesses and loads Sonos favorites (My Sonos).
- *
- * Maps to the Sonos WebSocket Control API `favorites:1` namespace.
- */
-declare class FavoritesNamespace extends BaseNamespace {
-    readonly namespace = "favorites:1";
-    /**
-     * Retrieves the list of Sonos favorites.
-     *
-     * @returns The favorites collection including item details and version info.
-     */
-    getFavorites(): Promise<FavoritesResponse>;
-    /**
-     * Loads a favorite into the queue and optionally begins playback.
-     *
-     * @param favoriteId - The ID of the favorite to load.
-     * @param options - Optional playback and queue behavior settings.
-     */
-    loadFavorite(favoriteId: string, options?: LoadFavoriteOptions): Promise<void>;
-}
-
-/**
- * Accesses and loads Sonos playlists.
- *
- * Maps to the Sonos WebSocket Control API `playlists:1` namespace.
- */
-declare class PlaylistsNamespace extends BaseNamespace {
-    readonly namespace = "playlists:1";
-    /**
-     * Retrieves all Sonos playlists.
-     *
-     * @returns The list of available playlists.
-     */
-    getPlaylists(): Promise<PlaylistsResponse>;
+/** Access and load Sonos playlists. */
+declare class PlaylistsAccess {
+    private readonly ns;
+    constructor(context: NamespaceContext);
+    /** Retrieves all Sonos playlists. */
+    get(): Promise<PlaylistsResponse>;
     /**
      * Retrieves a specific playlist with its tracks.
-     *
-     * @param playlistId - The ID of the playlist to retrieve.
-     * @returns The playlist details including its track listing.
+     * @param id - Playlist ID.
      */
-    getPlaylist(playlistId: string): Promise<PlaylistResponse>;
+    getPlaylist(id: string): Promise<PlaylistResponse>;
     /**
-     * Loads a playlist into the queue and optionally begins playback.
-     *
-     * @param playlistId - The ID of the playlist to load.
-     * @param options - Optional playback and queue behavior settings.
+     * Loads a playlist into the queue.
+     * @param id - Playlist ID.
+     * @param options - Playback options.
      */
-    loadPlaylist(playlistId: string, options?: LoadPlaylistOptions): Promise<void>;
+    load(id: string, options?: LoadPlaylistOptions): Promise<void>;
 }
 
 /** The type of audio clip to play. */
@@ -1012,54 +979,33 @@ interface AudioClipResponse {
     status?: string;
 }
 
-/**
- * Plays audio clips (e.g. notifications, chimes) that overlay the current
- * audio without interrupting playback.
- *
- * Maps to the Sonos WebSocket Control API `audioClip:1` namespace.
- */
-declare class AudioClipNamespace extends BaseNamespace {
-    readonly namespace = "audioClip:1";
+/** Plays audio clips (notifications, chimes) that overlay current audio. */
+declare class AudioClipControl {
+    private readonly ns;
+    constructor(context: NamespaceContext);
     /**
-     * Plays an audio clip with the specified options.
-     *
-     * The clip is mixed on top of any currently playing audio and does not
-     * affect the playback queue.
-     *
-     * @param options - Configuration for the audio clip (URL, volume, priority, etc.).
-     * @returns Details about the queued audio clip, including its clip ID.
+     * Plays an audio clip.
+     * @param options - Clip configuration (name, appId, streamUrl, priority, volume).
      */
-    loadAudioClip(options: LoadAudioClipOptions): Promise<AudioClipResponse>;
+    load(options: LoadAudioClipOptions): Promise<AudioClipResponse>;
     /**
      * Cancels a currently playing audio clip.
-     *
-     * @param clipId - The ID of the audio clip to cancel.
+     * @param clipId - ID of the clip to cancel.
      */
-    cancelAudioClip(clipId: string): Promise<void>;
+    cancel(clipId: string): Promise<void>;
 }
 
-/**
- * Manages home theater audio settings such as night mode and dialog enhancement.
- *
- * Maps to the Sonos WebSocket Control API `homeTheater:1` namespace.
- */
-declare class HomeTheaterNamespace extends BaseNamespace {
-    readonly namespace = "homeTheater:1";
-    /**
-     * Gets the current home theater settings.
-     *
-     * @returns The current home theater options (night mode, dialog enhancement, etc.).
-     */
-    getOptions(): Promise<HomeTheaterOptions>;
+/** Manages home theater settings (night mode, dialog enhancement). */
+declare class HomeTheaterControl {
+    private readonly ns;
+    constructor(context: NamespaceContext);
+    /** Gets the current home theater settings. */
+    get(): Promise<HomeTheaterOptions>;
     /**
      * Updates home theater settings.
-     *
-     * Only the properties included in the options object are changed;
-     * omitted properties remain at their current values.
-     *
-     * @param options - The home theater settings to update.
+     * @param options - Settings to update (nightMode, enhanceDialog).
      */
-    setOptions(options: Partial<HomeTheaterOptions>): Promise<void>;
+    set(options: Partial<HomeTheaterOptions>): Promise<void>;
 }
 
 /** Player-level configuration settings. */
@@ -1076,146 +1022,27 @@ interface PlayerSettings {
     [key: string]: unknown;
 }
 
-/**
- * Manages player-level settings for an individual Sonos player.
- *
- * Maps to the Sonos WebSocket Control API `settings:1` namespace.
- */
-declare class SettingsNamespace extends BaseNamespace {
-    readonly namespace = "settings:1";
-    /**
-     * Gets the current player settings.
-     *
-     * @returns The player's current settings.
-     */
-    getPlayerSettings(): Promise<PlayerSettings>;
+/** Manages player-level settings. */
+declare class SettingsControl {
+    private readonly ns;
+    constructor(context: NamespaceContext);
+    /** Gets the current player settings. */
+    get(): Promise<PlayerSettings>;
     /**
      * Updates player settings.
-     *
-     * Only the properties included in the settings object are changed;
-     * omitted properties remain at their current values.
-     *
-     * @param settings - The player settings to update.
+     * @param settings - Settings to update.
      */
-    setPlayerSettings(settings: Partial<PlayerSettings>): Promise<void>;
+    set(settings: Partial<PlayerSettings>): Promise<void>;
 }
 
 /**
- * Configuration options for creating a {@link SonosClient} instance.
- */
-interface SonosClientOptions {
-    /** IP address or hostname of the Sonos speaker to connect to. */
-    host: string;
-    /** WebSocket port on the Sonos device. @defaultValue 1443 */
-    port?: number;
-    /** Sonos household ID. Auto-discovered from the device if omitted. */
-    householdId?: string;
-    /** Target group ID. Auto-discovered from group topology if omitted. */
-    groupId?: string;
-    /** Target player ID. Auto-discovered from group topology if omitted. */
-    playerId?: string;
-    /**
-     * Reconnection configuration. Pass `true` to enable with default settings,
-     * `false` to disable, or a partial {@link ReconnectOptions} object to
-     * override specific defaults.
-     */
-    reconnect?: Partial<ReconnectOptions> | boolean;
-    /** Custom logger implementation. Falls back to a silent no-op logger if omitted. */
-    logger?: Logger;
-    /** Timeout in milliseconds for commands sent to the speaker. @defaultValue 5000 */
-    requestTimeout?: number;
-}
-/**
- * Main entry point for the sonos-ws library.
+ * A lightweight handle for controlling a single Sonos player.
  *
- * `SonosClient` manages the WebSocket connection to a Sonos speaker and
- * exposes namespace accessors for controlling volume, playback, groups,
- * favorites, and more.
+ * Routes all commands through a shared WebSocket connection using this
+ * player's `groupId` and `playerId` in the request headers.
  *
- * @example
- * ```typescript
- * const client = new SonosClient({ host: '192.168.68.96' });
- * await client.connect();
- * await client.groupVolume.setRelativeVolume(5);
- * await client.disconnect();
- * ```
- */
-declare class SonosClient extends TypedEventEmitter<SonosEvents> {
-    private readonly connection;
-    private readonly log;
-    private readonly allNamespaces;
-    /** Sonos household ID. Populated during {@link connect} if not provided in options. */
-    householdId: string | undefined;
-    /** Target group ID. Populated during {@link connect} if not provided in options. */
-    groupId: string | undefined;
-    /** Target player ID. Populated during {@link connect} if not provided in options. */
-    playerId: string | undefined;
-    /** Coordinator player ID for the active group. Populated during {@link refreshGroups}. */
-    coordinatorId: string | undefined;
-    /** Provides access to the group volume namespace (get/set volume for the entire group). */
-    readonly groupVolume: GroupVolumeNamespace;
-    /** Provides access to the player volume namespace (get/set volume for an individual player). */
-    readonly playerVolume: PlayerVolumeNamespace;
-    /** Provides access to the groups namespace (group topology and management). */
-    readonly groups: GroupsNamespace;
-    /** Provides access to the playback namespace (play, pause, skip, seek, etc.). */
-    readonly playback: PlaybackNamespace;
-    /** Provides access to the playback metadata namespace (current track info). */
-    readonly playbackMetadata: PlaybackMetadataNamespace;
-    /** Provides access to the favorites namespace (list and load Sonos favorites). */
-    readonly favorites: FavoritesNamespace;
-    /** Provides access to the playlists namespace (list and load Sonos playlists). */
-    readonly playlists: PlaylistsNamespace;
-    /** Provides access to the audio clip namespace (play notification sounds). */
-    readonly audioClip: AudioClipNamespace;
-    /** Provides access to the home theater namespace (night mode, dialog enhancement, etc.). */
-    readonly homeTheater: HomeTheaterNamespace;
-    /** Provides access to the settings namespace (player settings and properties). */
-    readonly settings: SettingsNamespace;
-    constructor(options: SonosClientOptions);
-    /** Whether the WebSocket connection is currently open and ready. */
-    get connected(): boolean;
-    /** Current connection state (`disconnected`, `connecting`, `connected`, or `reconnecting`). */
-    get connectionState(): ConnectionState;
-    /**
-     * The underlying WebSocket connection.
-     * Exposed for advanced use cases like {@link SonosHousehold}.
-     * @internal
-     */
-    get rawConnection(): SonosConnection;
-    /**
-     * Connects to the Sonos speaker over WebSocket.
-     *
-     * If `householdId`, `groupId`, or `playerId` were not provided in the
-     * constructor options, they are automatically discovered from the device
-     * during this call.
-     */
-    connect(): Promise<void>;
-    private discoverHouseholdId;
-    /** Gracefully closes the WebSocket connection to the Sonos speaker. */
-    disconnect(): Promise<void>;
-    /**
-     * Re-fetches the group topology from the speaker and updates
-     * {@link groupId}, {@link playerId}, and {@link coordinatorId}.
-     *
-     * Finds the group containing the connected player (by {@link playerId}).
-     * If no player ID is known yet, falls back to the first group.
-     *
-     * @returns The groups response from the device.
-     */
-    refreshGroups(): Promise<GroupsResponse>;
-    private handleConnected;
-    private handleEvent;
-}
-
-/**
- * A lightweight handle for controlling a single Sonos player within a household.
- *
- * `PlayerHandle` does not own a WebSocket connection — it routes all commands
- * through the shared {@link SonosHousehold} connection, using this player's
- * current `groupId` and `playerId` in the request headers.
- *
- * Obtain instances via {@link SonosHousehold.player}.
+ * Obtain instances via {@link SonosHousehold.player} or internally
+ * from {@link SonosClient}.
  */
 declare class PlayerHandle {
     /** RINCON player ID. */
@@ -1226,27 +1053,22 @@ declare class PlayerHandle {
     readonly capabilities: PlayerCapability[];
     private _group;
     private readonly householdId;
-    private readonly context;
-    /** Group volume control — targets this player's group. */
-    readonly groupVolume: GroupVolumeNamespace;
-    /** Individual player volume control. */
-    readonly playerVolume: PlayerVolumeNamespace;
-    /** Group topology management. */
-    readonly groups: GroupsNamespace;
-    /** Playback control — targets this player's group. */
-    readonly playback: PlaybackNamespace;
-    /** Playback metadata — targets this player's group. */
-    readonly playbackMetadata: PlaybackMetadataNamespace;
-    /** Favorites access. */
-    readonly favorites: FavoritesNamespace;
-    /** Playlists access. */
-    readonly playlists: PlaylistsNamespace;
+    /** Unified volume control (group volume + per-speaker volume). */
+    readonly volume: VolumeControl;
+    /** Playback and metadata control. */
+    readonly playback: PlaybackControl;
+    /** Sonos favorites. */
+    readonly favorites: FavoritesAccess;
+    /** Sonos playlists. */
+    readonly playlists: PlaylistsAccess;
     /** Audio clip playback. */
-    readonly audioClip: AudioClipNamespace;
-    /** Home theater settings (only meaningful for HT players like Arc). */
-    readonly homeTheater: HomeTheaterNamespace;
+    readonly audioClip: AudioClipControl;
+    /** Home theater settings. */
+    readonly homeTheater: HomeTheaterControl;
     /** Player settings. */
-    readonly settings: SettingsNamespace;
+    readonly settings: SettingsControl;
+    /** Raw group operations (used internally by SonosHousehold for grouping). */
+    readonly groups: GroupsNamespace;
     constructor(player: Player, group: Group, householdId: string, connection: SonosConnection);
     /** Current group ID this player belongs to. Updated automatically on topology changes. */
     get groupId(): string;
@@ -1254,7 +1076,7 @@ declare class PlayerHandle {
     get isCoordinator(): boolean;
     /**
      * Updates the group this player belongs to.
-     * Called internally by {@link SonosHousehold} when topology changes.
+     * Called internally by SonosHousehold when topology changes.
      * @internal
      */
     updateGroup(group: Group): void;
@@ -1269,7 +1091,7 @@ interface SonosHouseholdOptions {
     /** WebSocket port. @defaultValue 1443 */
     port?: number;
     /** Reconnection config. @defaultValue true */
-    reconnect?: SonosClientOptions['reconnect'];
+    reconnect?: Partial<ReconnectOptions> | boolean;
     /** Custom logger. */
     logger?: Logger;
     /** Command timeout in ms. @defaultValue 5000 */
@@ -1278,9 +1100,9 @@ interface SonosHouseholdOptions {
 /**
  * Top-level API for controlling an entire Sonos household.
  *
- * Uses a single WebSocket connection (via {@link SonosClient}) and exposes
- * {@link PlayerHandle} objects for targeting individual speakers. Automatically
- * tracks group topology changes and provides high-level grouping operations.
+ * Owns a single {@link SonosConnection} and exposes {@link PlayerHandle}
+ * objects for targeting individual speakers. Automatically tracks group
+ * topology changes and provides high-level grouping operations.
  *
  * @example
  * ```typescript
@@ -1288,19 +1110,22 @@ interface SonosHouseholdOptions {
  * await household.connect();
  *
  * const arc = household.player('Arc');
- * await arc.groupVolume.setRelativeVolume(5);
+ * await arc.volume.relative(5);
  *
  * const office = household.player('Office');
  * await household.group([arc, office], { transfer: true });
  * ```
  */
 declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
-    private readonly client;
+    private readonly connection;
     private readonly log;
     private readonly _players;
     private _groups;
     private _rawPlayers;
+    private _householdId;
     private _initialConnectDone;
+    /** Household-scoped GroupsNamespace for createGroup calls (no groupId/playerId). */
+    private readonly householdGroups;
     constructor(options: SonosHouseholdOptions);
     /** All discovered players in the household, keyed by RINCON player ID. */
     get players(): ReadonlyMap<string, PlayerHandle>;
@@ -1350,6 +1175,20 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
      */
     ungroupAll(): Promise<void>;
     /**
+     * Discovers the householdId by sending a raw getGroups request.
+     */
+    private discoverHouseholdId;
+    /**
+     * Routes incoming unsolicited messages to typed events.
+     * Filters by `_objectType` to avoid double-firing and Volume: undefined.
+     */
+    private handleMessage;
+    /**
+     * Handles reconnection events. Only refreshes topology on reconnect,
+     * not on initial connect (which is handled by connect() directly).
+     */
+    private handleReconnected;
+    /**
      * Resolves the audio source player based on the `transfer` option.
      * @returns The player with audio, or undefined if nothing is playing.
      */
@@ -1369,6 +1208,50 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
      * 4. Add remaining members
      */
     private transferAudio;
+}
+
+interface SonosClientOptions {
+    host: string;
+    port?: number;
+    reconnect?: Partial<ReconnectOptions> | boolean;
+    logger?: Logger;
+    requestTimeout?: number;
+}
+/**
+ * Simple single-speaker API for controlling one Sonos player.
+ *
+ * For multi-speaker control and grouping, use {@link SonosHousehold} instead.
+ *
+ * @example
+ * ```typescript
+ * const client = new SonosClient({ host: '192.168.68.96' });
+ * await client.connect();
+ * await client.volume.set(50);
+ * await client.disconnect();
+ * ```
+ */
+declare class SonosClient extends TypedEventEmitter<SonosEvents> {
+    private readonly connection;
+    private readonly log;
+    private _handle;
+    private _householdId;
+    constructor(options: SonosClientOptions);
+    get connected(): boolean;
+    get connectionState(): ConnectionState;
+    get householdId(): string | undefined;
+    get volume(): VolumeControl;
+    get playback(): PlaybackControl;
+    get favorites(): FavoritesAccess;
+    get playlists(): PlaylistsAccess;
+    get audioClip(): AudioClipControl;
+    get homeTheater(): HomeTheaterControl;
+    get settings(): SettingsControl;
+    private get handle();
+    connect(): Promise<void>;
+    disconnect(): Promise<void>;
+    private discoverAndCreateHandle;
+    private handleConnected;
+    private handleMessage;
 }
 
 /** Configuration options for Sonos device discovery. */
@@ -1486,4 +1369,4 @@ declare class TimeoutError extends SonosError {
     });
 }
 
-export { type AudioClipResponse, ClipPriority, ClipType, CommandError, ConnectionError, type ConnectionState, type Container, type CreateGroupResponse, type DiscoveredDevice, type DiscoveryOptions, ErrorCode, type Favorite, type FavoritesResponse, type Group, type GroupCoordinatorChangedEvent, type GroupOptions, type GroupVolumeStatus, type GroupsResponse, type HomeTheaterOptions, type LoadAudioClipOptions, type LoadFavoriteOptions, type LoadLineInOptions, type LoadPlaylistOptions, type LogLevel, type Logger, type MessageHeaders, type MetadataStatus, type ModifyGroupResponse, NAMESPACE_EVENT_MAP, type PlayModes, type PlaybackActions, PlaybackState, type PlaybackStatus, type Player, type PlayerCapability, PlayerHandle, type PlayerSettings, type PlayerVolumeStatus, type Playlist, type PlaylistResponse, type PlaylistTrack, type PlaylistsResponse, QueueAction, type ReconnectOptions, type ServiceInfo, SonosClient, type SonosClientOptions, SonosDiscovery, SonosError, type SonosEvents, SonosHousehold, type SonosHouseholdEvents, type SonosHouseholdOptions, type SonosRequest, type SonosResponse, TimeoutError, type Track, type TrackInfo, type VolumeResponse, consoleLogger, noopLogger };
+export { AudioClipControl, type AudioClipResponse, ClipPriority, ClipType, CommandError, ConnectionError, type ConnectionState, type Container, type CreateGroupResponse, type DiscoveredDevice, type DiscoveryOptions, ErrorCode, type Favorite, FavoritesAccess, type FavoritesResponse, type Group, type GroupCoordinatorChangedEvent, type GroupOptions, type GroupVolumeStatus, type GroupsResponse, HomeTheaterControl, type HomeTheaterOptions, type LoadAudioClipOptions, type LoadFavoriteOptions, type LoadLineInOptions, type LoadPlaylistOptions, type LogLevel, type Logger, type MessageHeaders, type MetadataStatus, type ModifyGroupResponse, NAMESPACE_EVENT_MAP, type PlayModes, type PlaybackActions, PlaybackControl, PlaybackState, type PlaybackStatus, type Player, type PlayerCapability, PlayerHandle, type PlayerSettings, type PlayerVolumeStatus, type Playlist, type PlaylistResponse, type PlaylistTrack, PlaylistsAccess, type PlaylistsResponse, QueueAction, type ReconnectOptions, type ServiceInfo, SettingsControl, SonosClient, type SonosClientOptions, SonosDiscovery, SonosError, type SonosEvents, SonosHousehold, type SonosHouseholdEvents, type SonosHouseholdOptions, type SonosRequest, type SonosResponse, TimeoutError, type Track, type TrackInfo, VolumeControl, type VolumeResponse, consoleLogger, noopLogger };
