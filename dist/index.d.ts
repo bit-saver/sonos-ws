@@ -1300,6 +1300,7 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     private readonly _players;
     private _groups;
     private _rawPlayers;
+    private _initialConnectDone;
     constructor(options: SonosHouseholdOptions);
     /** All discovered players in the household, keyed by RINCON player ID. */
     get players(): ReadonlyMap<string, PlayerHandle>;

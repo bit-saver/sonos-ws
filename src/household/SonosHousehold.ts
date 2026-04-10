@@ -51,6 +51,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   private readonly _players = new Map<string, PlayerHandle>();
   private _groups: Group[] = [];
   private _rawPlayers: Player[] = [];
+  private _initialConnectDone = false;
 
   constructor(options: SonosHouseholdOptions) {
     super();
@@ -66,9 +67,12 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
 
     // Forward all client events
     this.client.on('connected', () => {
-      this.refreshTopology().catch((err) => {
-        this.log.warn('Failed to refresh topology on reconnect', err);
-      });
+      // On reconnect (not initial connect), refresh topology automatically
+      if (this._initialConnectDone) {
+        this.refreshTopology().catch((err) => {
+          this.log.warn('Failed to refresh topology on reconnect', err);
+        });
+      }
       this.emit('connected');
     });
     this.client.on('disconnected', (reason) => this.emit('disconnected', reason));
@@ -118,6 +122,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   async connect(): Promise<void> {
     await this.client.connect();
     await this.refreshTopology();
+    this._initialConnectDone = true;
   }
 
   /** Gracefully closes the WebSocket connection. */
@@ -286,7 +291,9 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
         throw new SonosError(ErrorCode.PLAYER_NOT_FOUND, `Transfer source not found: ${transfer.id}`);
       }
       const sourceGroup = this._groups.find((g) => g.playerIds.includes(source.id));
-      if (!sourceGroup || sourceGroup.playbackState === 'PLAYBACK_STATE_IDLE') {
+      if (!sourceGroup
+        || (sourceGroup.playbackState !== 'PLAYBACK_STATE_PLAYING'
+          && sourceGroup.playbackState !== 'PLAYBACK_STATE_PAUSED')) {
         throw new SonosError(ErrorCode.ERROR_NO_CONTENT, `Transfer source "${source.name}" has no content`);
       }
       return source;
@@ -383,12 +390,14 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     targetCoordinator: PlayerHandle,
     allMemberIds: string[],
   ): Promise<void> {
-    const sourceGroup = this._groups.find((g) => g.coordinatorId === source.id)
-      ?? this._groups.find((g) => g.playerIds.includes(source.id));
+    const sourceGroup = this._groups.find((g) => g.playerIds.includes(source.id));
 
     if (!sourceGroup) {
       throw new SonosError(ErrorCode.GROUP_OPERATION_FAILED, `Could not find group for source player "${source.name}"`);
     }
+
+    // The shuffle must operate on the actual coordinator, not a non-coordinator member
+    const actualSourceId = sourceGroup.coordinatorId;
 
     // Step 1: Add target coordinator to the source's group
     const savedGroupId = this.client.groupId;
@@ -401,7 +410,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       // Step 2: Remove the source coordinator — this triggers the transfer
       // Expected to timeout (~8s) as the response comes as an event, not a command response
       try {
-        await this.client.groups.modifyGroupMembers([], [source.id]);
+        await this.client.groups.modifyGroupMembers([], [actualSourceId]);
       } catch (err) {
         if (!(err instanceof TimeoutError)) throw err;
         // Timeout is expected during coordinator shuffle — continue
@@ -415,7 +424,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     await this.refreshTopology();
 
     // Step 4: Add remaining members to the target's new group
-    const remaining = allMemberIds.filter((id) => id !== targetCoordinator.id && id !== source.id);
+    const remaining = allMemberIds.filter((id) => id !== targetCoordinator.id && id !== actualSourceId);
     if (remaining.length > 0) {
       const targetGroup = this._groups.find((g) => g.coordinatorId === targetCoordinator.id);
       if (targetGroup) {

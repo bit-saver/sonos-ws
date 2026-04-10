@@ -1289,6 +1289,7 @@ var SonosHousehold = class extends TypedEventEmitter {
   _players = /* @__PURE__ */ new Map();
   _groups = [];
   _rawPlayers = [];
+  _initialConnectDone = false;
   constructor(options) {
     super();
     this.log = options.logger ?? noopLogger;
@@ -1300,9 +1301,11 @@ var SonosHousehold = class extends TypedEventEmitter {
       requestTimeout: options.requestTimeout
     });
     this.client.on("connected", () => {
-      this.refreshTopology().catch((err) => {
-        this.log.warn("Failed to refresh topology on reconnect", err);
-      });
+      if (this._initialConnectDone) {
+        this.refreshTopology().catch((err) => {
+          this.log.warn("Failed to refresh topology on reconnect", err);
+        });
+      }
       this.emit("connected");
     });
     this.client.on("disconnected", (reason) => this.emit("disconnected", reason));
@@ -1347,6 +1350,7 @@ var SonosHousehold = class extends TypedEventEmitter {
   async connect() {
     await this.client.connect();
     await this.refreshTopology();
+    this._initialConnectDone = true;
   }
   /** Gracefully closes the WebSocket connection. */
   async disconnect() {
@@ -1475,7 +1479,7 @@ var SonosHousehold = class extends TypedEventEmitter {
         throw new SonosError("PLAYER_NOT_FOUND" /* PLAYER_NOT_FOUND */, `Transfer source not found: ${transfer.id}`);
       }
       const sourceGroup = this._groups.find((g) => g.playerIds.includes(source.id));
-      if (!sourceGroup || sourceGroup.playbackState === "PLAYBACK_STATE_IDLE") {
+      if (!sourceGroup || sourceGroup.playbackState !== "PLAYBACK_STATE_PLAYING" && sourceGroup.playbackState !== "PLAYBACK_STATE_PAUSED") {
         throw new SonosError("ERROR_NO_CONTENT" /* ERROR_NO_CONTENT */, `Transfer source "${source.name}" has no content`);
       }
       return source;
@@ -1546,10 +1550,11 @@ var SonosHousehold = class extends TypedEventEmitter {
    * 4. Add remaining members
    */
   async transferAudio(source, targetCoordinator, allMemberIds) {
-    const sourceGroup = this._groups.find((g) => g.coordinatorId === source.id) ?? this._groups.find((g) => g.playerIds.includes(source.id));
+    const sourceGroup = this._groups.find((g) => g.playerIds.includes(source.id));
     if (!sourceGroup) {
       throw new SonosError("GROUP_OPERATION_FAILED" /* GROUP_OPERATION_FAILED */, `Could not find group for source player "${source.name}"`);
     }
+    const actualSourceId = sourceGroup.coordinatorId;
     const savedGroupId = this.client.groupId;
     this.client.groupId = sourceGroup.id;
     try {
@@ -1557,7 +1562,7 @@ var SonosHousehold = class extends TypedEventEmitter {
         await this.client.groups.modifyGroupMembers([targetCoordinator.id]);
       }
       try {
-        await this.client.groups.modifyGroupMembers([], [source.id]);
+        await this.client.groups.modifyGroupMembers([], [actualSourceId]);
       } catch (err) {
         if (!(err instanceof TimeoutError)) throw err;
         this.log.debug("Expected timeout during coordinator transfer");
@@ -1566,7 +1571,7 @@ var SonosHousehold = class extends TypedEventEmitter {
       this.client.groupId = savedGroupId;
     }
     await this.refreshTopology();
-    const remaining = allMemberIds.filter((id) => id !== targetCoordinator.id && id !== source.id);
+    const remaining = allMemberIds.filter((id) => id !== targetCoordinator.id && id !== actualSourceId);
     if (remaining.length > 0) {
       const targetGroup = this._groups.find((g) => g.coordinatorId === targetCoordinator.id);
       if (targetGroup) {
