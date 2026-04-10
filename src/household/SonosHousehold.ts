@@ -283,15 +283,26 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
    * Discovers the householdId by sending a raw getGroups request.
    */
   private async discoverHouseholdId(): Promise<void> {
-    const request: SonosRequest = [
-      { namespace: 'groups:1', command: 'getGroups', cmdId: crypto.randomUUID() },
-      {},
-    ];
+    this.log.debug('Discovering householdId...');
     try {
-      const [headers] = await this.connection.send(request);
+      const [headers] = await this.connection.send([
+        { namespace: 'groups:1', command: 'getGroups', cmdId: crypto.randomUUID() },
+        {},
+      ]);
       if (headers.householdId) this._householdId = headers.householdId;
-    } catch {
-      // Expected if householdId is missing
+    } catch (err: unknown) {
+      // Command fails without householdId — extract it from the error response.
+      // The response is attached as the error's cause.
+      if (err instanceof Error && err.cause && Array.isArray(err.cause)) {
+        const [headers] = err.cause as SonosResponse;
+        if (headers?.householdId) this._householdId = headers.householdId;
+      }
+    }
+
+    if (this._householdId) {
+      this.log.debug(`Discovered householdId: ${this._householdId}`);
+    } else {
+      this.log.warn('Could not auto-discover householdId');
     }
   }
 

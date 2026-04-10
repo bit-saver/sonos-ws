@@ -424,7 +424,7 @@ var SonosConnection = class extends TypedEventEmitter {
     if (resHeaders.success === false) {
       const errorCode = resBody?.errorCode ?? resHeaders.response ?? "UNKNOWN";
       const reason = resBody?.reason ?? `Command failed: ${namespace}.${command}`;
-      throw new CommandError(errorCode, reason, { namespace, command, cmdId });
+      throw new CommandError(errorCode, reason, { namespace, command, cmdId, cause: response });
     }
     return response;
   }
@@ -1459,14 +1459,23 @@ var SonosHousehold = class extends TypedEventEmitter {
    * Discovers the householdId by sending a raw getGroups request.
    */
   async discoverHouseholdId() {
-    const request = [
-      { namespace: "groups:1", command: "getGroups", cmdId: crypto.randomUUID() },
-      {}
-    ];
+    this.log.debug("Discovering householdId...");
     try {
-      const [headers] = await this.connection.send(request);
+      const [headers] = await this.connection.send([
+        { namespace: "groups:1", command: "getGroups", cmdId: crypto.randomUUID() },
+        {}
+      ]);
       if (headers.householdId) this._householdId = headers.householdId;
-    } catch {
+    } catch (err) {
+      if (err instanceof Error && err.cause && Array.isArray(err.cause)) {
+        const [headers] = err.cause;
+        if (headers?.householdId) this._householdId = headers.householdId;
+      }
+    }
+    if (this._householdId) {
+      this.log.debug(`Discovered householdId: ${this._householdId}`);
+    } else {
+      this.log.warn("Could not auto-discover householdId");
     }
   }
   /**
