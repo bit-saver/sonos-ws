@@ -38,15 +38,15 @@ export interface SonosEvents {
   error: (error: SonosError | Error) => void;
 
   /** Emitted when the group volume or mute state changes. */
-  groupVolumeChanged: (data: GroupVolumeStatus) => void;
+  volumeChanged: (data: GroupVolumeStatus) => void;
   /** Emitted when an individual player's volume or mute state changes. */
   playerVolumeChanged: (data: PlayerVolumeStatus) => void;
   /** Emitted when group membership or topology changes (players grouped/ungrouped). */
   groupsChanged: (data: GroupsResponse) => void;
   /** Emitted when the playback state, position, or play modes change. */
-  playbackStatusChanged: (data: PlaybackStatus) => void;
+  playbackChanged: (data: PlaybackStatus) => void;
   /** Emitted when the currently playing track or next track metadata changes. */
-  metadataStatusChanged: (data: MetadataStatus) => void;
+  metadataChanged: (data: MetadataStatus) => void;
   /** Emitted when the user's favorites list is modified. */
   favoritesChanged: (data: FavoritesResponse) => void;
   /** Emitted when the user's playlists are modified. */
@@ -59,7 +59,7 @@ export interface SonosEvents {
    * The client automatically calls {@link SonosClient.refreshGroups} to update
    * its internal groupId. Listen to this event to react to topology changes.
    */
-  groupCoordinatorChanged: (data: GroupCoordinatorChangedEvent) => void;
+  coordinatorChanged: (data: GroupCoordinatorChangedEvent) => void;
 
   /** Emitted for every raw WebSocket message received from the Sonos device. Useful for debugging. */
   rawMessage: (message: SonosResponse) => void;
@@ -81,11 +81,11 @@ export interface SonosHouseholdEvents extends SonosEvents {
  * to the appropriate typed event emitter.
  */
 export const NAMESPACE_EVENT_MAP: Record<string, keyof SonosEvents> = {
-  'groupVolume:1': 'groupVolumeChanged',
+  'groupVolume:1': 'volumeChanged',
   'playerVolume:1': 'playerVolumeChanged',
   'groups:1': 'groupsChanged',
-  'playback:1': 'playbackStatusChanged',
-  'playbackMetadata:1': 'metadataStatusChanged',
+  'playback:1': 'playbackChanged',
+  'playbackMetadata:1': 'metadataChanged',
   'favorites:1': 'favoritesChanged',
   'playlists:1': 'playlistsChanged',
   'homeTheater:1': 'homeTheaterChanged',
