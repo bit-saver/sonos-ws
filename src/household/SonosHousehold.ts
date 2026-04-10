@@ -196,8 +196,48 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
    * @throws {SonosError} With code `INVALID_PARAMETER` if players array is empty.
    */
   async group(players: PlayerHandle[], options?: GroupOptions): Promise<void> {
-    // Implemented in Task 5
-    throw new Error('Not implemented');
+    if (players.length === 0) {
+      throw new SonosError(ErrorCode.ERROR_INVALID_PARAMETER, 'INVALID_PARAMETER: group() requires at least one player');
+    }
+
+    // Single player — just ensure they're solo
+    if (players.length === 1) {
+      const player = players[0]!;
+      const group = this._groups.find((g) => g.playerIds.includes(player.id));
+      if (group && group.playerIds.length === 1) return; // already solo
+      await this.client.groups.createGroup([player.id]);
+      await this.refreshTopology();
+      return;
+    }
+
+    const desiredCoordinator = players[0]!;
+    const desiredMemberIds = players.map((p) => p.id);
+
+    // Check if already in the desired configuration
+    const currentGroup = this._groups.find((g) => g.playerIds.includes(desiredCoordinator.id));
+    if (currentGroup
+      && currentGroup.coordinatorId === desiredCoordinator.id
+      && currentGroup.playerIds.length === desiredMemberIds.length
+      && desiredMemberIds.every((id) => currentGroup.playerIds.includes(id))) {
+      // Already grouped as desired — handle transfer option even in this case
+      if (!options?.transfer) return;
+    }
+
+    // Resolve audio source if transfer is requested
+    let audioSource: PlayerHandle | undefined;
+    if (options?.transfer) {
+      audioSource = this.resolveAudioSource(players, options.transfer);
+    }
+
+    // If we have an audio source and it needs to become coordinator via shuffle
+    if (audioSource && audioSource.id !== desiredCoordinator.id) {
+      await this.transferAudio(audioSource, desiredCoordinator, desiredMemberIds);
+    } else {
+      // Simple grouping: make desiredCoordinator the coordinator, add others
+      await this.simpleGroup(desiredCoordinator, desiredMemberIds);
+    }
+
+    await this.refreshTopology();
   }
 
   /**
@@ -206,15 +246,189 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
    * @param player - The player to ungroup.
    */
   async ungroup(player: PlayerHandle): Promise<void> {
-    // Implemented in Task 5
-    throw new Error('Not implemented');
+    const group = this._groups.find((g) => g.playerIds.includes(player.id));
+    if (!group || group.playerIds.length === 1) return; // already solo
+
+    await this.client.groups.createGroup([player.id]);
+    await this.refreshTopology();
   }
 
   /**
    * Ungroups all players in the household. Each becomes its own group.
    */
   async ungroupAll(): Promise<void> {
-    // Implemented in Task 5
-    throw new Error('Not implemented');
+    const multiPlayerGroups = this._groups.filter((g) => g.playerIds.length > 1);
+    for (const group of multiPlayerGroups) {
+      // Pull out all non-coordinator members
+      for (const playerId of group.playerIds) {
+        if (playerId !== group.coordinatorId) {
+          await this.client.groups.createGroup([playerId]);
+        }
+      }
+    }
+    if (multiPlayerGroups.length > 0) {
+      await this.refreshTopology();
+    }
+  }
+
+  /**
+   * Resolves the audio source player based on the `transfer` option.
+   * @returns The player with audio, or undefined if nothing is playing.
+   */
+  private resolveAudioSource(
+    targetPlayers: PlayerHandle[],
+    transfer: boolean | { readonly id: string },
+  ): PlayerHandle | undefined {
+    // Explicit player specified
+    if (typeof transfer === 'object') {
+      const source = this._players.get(transfer.id);
+      if (!source) {
+        throw new SonosError(ErrorCode.PLAYER_NOT_FOUND, `Transfer source not found: ${transfer.id}`);
+      }
+      const sourceGroup = this._groups.find((g) => g.playerIds.includes(source.id));
+      if (!sourceGroup || sourceGroup.playbackState === 'PLAYBACK_STATE_IDLE') {
+        throw new SonosError(ErrorCode.ERROR_NO_CONTENT, `Transfer source "${source.name}" has no content`);
+      }
+      return source;
+    }
+
+    // Auto-resolve: check target players first (by array order)
+    const targetIds = new Set(targetPlayers.map((p) => p.id));
+
+    // Phase 1: PLAYING among target players
+    for (const player of targetPlayers) {
+      const group = this._groups.find((g) => g.playerIds.includes(player.id));
+      if (group?.playbackState === 'PLAYBACK_STATE_PLAYING') return player;
+    }
+
+    // Phase 2: PAUSED among target players
+    for (const player of targetPlayers) {
+      const group = this._groups.find((g) => g.playerIds.includes(player.id));
+      if (group?.playbackState === 'PLAYBACK_STATE_PAUSED') return player;
+    }
+
+    // Phase 3: PLAYING elsewhere in household
+    for (const group of this._groups) {
+      if (group.playbackState === 'PLAYBACK_STATE_PLAYING') {
+        const coordinatorHandle = this._players.get(group.coordinatorId);
+        if (coordinatorHandle && !targetIds.has(coordinatorHandle.id)) return coordinatorHandle;
+      }
+    }
+
+    // Phase 4: PAUSED elsewhere in household
+    for (const group of this._groups) {
+      if (group.playbackState === 'PLAYBACK_STATE_PAUSED') {
+        const coordinatorHandle = this._players.get(group.coordinatorId);
+        if (coordinatorHandle && !targetIds.has(coordinatorHandle.id)) return coordinatorHandle;
+      }
+    }
+
+    // Nothing playing anywhere
+    return undefined;
+  }
+
+  /**
+   * Performs a simple group operation: ensures the coordinator owns a group
+   * with exactly the desired members.
+   */
+  private async simpleGroup(coordinator: PlayerHandle, memberIds: string[]): Promise<void> {
+    const currentGroup = this._groups.find((g) => g.playerIds.includes(coordinator.id));
+    if (!currentGroup) return;
+
+    // If coordinator is not the coordinator of its current group, pull it out first
+    if (currentGroup.coordinatorId !== coordinator.id) {
+      await this.client.groups.createGroup([coordinator.id]);
+      await this.refreshTopology();
+    }
+
+    // Now add the other members to the coordinator's group
+    const othersToAdd = memberIds.filter((id) => id !== coordinator.id);
+    if (othersToAdd.length > 0) {
+      // Target the coordinator's group for the modifyGroupMembers call
+      const coordGroup = this._groups.find((g) => g.coordinatorId === coordinator.id);
+      if (coordGroup) {
+        // Use raw connection to target the correct group
+        const currentGroupId = this.client.groupId;
+        this.client.groupId = coordGroup.id;
+        try {
+          // Remove members that shouldn't be in the group
+          const currentMembers = coordGroup.playerIds.filter((id) => id !== coordinator.id);
+          const toRemove = currentMembers.filter((id) => !memberIds.includes(id));
+          const toAdd = othersToAdd.filter((id) => !coordGroup.playerIds.includes(id));
+
+          if (toAdd.length > 0 || toRemove.length > 0) {
+            await this.client.groups.modifyGroupMembers(
+              toAdd.length > 0 ? toAdd : undefined,
+              toRemove.length > 0 ? toRemove : undefined,
+            );
+          }
+        } finally {
+          this.client.groupId = currentGroupId;
+        }
+      }
+    }
+  }
+
+  /**
+   * Transfers audio from a source player to a target coordinator using
+   * the coordinator shuffle technique.
+   *
+   * 1. Add target to source's group
+   * 2. Remove source from group (expected ~8s timeout)
+   * 3. Target inherits audio
+   * 4. Add remaining members
+   */
+  private async transferAudio(
+    source: PlayerHandle,
+    targetCoordinator: PlayerHandle,
+    allMemberIds: string[],
+  ): Promise<void> {
+    const sourceGroup = this._groups.find((g) => g.coordinatorId === source.id)
+      ?? this._groups.find((g) => g.playerIds.includes(source.id));
+
+    if (!sourceGroup) {
+      throw new SonosError(ErrorCode.GROUP_OPERATION_FAILED, `Could not find group for source player "${source.name}"`);
+    }
+
+    // Step 1: Add target coordinator to the source's group
+    const savedGroupId = this.client.groupId;
+    this.client.groupId = sourceGroup.id;
+    try {
+      if (!sourceGroup.playerIds.includes(targetCoordinator.id)) {
+        await this.client.groups.modifyGroupMembers([targetCoordinator.id]);
+      }
+
+      // Step 2: Remove the source coordinator — this triggers the transfer
+      // Expected to timeout (~8s) as the response comes as an event, not a command response
+      try {
+        await this.client.groups.modifyGroupMembers([], [source.id]);
+      } catch (err) {
+        if (!(err instanceof TimeoutError)) throw err;
+        // Timeout is expected during coordinator shuffle — continue
+        this.log.debug('Expected timeout during coordinator transfer');
+      }
+    } finally {
+      this.client.groupId = savedGroupId;
+    }
+
+    // Step 3: Refresh topology to find the new group
+    await this.refreshTopology();
+
+    // Step 4: Add remaining members to the target's new group
+    const remaining = allMemberIds.filter((id) => id !== targetCoordinator.id && id !== source.id);
+    if (remaining.length > 0) {
+      const targetGroup = this._groups.find((g) => g.coordinatorId === targetCoordinator.id);
+      if (targetGroup) {
+        const toAdd = remaining.filter((id) => !targetGroup.playerIds.includes(id));
+        if (toAdd.length > 0) {
+          this.client.groupId = targetGroup.id;
+          try {
+            await this.client.groups.modifyGroupMembers(toAdd);
+          } finally {
+            this.client.groupId = savedGroupId;
+          }
+        }
+      }
+    }
   }
 }

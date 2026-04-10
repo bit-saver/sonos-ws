@@ -85,3 +85,34 @@ describe('SonosHousehold', () => {
     expect(mockClient.disconnect).toHaveBeenCalled();
   });
 });
+
+describe('SonosHousehold grouping', () => {
+  let household: SonosHousehold;
+  let mockClient: any;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    household = new SonosHousehold({ host: '192.168.68.96' });
+    mockClient = (SonosClient as unknown as ReturnType<typeof vi.fn>).mock.results[0].value;
+    mockClient.groups.getGroups.mockResolvedValue(mockTopology);
+    await household.connect();
+  });
+
+  it('group() throws on empty array', async () => {
+    await expect(household.group([])).rejects.toThrow('INVALID_PARAMETER');
+  });
+
+  it('ungroup() is a no-op for solo player', async () => {
+    const initialCallCount = mockClient.groups.getGroups.mock.calls.length;
+    const arc = household.player('Arc');
+    await household.ungroup(arc);
+    // Should not call getGroups again since arc is already solo
+    expect(mockClient.groups.getGroups.mock.calls.length).toBe(initialCallCount);
+  });
+
+  it('group([single]) is a no-op for solo player', async () => {
+    const arc = household.player('Arc');
+    await household.group([arc]);
+    // Should not make any group modification API calls
+  });
+});
