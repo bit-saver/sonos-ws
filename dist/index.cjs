@@ -1515,28 +1515,19 @@ var SonosHousehold = class extends TypedEventEmitter {
     const currentGroup = this._groups.find((g) => g.playerIds.includes(coordinator.id));
     if (!currentGroup) return;
     if (currentGroup.coordinatorId !== coordinator.id) {
-      await this.client.groups.createGroup([coordinator.id]);
+      await coordinator.groups.createGroup([coordinator.id]);
       await this.refreshTopology();
     }
     const othersToAdd = memberIds.filter((id) => id !== coordinator.id);
     if (othersToAdd.length > 0) {
-      const coordGroup = this._groups.find((g) => g.coordinatorId === coordinator.id);
-      if (coordGroup) {
-        const currentGroupId = this.client.groupId;
-        this.client.groupId = coordGroup.id;
-        try {
-          const currentMembers = coordGroup.playerIds.filter((id) => id !== coordinator.id);
-          const toRemove = currentMembers.filter((id) => !memberIds.includes(id));
-          const toAdd = othersToAdd.filter((id) => !coordGroup.playerIds.includes(id));
-          if (toAdd.length > 0 || toRemove.length > 0) {
-            await this.client.groups.modifyGroupMembers(
-              toAdd.length > 0 ? toAdd : void 0,
-              toRemove.length > 0 ? toRemove : void 0
-            );
-          }
-        } finally {
-          this.client.groupId = currentGroupId;
-        }
+      const currentMembers = this._groups.find((g) => g.coordinatorId === coordinator.id)?.playerIds.filter((id) => id !== coordinator.id) ?? [];
+      const toRemove = currentMembers.filter((id) => !memberIds.includes(id));
+      const toAdd = othersToAdd.filter((id) => !this._groups.find((g) => g.coordinatorId === coordinator.id)?.playerIds.includes(id));
+      if (toAdd.length > 0 || toRemove.length > 0) {
+        await coordinator.groups.modifyGroupMembers(
+          toAdd.length > 0 ? toAdd : void 0,
+          toRemove.length > 0 ? toRemove : void 0
+        );
       }
     }
   }
@@ -1555,35 +1546,25 @@ var SonosHousehold = class extends TypedEventEmitter {
       throw new SonosError("GROUP_OPERATION_FAILED" /* GROUP_OPERATION_FAILED */, `Could not find group for source player "${source.name}"`);
     }
     const actualSourceId = sourceGroup.coordinatorId;
-    const savedGroupId = this.client.groupId;
-    this.client.groupId = sourceGroup.id;
+    const sourceCoordinator = this._players.get(actualSourceId);
+    if (!sourceCoordinator) {
+      throw new SonosError("GROUP_OPERATION_FAILED" /* GROUP_OPERATION_FAILED */, `Could not find coordinator for source group`);
+    }
+    if (!sourceGroup.playerIds.includes(targetCoordinator.id)) {
+      await sourceCoordinator.groups.modifyGroupMembers([targetCoordinator.id]);
+    }
     try {
-      if (!sourceGroup.playerIds.includes(targetCoordinator.id)) {
-        await this.client.groups.modifyGroupMembers([targetCoordinator.id]);
-      }
-      try {
-        await this.client.groups.modifyGroupMembers([], [actualSourceId]);
-      } catch (err) {
-        if (!(err instanceof TimeoutError)) throw err;
-        this.log.debug("Expected timeout during coordinator transfer");
-      }
-    } finally {
-      this.client.groupId = savedGroupId;
+      await sourceCoordinator.groups.modifyGroupMembers([], [actualSourceId]);
+    } catch (err) {
+      if (!(err instanceof TimeoutError)) throw err;
+      this.log.debug("Expected timeout during coordinator transfer");
     }
     await this.refreshTopology();
     const remaining = allMemberIds.filter((id) => id !== targetCoordinator.id && id !== actualSourceId);
     if (remaining.length > 0) {
-      const targetGroup = this._groups.find((g) => g.coordinatorId === targetCoordinator.id);
-      if (targetGroup) {
-        const toAdd = remaining.filter((id) => !targetGroup.playerIds.includes(id));
-        if (toAdd.length > 0) {
-          this.client.groupId = targetGroup.id;
-          try {
-            await this.client.groups.modifyGroupMembers(toAdd);
-          } finally {
-            this.client.groupId = savedGroupId;
-          }
-        }
+      const toAdd = remaining.filter((id) => !this._groups.find((g) => g.coordinatorId === targetCoordinator.id)?.playerIds.includes(id));
+      if (toAdd.length > 0) {
+        await targetCoordinator.groups.modifyGroupMembers(toAdd);
       }
     }
   }

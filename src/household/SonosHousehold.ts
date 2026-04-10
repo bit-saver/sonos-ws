@@ -344,34 +344,27 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
 
     // If coordinator is not the coordinator of its current group, pull it out first
     if (currentGroup.coordinatorId !== coordinator.id) {
-      await this.client.groups.createGroup([coordinator.id]);
+      await coordinator.groups.createGroup([coordinator.id]);
       await this.refreshTopology();
     }
 
     // Now add the other members to the coordinator's group
     const othersToAdd = memberIds.filter((id) => id !== coordinator.id);
     if (othersToAdd.length > 0) {
-      // Target the coordinator's group for the modifyGroupMembers call
-      const coordGroup = this._groups.find((g) => g.coordinatorId === coordinator.id);
-      if (coordGroup) {
-        // Use raw connection to target the correct group
-        const currentGroupId = this.client.groupId;
-        this.client.groupId = coordGroup.id;
-        try {
-          // Remove members that shouldn't be in the group
-          const currentMembers = coordGroup.playerIds.filter((id) => id !== coordinator.id);
-          const toRemove = currentMembers.filter((id) => !memberIds.includes(id));
-          const toAdd = othersToAdd.filter((id) => !coordGroup.playerIds.includes(id));
+      // Compute add/remove delta
+      const currentMembers = this._groups
+        .find((g) => g.coordinatorId === coordinator.id)
+        ?.playerIds.filter((id) => id !== coordinator.id) ?? [];
+      const toRemove = currentMembers.filter((id) => !memberIds.includes(id));
+      const toAdd = othersToAdd.filter((id) =>
+        !this._groups.find((g) => g.coordinatorId === coordinator.id)?.playerIds.includes(id));
 
-          if (toAdd.length > 0 || toRemove.length > 0) {
-            await this.client.groups.modifyGroupMembers(
-              toAdd.length > 0 ? toAdd : undefined,
-              toRemove.length > 0 ? toRemove : undefined,
-            );
-          }
-        } finally {
-          this.client.groupId = currentGroupId;
-        }
+      if (toAdd.length > 0 || toRemove.length > 0) {
+        // Use the coordinator's handle — it has the correct groupId and playerId
+        await coordinator.groups.modifyGroupMembers(
+          toAdd.length > 0 ? toAdd : undefined,
+          toRemove.length > 0 ? toRemove : undefined,
+        );
       }
     }
   }
@@ -398,26 +391,24 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
 
     // The shuffle must operate on the actual coordinator, not a non-coordinator member
     const actualSourceId = sourceGroup.coordinatorId;
+    const sourceCoordinator = this._players.get(actualSourceId);
+    if (!sourceCoordinator) {
+      throw new SonosError(ErrorCode.GROUP_OPERATION_FAILED, `Could not find coordinator for source group`);
+    }
 
     // Step 1: Add target coordinator to the source's group
-    const savedGroupId = this.client.groupId;
-    this.client.groupId = sourceGroup.id;
-    try {
-      if (!sourceGroup.playerIds.includes(targetCoordinator.id)) {
-        await this.client.groups.modifyGroupMembers([targetCoordinator.id]);
-      }
+    if (!sourceGroup.playerIds.includes(targetCoordinator.id)) {
+      await sourceCoordinator.groups.modifyGroupMembers([targetCoordinator.id]);
+    }
 
-      // Step 2: Remove the source coordinator — this triggers the transfer
-      // Expected to timeout (~8s) as the response comes as an event, not a command response
-      try {
-        await this.client.groups.modifyGroupMembers([], [actualSourceId]);
-      } catch (err) {
-        if (!(err instanceof TimeoutError)) throw err;
-        // Timeout is expected during coordinator shuffle — continue
-        this.log.debug('Expected timeout during coordinator transfer');
-      }
-    } finally {
-      this.client.groupId = savedGroupId;
+    // Step 2: Remove the source coordinator — this triggers the transfer
+    // Expected to timeout (~8s) as the response comes as an event, not a command response
+    try {
+      await sourceCoordinator.groups.modifyGroupMembers([], [actualSourceId]);
+    } catch (err) {
+      if (!(err instanceof TimeoutError)) throw err;
+      // Timeout is expected during coordinator shuffle — continue
+      this.log.debug('Expected timeout during coordinator transfer');
     }
 
     // Step 3: Refresh topology to find the new group
@@ -426,17 +417,10 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     // Step 4: Add remaining members to the target's new group
     const remaining = allMemberIds.filter((id) => id !== targetCoordinator.id && id !== actualSourceId);
     if (remaining.length > 0) {
-      const targetGroup = this._groups.find((g) => g.coordinatorId === targetCoordinator.id);
-      if (targetGroup) {
-        const toAdd = remaining.filter((id) => !targetGroup.playerIds.includes(id));
-        if (toAdd.length > 0) {
-          this.client.groupId = targetGroup.id;
-          try {
-            await this.client.groups.modifyGroupMembers(toAdd);
-          } finally {
-            this.client.groupId = savedGroupId;
-          }
-        }
+      const toAdd = remaining.filter((id) =>
+        !this._groups.find((g) => g.coordinatorId === targetCoordinator.id)?.playerIds.includes(id));
+      if (toAdd.length > 0) {
+        await targetCoordinator.groups.modifyGroupMembers(toAdd);
       }
     }
   }
