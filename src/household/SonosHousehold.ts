@@ -484,24 +484,31 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       await sourceCoordinator.groups.modifyGroupMembers([targetCoordinator.id]);
     }
 
-    // Step 2: Remove the source coordinator — this triggers the transfer
-    // Expected to timeout (~8s) as the response comes as an event, not a command response
+    // Step 2: Remove the source coordinator — this triggers the transfer.
+    // The Sonos device responds with a groupCoordinatorChanged message
+    // (success: false, type: groupCoordinatorChanged) or a timeout.
+    // Both are expected — the coordinator is moving, not failing.
     try {
       await sourceCoordinator.groups.modifyGroupMembers([], [actualSourceId]);
-    } catch (err) {
-      if (!(err instanceof TimeoutError)) throw err;
-      // Timeout is expected during coordinator shuffle — continue
-      this.log.debug('Expected timeout during coordinator transfer');
+    } catch {
+      // Expected: CommandError (coordinator redirect) or TimeoutError
+      this.log.debug('Coordinator shuffle complete (expected error during transfer)');
     }
 
-    // Step 3: Refresh topology to find the new group
+    // Step 3: Wait for topology to settle, then refresh
+    await new Promise((r) => setTimeout(r, 500));
     await this.refreshTopology();
 
+    this.log.debug(`After shuffle: target ${targetCoordinator.name} groupId=${targetCoordinator.groupId}`);
+    const targetGroup = this._groups.find((g) => g.coordinatorId === targetCoordinator.id);
+    this.log.debug(`Target group: ${targetGroup?.id} members=${targetGroup?.playerIds?.length}`);
+
     // Step 4: Add remaining members to the target's new group
-    const remaining = allMemberIds.filter((id) => id !== targetCoordinator.id && id !== actualSourceId);
+    const remaining = allMemberIds.filter((id) => id !== targetCoordinator.id);
+    this.log.debug(`Remaining to add: ${remaining.length} ids`);
     if (remaining.length > 0) {
-      const toAdd = remaining.filter((id) =>
-        !this._groups.find((g) => g.coordinatorId === targetCoordinator.id)?.playerIds.includes(id));
+      const toAdd = remaining.filter((id) => !targetGroup?.playerIds.includes(id));
+      this.log.debug(`toAdd after filter: ${toAdd.length} ids`);
       if (toAdd.length > 0) {
         await targetCoordinator.groups.modifyGroupMembers(toAdd);
       }
