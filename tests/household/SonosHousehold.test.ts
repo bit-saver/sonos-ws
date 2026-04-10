@@ -1,26 +1,28 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SonosHousehold } from '../../src/household/SonosHousehold.js';
-import { SonosClient } from '../../src/client/SonosClient.js';
+import { SonosConnection } from '../../src/client/SonosConnection.js';
 import type { GroupsResponse, Group, Player } from '../../src/types/groups.js';
 
-// Mock SonosClient
-vi.mock('../../src/client/SonosClient.js', () => {
-  const mockClient = {
+// Mock SonosConnection
+vi.mock('../../src/client/SonosConnection.js', () => {
+  const listeners = new Map<string, Function[]>();
+  const mockConnection = {
     connect: vi.fn().mockResolvedValue(undefined),
     disconnect: vi.fn().mockResolvedValue(undefined),
-    on: vi.fn().mockReturnThis(),
+    state: 'connected',
+    on: vi.fn((event: string, handler: Function) => {
+      if (!listeners.has(event)) listeners.set(event, []);
+      listeners.get(event)!.push(handler);
+      return mockConnection;
+    }),
     off: vi.fn().mockReturnThis(),
     once: vi.fn().mockReturnThis(),
     removeAllListeners: vi.fn().mockReturnThis(),
-    householdId: 'HH_1',
-    groupId: 'RINCON_ARC:123',
-    playerId: 'RINCON_ARC',
-    rawConnection: {},
-    groups: {
-      getGroups: vi.fn(),
-    },
+    emit: vi.fn(),
+    send: vi.fn(),
+    _listeners: listeners,
   };
-  return { SonosClient: vi.fn(() => mockClient) };
+  return { SonosConnection: vi.fn(() => mockConnection) };
 });
 
 const mockTopology: GroupsResponse = {
@@ -36,20 +38,50 @@ const mockTopology: GroupsResponse = {
   ] as Player[],
 };
 
+function getMockConnection(): any {
+  return (SonosConnection as unknown as ReturnType<typeof vi.fn>).mock.results[0].value;
+}
+
 describe('SonosHousehold', () => {
   let household: SonosHousehold;
+  let mockConn: any;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Reset the listeners map
+    const Constructor = SonosConnection as unknown as ReturnType<typeof vi.fn>;
+    Constructor.mockClear();
+
     household = new SonosHousehold({ host: '192.168.68.96' });
-    const mockClient = (SonosClient as unknown as ReturnType<typeof vi.fn>).mock.results[0].value;
-    mockClient.groups.getGroups.mockResolvedValue(mockTopology);
+    mockConn = getMockConnection();
+
+    // Reset listeners
+    mockConn._listeners.clear();
+    // Re-wire the on mock to track listeners
+    mockConn.on.mockImplementation((event: string, handler: Function) => {
+      if (!mockConn._listeners.has(event)) mockConn._listeners.set(event, []);
+      mockConn._listeners.get(event)!.push(handler);
+      return mockConn;
+    });
+
+    // Mock send to return householdId for discoverHouseholdId, and topology for getGroups
+    mockConn.send.mockImplementation((request: any) => {
+      const [headers] = request;
+      if (headers.namespace === 'groups:1' && headers.command === 'getGroups') {
+        return Promise.resolve([
+          { householdId: 'HH_1', success: true },
+          mockTopology,
+        ]);
+      }
+      return Promise.resolve([{ success: true }, {}]);
+    });
   });
 
   it('connects and discovers topology', async () => {
     await household.connect();
     expect(household.players.size).toBe(3);
     expect(household.groups.length).toBe(3);
+    expect(household.householdId).toBe('HH_1');
   });
 
   it('player() returns handle by name (case-insensitive)', async () => {
@@ -78,23 +110,43 @@ describe('SonosHousehold', () => {
     expect(office.groupId).toBe('RINCON_OFFICE:456');
   });
 
-  it('disconnect calls client disconnect', async () => {
+  it('disconnect calls connection disconnect', async () => {
     await household.connect();
     await household.disconnect();
-    const mockClient = (SonosClient as unknown as ReturnType<typeof vi.fn>).mock.results[0].value;
-    expect(mockClient.disconnect).toHaveBeenCalled();
+    expect(mockConn.disconnect).toHaveBeenCalled();
   });
 });
 
 describe('SonosHousehold grouping', () => {
   let household: SonosHousehold;
-  let mockClient: any;
+  let mockConn: any;
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    const Constructor = SonosConnection as unknown as ReturnType<typeof vi.fn>;
+    Constructor.mockClear();
+
     household = new SonosHousehold({ host: '192.168.68.96' });
-    mockClient = (SonosClient as unknown as ReturnType<typeof vi.fn>).mock.results[0].value;
-    mockClient.groups.getGroups.mockResolvedValue(mockTopology);
+    mockConn = getMockConnection();
+
+    mockConn._listeners.clear();
+    mockConn.on.mockImplementation((event: string, handler: Function) => {
+      if (!mockConn._listeners.has(event)) mockConn._listeners.set(event, []);
+      mockConn._listeners.get(event)!.push(handler);
+      return mockConn;
+    });
+
+    mockConn.send.mockImplementation((request: any) => {
+      const [headers] = request;
+      if (headers.namespace === 'groups:1' && headers.command === 'getGroups') {
+        return Promise.resolve([
+          { householdId: 'HH_1', success: true },
+          mockTopology,
+        ]);
+      }
+      return Promise.resolve([{ success: true }, {}]);
+    });
+
     await household.connect();
   });
 
@@ -103,16 +155,18 @@ describe('SonosHousehold grouping', () => {
   });
 
   it('ungroup() is a no-op for solo player', async () => {
-    const initialCallCount = mockClient.groups.getGroups.mock.calls.length;
+    const initialCallCount = mockConn.send.mock.calls.length;
     const arc = household.player('Arc');
     await household.ungroup(arc);
-    // Should not call getGroups again since arc is already solo
-    expect(mockClient.groups.getGroups.mock.calls.length).toBe(initialCallCount);
+    // Should not call send again since arc is already solo
+    expect(mockConn.send.mock.calls.length).toBe(initialCallCount);
   });
 
   it('group([single]) is a no-op for solo player', async () => {
     const arc = household.player('Arc');
+    const initialCallCount = mockConn.send.mock.calls.length;
     await household.group([arc]);
-    // Should not make any group modification API calls
+    // Should not make any additional API calls
+    expect(mockConn.send.mock.calls.length).toBe(initialCallCount);
   });
 });

@@ -1,14 +1,26 @@
-import { SonosClient } from '../client/SonosClient.js';
-import type { SonosClientOptions } from '../client/SonosClient.js';
+import { SonosConnection } from '../client/SonosConnection.js';
+import type { ReconnectOptions } from '../client/SonosConnection.js';
 import { TypedEventEmitter } from '../util/TypedEventEmitter.js';
-import type { SonosHouseholdEvents } from '../types/events.js';
+import type { SonosHouseholdEvents, GroupCoordinatorChangedEvent } from '../types/events.js';
+import { NAMESPACE_EVENT_MAP } from '../types/events.js';
 import type { Group, Player, GroupsResponse, GroupOptions } from '../types/groups.js';
+import type { SonosRequest, SonosResponse } from '../types/messages.js';
 import type { Logger } from '../util/logger.js';
 import { noopLogger } from '../util/logger.js';
 import { SonosError } from '../errors/SonosError.js';
 import { ErrorCode } from '../types/errors.js';
 import { TimeoutError } from '../errors/TimeoutError.js';
-import { PlayerHandle } from './PlayerHandle.js';
+import { PlayerHandle } from '../player/PlayerHandle.js';
+import { GroupsNamespace } from '../namespaces/GroupsNamespace.js';
+import type { NamespaceContext } from '../namespaces/BaseNamespace.js';
+
+const DEFAULT_RECONNECT: ReconnectOptions = {
+  enabled: true,
+  initialDelay: 1000,
+  maxDelay: 30000,
+  factor: 2,
+  maxAttempts: Infinity,
+};
 
 /**
  * Configuration options for creating a {@link SonosHousehold} instance.
@@ -19,7 +31,7 @@ export interface SonosHouseholdOptions {
   /** WebSocket port. @defaultValue 1443 */
   port?: number;
   /** Reconnection config. @defaultValue true */
-  reconnect?: SonosClientOptions['reconnect'];
+  reconnect?: Partial<ReconnectOptions> | boolean;
   /** Custom logger. */
   logger?: Logger;
   /** Command timeout in ms. @defaultValue 5000 */
@@ -29,9 +41,9 @@ export interface SonosHouseholdOptions {
 /**
  * Top-level API for controlling an entire Sonos household.
  *
- * Uses a single WebSocket connection (via {@link SonosClient}) and exposes
- * {@link PlayerHandle} objects for targeting individual speakers. Automatically
- * tracks group topology changes and provides high-level grouping operations.
+ * Owns a single {@link SonosConnection} and exposes {@link PlayerHandle}
+ * objects for targeting individual speakers. Automatically tracks group
+ * topology changes and provides high-level grouping operations.
  *
  * @example
  * ```typescript
@@ -39,60 +51,43 @@ export interface SonosHouseholdOptions {
  * await household.connect();
  *
  * const arc = household.player('Arc');
- * await arc.groupVolume.setRelativeVolume(5);
+ * await arc.volume.relative(5);
  *
  * const office = household.player('Office');
  * await household.group([arc, office], { transfer: true });
  * ```
  */
 export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
-  private readonly client: SonosClient;
+  private readonly connection: SonosConnection;
   private readonly log: Logger;
   private readonly _players = new Map<string, PlayerHandle>();
   private _groups: Group[] = [];
   private _rawPlayers: Player[] = [];
+  private _householdId: string | undefined;
   private _initialConnectDone = false;
+
+  /** Household-scoped GroupsNamespace for createGroup calls (no groupId/playerId). */
+  private readonly householdGroups: GroupsNamespace;
 
   constructor(options: SonosHouseholdOptions) {
     super();
     this.log = options.logger ?? noopLogger;
 
-    this.client = new SonosClient({
+    this.connection = new SonosConnection({
       host: options.host,
-      port: options.port,
-      reconnect: options.reconnect,
-      logger: options.logger,
-      requestTimeout: options.requestTimeout,
+      port: options.port ?? 1443,
+      reconnect: resolveReconnectOptions(options.reconnect),
+      requestTimeout: options.requestTimeout ?? 5000,
+      logger: this.log,
     });
 
-    // Forward all client events
-    this.client.on('connected', () => {
-      // On reconnect (not initial connect), refresh topology automatically
-      if (this._initialConnectDone) {
-        this.refreshTopology().catch((err) => {
-          this.log.warn('Failed to refresh topology on reconnect', err);
-        });
-      }
-      this.emit('connected');
-    });
-    this.client.on('disconnected', (reason) => this.emit('disconnected', reason));
-    this.client.on('reconnecting', (attempt, delay) => this.emit('reconnecting', attempt, delay));
-    this.client.on('error', (err) => this.emit('error', err));
-    this.client.on('rawMessage', (msg) => this.emit('rawMessage', msg));
-    this.client.on('groupVolumeChanged', (data) => this.emit('groupVolumeChanged', data));
-    this.client.on('playerVolumeChanged', (data) => this.emit('playerVolumeChanged', data));
-    this.client.on('groupsChanged', (data) => this.emit('groupsChanged', data));
-    this.client.on('playbackStatusChanged', (data) => this.emit('playbackStatusChanged', data));
-    this.client.on('metadataStatusChanged', (data) => this.emit('metadataStatusChanged', data));
-    this.client.on('favoritesChanged', (data) => this.emit('favoritesChanged', data));
-    this.client.on('playlistsChanged', (data) => this.emit('playlistsChanged', data));
-    this.client.on('homeTheaterChanged', (data) => this.emit('homeTheaterChanged', data));
-    this.client.on('groupCoordinatorChanged', (data) => {
-      this.emit('groupCoordinatorChanged', data);
-      this.refreshTopology().catch((err) => {
-        this.log.warn('Failed to refresh topology after coordinator change', err);
-      });
-    });
+    const householdContext: NamespaceContext = {
+      connection: this.connection,
+      getHouseholdId: () => this._householdId,
+      getGroupId: () => undefined,
+      getPlayerId: () => undefined,
+    };
+    this.householdGroups = new GroupsNamespace(householdContext);
   }
 
   /** All discovered players in the household, keyed by RINCON player ID. */
@@ -107,12 +102,12 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
 
   /** The Sonos household ID. */
   get householdId(): string | undefined {
-    return this.client.householdId;
+    return this._householdId;
   }
 
   /** Whether the WebSocket connection is currently open. */
   get connected(): boolean {
-    return this.client.connected;
+    return this.connection.state === 'connected';
   }
 
   /**
@@ -120,14 +115,23 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
    * Populates {@link players} and {@link groups}.
    */
   async connect(): Promise<void> {
-    await this.client.connect();
+    this._initialConnectDone = false;
+
+    this.connection.on('connected', () => this.handleReconnected());
+    this.connection.on('disconnected', (r) => this.emit('disconnected', r));
+    this.connection.on('reconnecting', (a, d) => this.emit('reconnecting', a, d));
+    this.connection.on('error', (e) => this.emit('error', e));
+    this.connection.on('message', (msg) => this.handleMessage(msg));
+
+    await this.connection.connect();
+    await this.discoverHouseholdId();
     await this.refreshTopology();
     this._initialConnectDone = true;
   }
 
   /** Gracefully closes the WebSocket connection. */
   async disconnect(): Promise<void> {
-    await this.client.disconnect();
+    await this.connection.disconnect();
   }
 
   /**
@@ -160,12 +164,11 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
    * @internal
    */
   async refreshTopology(): Promise<GroupsResponse> {
-    const result = await this.client.groups.getGroups();
+    const result = await this.householdGroups.getGroups();
     this._groups = result.groups;
     this._rawPlayers = result.players;
 
-    const connection = this.client.rawConnection;
-    const householdId = this.client.householdId ?? '';
+    const householdId = this._householdId ?? '';
 
     // Create or update player handles
     for (const player of result.players) {
@@ -176,7 +179,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       if (existing) {
         existing.updateGroup(group);
       } else {
-        this._players.set(player.id, new PlayerHandle(player, group, householdId, connection));
+        this._players.set(player.id, new PlayerHandle(player, group, householdId, this.connection));
       }
     }
 
@@ -210,7 +213,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       const player = players[0]!;
       const group = this._groups.find((g) => g.playerIds.includes(player.id));
       if (group && group.playerIds.length === 1) return; // already solo
-      await this.client.groups.createGroup([player.id]);
+      await this.householdGroups.createGroup([player.id]);
       await this.refreshTopology();
       return;
     }
@@ -254,7 +257,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     const group = this._groups.find((g) => g.playerIds.includes(player.id));
     if (!group || group.playerIds.length === 1) return; // already solo
 
-    await this.client.groups.createGroup([player.id]);
+    await this.householdGroups.createGroup([player.id]);
     await this.refreshTopology();
   }
 
@@ -267,13 +270,79 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       // Pull out all non-coordinator members
       for (const playerId of group.playerIds) {
         if (playerId !== group.coordinatorId) {
-          await this.client.groups.createGroup([playerId]);
+          await this.householdGroups.createGroup([playerId]);
         }
       }
     }
     if (multiPlayerGroups.length > 0) {
       await this.refreshTopology();
     }
+  }
+
+  /**
+   * Discovers the householdId by sending a raw getGroups request.
+   */
+  private async discoverHouseholdId(): Promise<void> {
+    const request: SonosRequest = [
+      { namespace: 'groups:1', command: 'getGroups', cmdId: crypto.randomUUID() },
+      {},
+    ];
+    try {
+      const [headers] = await this.connection.send(request);
+      if (headers.householdId) this._householdId = headers.householdId;
+    } catch {
+      // Expected if householdId is missing
+    }
+  }
+
+  /**
+   * Routes incoming unsolicited messages to typed events.
+   * Filters by `_objectType` to avoid double-firing and Volume: undefined.
+   */
+  private handleMessage(message: SonosResponse): void {
+    this.emit('rawMessage', message);
+    const [headers, body] = message;
+    const namespace = headers?.namespace;
+    if (!namespace) return;
+
+    // Capture householdId from any message
+    if (!this._householdId && headers.householdId) {
+      this._householdId = headers.householdId;
+    }
+
+    const objectType = body?._objectType as string | undefined;
+
+    // Coordinator changes — refresh topology, don't route as volume event
+    if (objectType === 'groupCoordinatorChanged') {
+      this.emit('coordinatorChanged', body as unknown as GroupCoordinatorChangedEvent);
+      this.refreshTopology().catch((err) => this.log.warn('Failed to refresh topology', err));
+      return;
+    }
+
+    // Skip events with empty body (subscribe confirmations)
+    if (!objectType) return;
+
+    // Route to typed event
+    const eventName = NAMESPACE_EVENT_MAP[namespace];
+    if (eventName) {
+      (this.emit as any)(eventName, body);
+    }
+  }
+
+  /**
+   * Handles reconnection events. Only refreshes topology on reconnect,
+   * not on initial connect (which is handled by connect() directly).
+   */
+  private async handleReconnected(): Promise<void> {
+    if (this._initialConnectDone) {
+      await this.refreshTopology().catch((err) =>
+        this.log.warn('Failed to refresh topology on reconnect', err));
+      // Resubscribe all player handle namespaces
+      for (const handle of this._players.values()) {
+        try { await handle.volume.subscribe(); } catch { /* best effort */ }
+      }
+    }
+    this.emit('connected');
   }
 
   /**
@@ -424,4 +493,16 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       }
     }
   }
+}
+
+function resolveReconnectOptions(
+  input: Partial<ReconnectOptions> | boolean | undefined,
+): ReconnectOptions {
+  if (input === false) {
+    return { ...DEFAULT_RECONNECT, enabled: false };
+  }
+  if (input === true || input === undefined) {
+    return { ...DEFAULT_RECONNECT };
+  }
+  return { ...DEFAULT_RECONNECT, ...input };
 }
