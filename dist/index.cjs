@@ -797,10 +797,11 @@ var VolumeControl = class {
   /**
    * Adjusts the group volume by a relative amount.
    * @param delta - Amount to adjust (positive to increase, negative to decrease).
-   * @returns The resulting volume level.
+   * @returns The resulting volume status after the adjustment.
    */
   async relative(delta) {
-    return this.group.setRelativeVolume(delta);
+    await this.group.setRelativeVolume(delta);
+    return this.group.getVolume();
   }
   /**
    * Mutes or unmutes the entire group.

@@ -803,9 +803,9 @@ declare class VolumeControl {
     /**
      * Adjusts the group volume by a relative amount.
      * @param delta - Amount to adjust (positive to increase, negative to decrease).
-     * @returns The resulting volume level.
+     * @returns The resulting volume status after the adjustment.
      */
-    relative(delta: number): Promise<VolumeResponse>;
+    relative(delta: number): Promise<GroupVolumeStatus>;
     /**
      * Mutes or unmutes the entire group.
      * @param muted - `true` to mute, `false` to unmute.
