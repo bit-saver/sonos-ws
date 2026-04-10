@@ -208,6 +208,9 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       throw new SonosError(ErrorCode.ERROR_INVALID_PARAMETER, 'INVALID_PARAMETER: group() requires at least one player');
     }
 
+    // Refresh topology to get current playback states — cached data may be stale
+    await this.refreshTopology();
+
     // Single player — just ensure they're solo
     if (players.length === 1) {
       const player = players[0]!;

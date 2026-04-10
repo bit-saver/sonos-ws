@@ -1462,6 +1462,7 @@ var SonosHousehold = class extends TypedEventEmitter {
     if (players.length === 0) {
       throw new SonosError("ERROR_INVALID_PARAMETER" /* ERROR_INVALID_PARAMETER */, "INVALID_PARAMETER: group() requires at least one player");
     }
+    await this.refreshTopology();
     if (players.length === 1) {
       const player = players[0];
       const group = this._groups.find((g) => g.playerIds.includes(player.id));
