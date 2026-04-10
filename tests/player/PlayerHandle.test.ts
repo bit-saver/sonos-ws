@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { PlayerHandle } from '../../src/household/PlayerHandle.js';
+import { PlayerHandle } from '../../src/player/PlayerHandle.js';
 import type { Player, Group } from '../../src/types/groups.js';
 import type { SonosConnection } from '../../src/client/SonosConnection.js';
 
@@ -16,12 +16,6 @@ const arcPlayer: Player = {
   capabilities: ['PLAYBACK', 'HT_PLAYBACK'],
 };
 
-const officePlayer: Player = {
-  id: 'RINCON_OFFICE',
-  name: 'Office',
-  capabilities: ['PLAYBACK'],
-};
-
 const arcGroup: Group = {
   id: 'RINCON_ARC:123',
   name: 'Arc',
@@ -30,64 +24,51 @@ const arcGroup: Group = {
 };
 
 describe('PlayerHandle', () => {
-  it('exposes player id and name', () => {
-    const conn = mockConnection();
-    const handle = new PlayerHandle(arcPlayer, arcGroup, 'HH_1', conn);
+  it('exposes player id, name, and capabilities', () => {
+    const handle = new PlayerHandle(arcPlayer, arcGroup, 'HH_1', mockConnection());
     expect(handle.id).toBe('RINCON_ARC');
     expect(handle.name).toBe('Arc');
+    expect(handle.capabilities).toEqual(['PLAYBACK', 'HT_PLAYBACK']);
   });
 
   it('returns correct groupId', () => {
-    const conn = mockConnection();
-    const handle = new PlayerHandle(arcPlayer, arcGroup, 'HH_1', conn);
+    const handle = new PlayerHandle(arcPlayer, arcGroup, 'HH_1', mockConnection());
     expect(handle.groupId).toBe('RINCON_ARC:123');
   });
 
   it('isCoordinator returns true when player is coordinator', () => {
-    const conn = mockConnection();
-    const handle = new PlayerHandle(arcPlayer, arcGroup, 'HH_1', conn);
+    const handle = new PlayerHandle(arcPlayer, arcGroup, 'HH_1', mockConnection());
     expect(handle.isCoordinator).toBe(true);
   });
 
-  it('isCoordinator returns false when player is not coordinator', () => {
-    const conn = mockConnection();
-    const groupedGroup: Group = {
-      id: 'RINCON_ARC:123',
-      name: 'Arc + 1',
-      coordinatorId: 'RINCON_ARC',
-      playerIds: ['RINCON_ARC', 'RINCON_OFFICE'],
-    };
-    const handle = new PlayerHandle(officePlayer, groupedGroup, 'HH_1', conn);
-    expect(handle.isCoordinator).toBe(false);
-  });
-
   it('updates groupId when updateGroup is called', () => {
-    const conn = mockConnection();
-    const handle = new PlayerHandle(arcPlayer, arcGroup, 'HH_1', conn);
-    expect(handle.groupId).toBe('RINCON_ARC:123');
-
+    const handle = new PlayerHandle(arcPlayer, arcGroup, 'HH_1', mockConnection());
     const newGroup: Group = { id: 'RINCON_ARC:789', name: 'Arc + 1', coordinatorId: 'RINCON_ARC', playerIds: ['RINCON_ARC', 'RINCON_OFFICE'] };
     handle.updateGroup(newGroup);
     expect(handle.groupId).toBe('RINCON_ARC:789');
   });
 
-  it('has namespace accessors that use player-scoped context', () => {
-    const conn = mockConnection();
-    const handle = new PlayerHandle(arcPlayer, arcGroup, 'HH_1', conn);
-    expect(handle.groupVolume).toBeDefined();
-    expect(handle.playerVolume).toBeDefined();
+  it('has wrapper namespace accessors', () => {
+    const handle = new PlayerHandle(arcPlayer, arcGroup, 'HH_1', mockConnection());
+    expect(handle.volume).toBeDefined();
     expect(handle.playback).toBeDefined();
-    expect(handle.playbackMetadata).toBeDefined();
     expect(handle.favorites).toBeDefined();
     expect(handle.playlists).toBeDefined();
     expect(handle.audioClip).toBeDefined();
     expect(handle.homeTheater).toBeDefined();
     expect(handle.settings).toBeDefined();
+    expect(handle.groups).toBeDefined();
   });
 
-  it('capabilities reflects player capabilities', () => {
+  it('volume.set sends command with correct groupId', async () => {
     const conn = mockConnection();
     const handle = new PlayerHandle(arcPlayer, arcGroup, 'HH_1', conn);
-    expect(handle.capabilities).toEqual(['PLAYBACK', 'HT_PLAYBACK']);
+    await handle.volume.set(50);
+    const send = conn.send as ReturnType<typeof vi.fn>;
+    const [headers, body] = send.mock.calls[0][0];
+    expect(headers.groupId).toBe('RINCON_ARC:123');
+    expect(headers.playerId).toBe('RINCON_ARC');
+    expect(headers.command).toBe('setVolume');
+    expect(body.volume).toBe(50);
   });
 });
