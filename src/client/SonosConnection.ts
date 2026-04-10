@@ -231,10 +231,6 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
     const response = await promise;
     const [resHeaders, resBody] = response;
 
-    // Emit the response so listeners can extract metadata (e.g., householdId)
-    // even from error responses
-    this.emit('message', response);
-
     if (resHeaders.success === false) {
       const errorCode = (resBody?.errorCode as string) ?? resHeaders.response ?? 'UNKNOWN';
       const reason = (resBody?.reason as string) ?? `Command failed: ${namespace}.${command}`;
