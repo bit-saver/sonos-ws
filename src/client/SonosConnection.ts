@@ -232,7 +232,10 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
     const [resHeaders, resBody] = response;
 
     if (resHeaders.success === false) {
-      const errorCode = (resBody?.errorCode as string) ?? resHeaders.response ?? 'UNKNOWN';
+      const errorCode = (resBody?.errorCode as string)
+        ?? resHeaders.type
+        ?? resHeaders.response
+        ?? 'UNKNOWN';
       const reason = (resBody?.reason as string) ?? `Command failed: ${namespace}.${command}`;
       throw new CommandError(errorCode, reason, { namespace, command, cmdId, cause: response });
     }
