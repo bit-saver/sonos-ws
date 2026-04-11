@@ -151,22 +151,22 @@ describe('SonosHousehold grouping', () => {
   });
 
   it('group() throws on empty array', async () => {
-    await expect(household.group([])).rejects.toThrow('INVALID_PARAMETER');
+    await expect(household.group([])).rejects.toThrow('at least one player');
   });
 
   it('ungroup() is a no-op for solo player', async () => {
     const initialCallCount = mockConn.send.mock.calls.length;
     const arc = household.player('Arc');
     await household.ungroup(arc);
-    // Should not call send again since arc is already solo
-    expect(mockConn.send.mock.calls.length).toBe(initialCallCount);
+    // GroupingEngine refreshes topology (1 getGroups call), then stops — no createGroup
+    expect(mockConn.send.mock.calls.length).toBe(initialCallCount + 1);
   });
 
   it('group([single]) is a no-op for solo player', async () => {
     const arc = household.player('Arc');
     const initialCallCount = mockConn.send.mock.calls.length;
     await household.group([arc]);
-    // Should not make any additional API calls
-    expect(mockConn.send.mock.calls.length).toBe(initialCallCount);
+    // GroupingEngine refreshes topology (1 getGroups call), then stops — no createGroup
+    expect(mockConn.send.mock.calls.length).toBe(initialCallCount + 1);
   });
 });
