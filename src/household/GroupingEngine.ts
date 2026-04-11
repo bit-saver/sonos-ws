@@ -143,10 +143,15 @@ export class GroupingEngine {
     const targetIds = new Set(targetPlayers.map((p) => p.id));
 
     for (const phase of ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_PAUSED'] as const) {
-      // Check target players first (array order)
+      // Check target players first (array order).
+      // Audio belongs to the GROUP COORDINATOR, not any member.
+      // If a target player is in a playing group, return the coordinator of that group.
       for (const player of targetPlayers) {
         const group = snap.findGroupOf(player.id);
-        if (group?.playbackState === phase) return player;
+        if (group?.playbackState === phase) {
+          const coord = this.players.get(group.coordinatorId);
+          return coord ?? player;
+        }
       }
       // Then check rest of household
       for (const group of snap.groups) {

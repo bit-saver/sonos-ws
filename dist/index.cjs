@@ -1447,7 +1447,10 @@ var GroupingEngine = class {
     for (const phase of ["PLAYBACK_STATE_PLAYING", "PLAYBACK_STATE_PAUSED"]) {
       for (const player of targetPlayers) {
         const group = snap.findGroupOf(player.id);
-        if (group?.playbackState === phase) return player;
+        if (group?.playbackState === phase) {
+          const coord = this.players.get(group.coordinatorId);
+          return coord ?? player;
+        }
       }
       for (const group of snap.groups) {
         if (group.playbackState === phase) {
