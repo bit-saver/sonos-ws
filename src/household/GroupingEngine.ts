@@ -59,9 +59,21 @@ export class GroupingEngine {
       audioSource = this.resolveAudioSource(playerHandles, options.transfer, snap);
     }
 
-    // Transfer or simple group
+    // When transfer is active and the audio source is in the target group,
+    // make the audio source the coordinator to preserve playback.
+    // The coordinator shuffle kills audio — only use it when the source
+    // is OUTSIDE the target group and needs to be pulled in.
     if (audioSource && audioSource.id !== coordinator.id) {
-      await this.transferAudio(audioSource, coordinator, memberIds);
+      if (memberIds.includes(audioSource.id)) {
+        // Audio source is a target member — make it the coordinator instead.
+        // This preserves audio. The user's first-in-array coordinator preference
+        // is overridden to keep the music playing.
+        this.log.info(`Audio source "${audioSource.name}" is in target group — using as coordinator to preserve audio`);
+        await this.simpleGroup(audioSource, memberIds);
+      } else {
+        // Audio source is outside the target group — shuffle to pull it in.
+        await this.transferAudio(audioSource, coordinator, memberIds);
+      }
     } else {
       await this.simpleGroup(coordinator, memberIds);
     }

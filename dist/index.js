@@ -1335,7 +1335,12 @@ var GroupingEngine = class {
       audioSource = this.resolveAudioSource(playerHandles, options.transfer, snap);
     }
     if (audioSource && audioSource.id !== coordinator.id) {
-      await this.transferAudio(audioSource, coordinator, memberIds);
+      if (memberIds.includes(audioSource.id)) {
+        this.log.info(`Audio source "${audioSource.name}" is in target group \u2014 using as coordinator to preserve audio`);
+        await this.simpleGroup(audioSource, memberIds);
+      } else {
+        await this.transferAudio(audioSource, coordinator, memberIds);
+      }
     } else {
       await this.simpleGroup(coordinator, memberIds);
     }
