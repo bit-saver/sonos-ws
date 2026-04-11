@@ -422,7 +422,7 @@ var SonosConnection = class extends TypedEventEmitter {
     const response = await promise;
     const [resHeaders, resBody] = response;
     if (resHeaders.success === false) {
-      const errorCode = resBody?.errorCode ?? resHeaders.response ?? "UNKNOWN";
+      const errorCode = resBody?.errorCode ?? resHeaders.type ?? resHeaders.response ?? "UNKNOWN";
       const reason = resBody?.reason ?? `Command failed: ${namespace}.${command}`;
       throw new CommandError(errorCode, reason, { namespace, command, cmdId, cause: response });
     }
@@ -1273,6 +1273,239 @@ var PlayerHandle = class {
   }
 };
 
+// src/household/TopologySnapshot.ts
+var TopologySnapshot = class {
+  groups;
+  players;
+  constructor(response) {
+    this.groups = response.groups;
+    this.players = response.players;
+  }
+  /** Finds the group containing a player. */
+  findGroupOf(playerId) {
+    return this.groups.find((g) => g.playerIds.includes(playerId));
+  }
+  /** Returns the coordinator ID for a player's group. */
+  coordinatorOf(playerId) {
+    return this.findGroupOf(playerId)?.coordinatorId;
+  }
+  /** Whether a player is the only member of its group. */
+  isAloneInGroup(playerId) {
+    const group = this.findGroupOf(playerId);
+    return group !== void 0 && group.playerIds.length === 1;
+  }
+};
+
+// src/household/GroupingEngine.ts
+var POLL_INTERVAL_MS = 200;
+var POLL_DEADLINE_MS = 3e3;
+var GroupingEngine = class {
+  constructor(householdGroups, refreshTopology, players, log) {
+    this.householdGroups = householdGroups;
+    this.refreshTopology = refreshTopology;
+    this.players = players;
+    this.log = log;
+  }
+  householdGroups;
+  refreshTopology;
+  players;
+  log;
+  /**
+   * Groups the specified players. The first player in the array becomes the coordinator.
+   */
+  async group(playerHandles, options) {
+    if (playerHandles.length === 0) {
+      throw new SonosError("ERROR_INVALID_PARAMETER" /* ERROR_INVALID_PARAMETER */, "group() requires at least one player");
+    }
+    let snap = await this.refreshAndSnapshot();
+    if (playerHandles.length === 1) {
+      const player = playerHandles[0];
+      if (snap.isAloneInGroup(player.id)) return;
+      await this.householdGroups.createGroup([player.id]);
+      await this.refreshAndSnapshot();
+      return;
+    }
+    const coordinator = playerHandles[0];
+    const memberIds = playerHandles.map((p) => p.id);
+    if (this.isAlreadyGrouped(coordinator.id, memberIds, snap) && !options?.transfer) {
+      return;
+    }
+    let audioSource;
+    if (options?.transfer) {
+      audioSource = this.resolveAudioSource(playerHandles, options.transfer, snap);
+    }
+    if (audioSource && audioSource.id !== coordinator.id) {
+      await this.transferAudio(audioSource, coordinator, memberIds);
+    } else {
+      await this.simpleGroup(coordinator, memberIds);
+    }
+    await this.refreshAndSnapshot();
+  }
+  /** Removes a player from its current group. No-op if already solo. */
+  async ungroup(player) {
+    const snap = await this.refreshAndSnapshot();
+    if (snap.isAloneInGroup(player.id)) return;
+    await this.householdGroups.createGroup([player.id]);
+    await this.refreshAndSnapshot();
+  }
+  /** Ungroups all players in the household. */
+  async ungroupAll() {
+    const snap = await this.refreshAndSnapshot();
+    const multiPlayerGroups = snap.groups.filter((g) => g.playerIds.length > 1);
+    for (const group of multiPlayerGroups) {
+      for (const playerId of group.playerIds) {
+        if (playerId !== group.coordinatorId) {
+          await this.householdGroups.createGroup([playerId]);
+        }
+      }
+    }
+    if (multiPlayerGroups.length > 0) {
+      await this.refreshAndSnapshot();
+    }
+  }
+  // ── Private helpers ─────────────────────────────────────────────────────
+  isAlreadyGrouped(coordinatorId, memberIds, snap) {
+    const group = snap.findGroupOf(coordinatorId);
+    return group !== void 0 && group.coordinatorId === coordinatorId && group.playerIds.length === memberIds.length && memberIds.every((id) => group.playerIds.includes(id));
+  }
+  resolveAudioSource(targetPlayers, transfer, snap) {
+    if (typeof transfer === "object") {
+      const source = this.players.get(transfer.id);
+      if (!source) {
+        throw new SonosError("PLAYER_NOT_FOUND" /* PLAYER_NOT_FOUND */, `Transfer source not found: ${transfer.id}`);
+      }
+      const sourceGroup = snap.findGroupOf(source.id);
+      if (!sourceGroup || sourceGroup.playbackState !== "PLAYBACK_STATE_PLAYING" && sourceGroup.playbackState !== "PLAYBACK_STATE_PAUSED") {
+        throw new SonosError("ERROR_NO_CONTENT" /* ERROR_NO_CONTENT */, `Transfer source "${source.name}" has no content`);
+      }
+      return source;
+    }
+    const targetIds = new Set(targetPlayers.map((p) => p.id));
+    for (const phase of ["PLAYBACK_STATE_PLAYING", "PLAYBACK_STATE_PAUSED"]) {
+      for (const player of targetPlayers) {
+        const group = snap.findGroupOf(player.id);
+        if (group?.playbackState === phase) return player;
+      }
+      for (const group of snap.groups) {
+        if (group.playbackState === phase) {
+          const coord = this.players.get(group.coordinatorId);
+          if (coord && !targetIds.has(coord.id)) return coord;
+        }
+      }
+    }
+    return void 0;
+  }
+  async simpleGroup(coordinator, memberIds) {
+    let snap = await this.refreshAndSnapshot();
+    const currentGroup = snap.findGroupOf(coordinator.id);
+    if (!currentGroup) return;
+    if (currentGroup.coordinatorId !== coordinator.id) {
+      await this.householdGroups.createGroup([coordinator.id]);
+      await this.pollUntil(
+        (res) => res.groups.some((g) => g.coordinatorId === coordinator.id && g.playerIds.length === 1)
+      );
+      snap = await this.refreshAndSnapshot();
+    }
+    await this.withRetry(async () => {
+      const freshSnap = await this.refreshAndSnapshot();
+      const coordGroup = freshSnap.findGroupOf(coordinator.id);
+      if (!coordGroup) return;
+      const toAdd = memberIds.filter((id) => id !== coordinator.id && !coordGroup.playerIds.includes(id));
+      const toRemove = coordGroup.playerIds.filter((id) => id !== coordinator.id && !memberIds.includes(id));
+      if (toAdd.length > 0 || toRemove.length > 0) {
+        await coordinator.groups.modifyGroupMembers(
+          toAdd.length > 0 ? toAdd : void 0,
+          toRemove.length > 0 ? toRemove : void 0
+        );
+      }
+    });
+  }
+  async transferAudio(source, targetCoordinator, allMemberIds) {
+    let snap = await this.refreshAndSnapshot();
+    const sourceGroup = snap.findGroupOf(source.id);
+    if (!sourceGroup) {
+      throw new SonosError("GROUP_OPERATION_FAILED" /* GROUP_OPERATION_FAILED */, `Cannot find group for source "${source.name}"`);
+    }
+    const sourceCoord = this.players.get(sourceGroup.coordinatorId);
+    if (!sourceCoord) {
+      throw new SonosError("GROUP_OPERATION_FAILED" /* GROUP_OPERATION_FAILED */, `Cannot find coordinator for source group`);
+    }
+    if (!sourceGroup.playerIds.includes(targetCoordinator.id)) {
+      await this.withRetry(async () => {
+        await sourceCoord.groups.modifyGroupMembers([targetCoordinator.id]);
+      });
+    }
+    try {
+      await sourceCoord.groups.modifyGroupMembers([], [sourceCoord.id]);
+    } catch (err) {
+      if (this.isExpectedShuffleError(err)) {
+        this.log.debug("Coordinator shuffle initiated (expected error)");
+      } else {
+        throw err;
+      }
+    }
+    const settled = await this.pollUntil(
+      (res) => res.groups.some((g) => g.coordinatorId === targetCoordinator.id)
+    );
+    if (!settled) {
+      this.log.warn(`Coordinator shuffle did not settle within ${POLL_DEADLINE_MS}ms`);
+    }
+    await this.withRetry(async () => {
+      const freshSnap = await this.refreshAndSnapshot();
+      const targetGroup = freshSnap.findGroupOf(targetCoordinator.id);
+      if (!targetGroup) return;
+      const toAdd = allMemberIds.filter((id) => id !== targetCoordinator.id && !targetGroup.playerIds.includes(id));
+      const toRemove = targetGroup.playerIds.filter((id) => id !== targetCoordinator.id && !allMemberIds.includes(id));
+      if (toAdd.length > 0 || toRemove.length > 0) {
+        await targetCoordinator.groups.modifyGroupMembers(
+          toAdd.length > 0 ? toAdd : void 0,
+          toRemove.length > 0 ? toRemove : void 0
+        );
+      }
+    });
+  }
+  /**
+   * Polls getGroups until a condition is met or the deadline passes.
+   * The return value is a readiness signal only — authoritative state
+   * comes from the subsequent refreshAndSnapshot().
+   */
+  async pollUntil(condition, deadlineMs = POLL_DEADLINE_MS, intervalMs = POLL_INTERVAL_MS) {
+    const start = Date.now();
+    while (true) {
+      const response = await this.householdGroups.getGroups();
+      if (condition(response)) return response;
+      const elapsed = Date.now() - start;
+      if (elapsed >= deadlineMs) return null;
+      await new Promise((r) => setTimeout(r, Math.min(intervalMs, deadlineMs - elapsed)));
+    }
+  }
+  /**
+   * Wraps a function that can fail with a stale groupId.
+   * On `groupCoordinatorChanged`, refreshes topology (updating handle
+   * closures) and retries exactly once.
+   */
+  async withRetry(fn) {
+    try {
+      await fn();
+    } catch (err) {
+      if (err instanceof CommandError && err.code === "groupCoordinatorChanged") {
+        this.log.debug("groupCoordinatorChanged \u2014 refreshing topology and retrying");
+        await this.refreshAndSnapshot();
+        await fn();
+      } else {
+        throw err;
+      }
+    }
+  }
+  isExpectedShuffleError(err) {
+    return err instanceof CommandError && err.code === "groupCoordinatorChanged" || err instanceof TimeoutError;
+  }
+  async refreshAndSnapshot() {
+    const response = await this.refreshTopology();
+    return new TopologySnapshot(response);
+  }
+};
+
 // src/household/SonosHousehold.ts
 var DEFAULT_RECONNECT = {
   enabled: true,
@@ -1291,6 +1524,7 @@ var SonosHousehold = class extends TypedEventEmitter {
   _initialConnectDone = false;
   /** Household-scoped GroupsNamespace for createGroup calls (no groupId/playerId). */
   householdGroups;
+  engine;
   constructor(options) {
     super();
     this.log = options.logger ?? noopLogger;
@@ -1308,6 +1542,12 @@ var SonosHousehold = class extends TypedEventEmitter {
       getPlayerId: () => void 0
     };
     this.householdGroups = new GroupsNamespace(householdContext);
+    this.engine = new GroupingEngine(
+      this.householdGroups,
+      () => this.refreshTopology(),
+      this._players,
+      this.log
+    );
   }
   /** All discovered players in the household, keyed by RINCON player ID. */
   get players() {
@@ -1401,34 +1641,7 @@ var SonosHousehold = class extends TypedEventEmitter {
    * @throws {SonosError} With code `INVALID_PARAMETER` if players array is empty.
    */
   async group(players, options) {
-    if (players.length === 0) {
-      throw new SonosError("ERROR_INVALID_PARAMETER" /* ERROR_INVALID_PARAMETER */, "INVALID_PARAMETER: group() requires at least one player");
-    }
-    await this.refreshTopology();
-    if (players.length === 1) {
-      const player = players[0];
-      const group = this._groups.find((g) => g.playerIds.includes(player.id));
-      if (group && group.playerIds.length === 1) return;
-      await this.householdGroups.createGroup([player.id]);
-      await this.refreshTopology();
-      return;
-    }
-    const desiredCoordinator = players[0];
-    const desiredMemberIds = players.map((p) => p.id);
-    const currentGroup = this._groups.find((g) => g.playerIds.includes(desiredCoordinator.id));
-    if (currentGroup && currentGroup.coordinatorId === desiredCoordinator.id && currentGroup.playerIds.length === desiredMemberIds.length && desiredMemberIds.every((id) => currentGroup.playerIds.includes(id))) {
-      if (!options?.transfer) return;
-    }
-    let audioSource;
-    if (options?.transfer) {
-      audioSource = this.resolveAudioSource(players, options.transfer);
-    }
-    if (audioSource && audioSource.id !== desiredCoordinator.id) {
-      await this.transferAudio(audioSource, desiredCoordinator, desiredMemberIds);
-    } else {
-      await this.simpleGroup(desiredCoordinator, desiredMemberIds);
-    }
-    await this.refreshTopology();
+    await this.engine.group(players, options);
   }
   /**
    * Removes a player from its current group. No-op if already solo.
@@ -1436,26 +1649,13 @@ var SonosHousehold = class extends TypedEventEmitter {
    * @param player - The player to ungroup.
    */
   async ungroup(player) {
-    const group = this._groups.find((g) => g.playerIds.includes(player.id));
-    if (!group || group.playerIds.length === 1) return;
-    await this.householdGroups.createGroup([player.id]);
-    await this.refreshTopology();
+    await this.engine.ungroup(player);
   }
   /**
    * Ungroups all players in the household. Each becomes its own group.
    */
   async ungroupAll() {
-    const multiPlayerGroups = this._groups.filter((g) => g.playerIds.length > 1);
-    for (const group of multiPlayerGroups) {
-      for (const playerId of group.playerIds) {
-        if (playerId !== group.coordinatorId) {
-          await this.householdGroups.createGroup([playerId]);
-        }
-      }
-    }
-    if (multiPlayerGroups.length > 0) {
-      await this.refreshTopology();
-    }
+    await this.engine.ungroupAll();
   }
   /**
    * Discovers the householdId by sending a raw getGroups request.
@@ -1519,108 +1719,6 @@ var SonosHousehold = class extends TypedEventEmitter {
       }
     }
     this.emit("connected");
-  }
-  /**
-   * Resolves the audio source player based on the `transfer` option.
-   * @returns The player with audio, or undefined if nothing is playing.
-   */
-  resolveAudioSource(targetPlayers, transfer) {
-    if (typeof transfer === "object") {
-      const source = this._players.get(transfer.id);
-      if (!source) {
-        throw new SonosError("PLAYER_NOT_FOUND" /* PLAYER_NOT_FOUND */, `Transfer source not found: ${transfer.id}`);
-      }
-      const sourceGroup = this._groups.find((g) => g.playerIds.includes(source.id));
-      if (!sourceGroup || sourceGroup.playbackState !== "PLAYBACK_STATE_PLAYING" && sourceGroup.playbackState !== "PLAYBACK_STATE_PAUSED") {
-        throw new SonosError("ERROR_NO_CONTENT" /* ERROR_NO_CONTENT */, `Transfer source "${source.name}" has no content`);
-      }
-      return source;
-    }
-    const targetIds = new Set(targetPlayers.map((p) => p.id));
-    for (const player of targetPlayers) {
-      const group = this._groups.find((g) => g.playerIds.includes(player.id));
-      if (group?.playbackState === "PLAYBACK_STATE_PLAYING") return player;
-    }
-    for (const player of targetPlayers) {
-      const group = this._groups.find((g) => g.playerIds.includes(player.id));
-      if (group?.playbackState === "PLAYBACK_STATE_PAUSED") return player;
-    }
-    for (const group of this._groups) {
-      if (group.playbackState === "PLAYBACK_STATE_PLAYING") {
-        const coordinatorHandle = this._players.get(group.coordinatorId);
-        if (coordinatorHandle && !targetIds.has(coordinatorHandle.id)) return coordinatorHandle;
-      }
-    }
-    for (const group of this._groups) {
-      if (group.playbackState === "PLAYBACK_STATE_PAUSED") {
-        const coordinatorHandle = this._players.get(group.coordinatorId);
-        if (coordinatorHandle && !targetIds.has(coordinatorHandle.id)) return coordinatorHandle;
-      }
-    }
-    return void 0;
-  }
-  /**
-   * Performs a simple group operation: ensures the coordinator owns a group
-   * with exactly the desired members.
-   */
-  async simpleGroup(coordinator, memberIds) {
-    const currentGroup = this._groups.find((g) => g.playerIds.includes(coordinator.id));
-    if (!currentGroup) return;
-    if (currentGroup.coordinatorId !== coordinator.id) {
-      await coordinator.groups.createGroup([coordinator.id]);
-      await this.refreshTopology();
-    }
-    const othersToAdd = memberIds.filter((id) => id !== coordinator.id);
-    if (othersToAdd.length > 0) {
-      const currentMembers = this._groups.find((g) => g.coordinatorId === coordinator.id)?.playerIds.filter((id) => id !== coordinator.id) ?? [];
-      const toRemove = currentMembers.filter((id) => !memberIds.includes(id));
-      const toAdd = othersToAdd.filter((id) => !this._groups.find((g) => g.coordinatorId === coordinator.id)?.playerIds.includes(id));
-      if (toAdd.length > 0 || toRemove.length > 0) {
-        await coordinator.groups.modifyGroupMembers(
-          toAdd.length > 0 ? toAdd : void 0,
-          toRemove.length > 0 ? toRemove : void 0
-        );
-      }
-    }
-  }
-  /**
-   * Transfers audio from a source player to a target coordinator using
-   * the coordinator shuffle technique.
-   *
-   * 1. Add target to source's group
-   * 2. Remove source from group (expected ~8s timeout)
-   * 3. Target inherits audio
-   * 4. Add remaining members
-   */
-  async transferAudio(source, targetCoordinator, allMemberIds) {
-    const sourceGroup = this._groups.find((g) => g.playerIds.includes(source.id));
-    if (!sourceGroup) {
-      throw new SonosError("GROUP_OPERATION_FAILED" /* GROUP_OPERATION_FAILED */, `Could not find group for source player "${source.name}"`);
-    }
-    const actualSourceId = sourceGroup.coordinatorId;
-    const sourceCoordinator = this._players.get(actualSourceId);
-    if (!sourceCoordinator) {
-      throw new SonosError("GROUP_OPERATION_FAILED" /* GROUP_OPERATION_FAILED */, `Could not find coordinator for source group`);
-    }
-    if (!sourceGroup.playerIds.includes(targetCoordinator.id)) {
-      await sourceCoordinator.groups.modifyGroupMembers([targetCoordinator.id]);
-    }
-    try {
-      await sourceCoordinator.groups.modifyGroupMembers([], [actualSourceId]);
-    } catch {
-      this.log.debug("Coordinator shuffle complete (expected error during transfer)");
-    }
-    await new Promise((r) => setTimeout(r, 500));
-    await this.refreshTopology();
-    const targetGroup = this._groups.find((g) => g.coordinatorId === targetCoordinator.id);
-    const remaining = allMemberIds.filter((id) => id !== targetCoordinator.id);
-    if (remaining.length > 0) {
-      const toAdd = remaining.filter((id) => !targetGroup?.playerIds.includes(id));
-      this.log.debug(`toAdd after filter: ${toAdd.length} ids`);
-      if (toAdd.length > 0) {
-        await targetCoordinator.groups.modifyGroupMembers(toAdd);
-      }
-    }
   }
 };
 function resolveReconnectOptions(input) {

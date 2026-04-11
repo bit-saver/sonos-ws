@@ -1126,6 +1126,7 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     private _initialConnectDone;
     /** Household-scoped GroupsNamespace for createGroup calls (no groupId/playerId). */
     private readonly householdGroups;
+    private readonly engine;
     constructor(options: SonosHouseholdOptions);
     /** All discovered players in the household, keyed by RINCON player ID. */
     get players(): ReadonlyMap<string, PlayerHandle>;
@@ -1188,26 +1189,6 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
      * not on initial connect (which is handled by connect() directly).
      */
     private handleReconnected;
-    /**
-     * Resolves the audio source player based on the `transfer` option.
-     * @returns The player with audio, or undefined if nothing is playing.
-     */
-    private resolveAudioSource;
-    /**
-     * Performs a simple group operation: ensures the coordinator owns a group
-     * with exactly the desired members.
-     */
-    private simpleGroup;
-    /**
-     * Transfers audio from a source player to a target coordinator using
-     * the coordinator shuffle technique.
-     *
-     * 1. Add target to source's group
-     * 2. Remove source from group (expected ~8s timeout)
-     * 3. Target inherits audio
-     * 4. Add remaining members
-     */
-    private transferAudio;
 }
 
 interface SonosClientOptions {
