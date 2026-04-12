@@ -31,6 +31,7 @@ export class PlayerHandle {
   private _group: Group;
   private readonly householdId: string;
   private _speakerConnection: SonosConnection;
+  private _coordinatorConnectionResolver?: () => SonosConnection;
 
   /** Unified volume control (group volume + per-speaker volume). */
   readonly volume: VolumeControl;
@@ -82,7 +83,22 @@ export class PlayerHandle {
       getPlayerId: () => this.id,
     };
 
-    this.volume = new VolumeControl(speakerContext);
+    // Coordinator context — for group volume commands, which must go
+    // through the group coordinator's connection. Falls back to speaker
+    // connection if no resolver is set (e.g. SonosClient single-connection).
+    const coordinatorContext: NamespaceContext = {
+      get connection() {
+        if (self._coordinatorConnectionResolver) {
+          return self._coordinatorConnectionResolver();
+        }
+        return self._speakerConnection;
+      },
+      getHouseholdId: () => this.householdId,
+      getGroupId: () => this._group.id,
+      getPlayerId: () => this.id,
+    };
+
+    this.volume = new VolumeControl(speakerContext, coordinatorContext);
     this.playback = new PlaybackControl(speakerContext);
     this.favorites = new FavoritesAccess(speakerContext);
     this.playlists = new PlaylistsAccess(speakerContext);
@@ -99,6 +115,15 @@ export class PlayerHandle {
    */
   setSpeakerConnection(connection: SonosConnection): void {
     this._speakerConnection = connection;
+  }
+
+  /**
+   * Sets a resolver that returns the coordinator's connection for this player's group.
+   * Used for group volume commands which must go through the coordinator's WebSocket.
+   * @internal
+   */
+  setCoordinatorConnectionResolver(resolver: () => SonosConnection): void {
+    this._coordinatorConnectionResolver = resolver;
   }
 
   /** Current group ID this player belongs to. Updated automatically on topology changes. */

@@ -779,11 +779,15 @@ var PlayerVolumeNamespace = class extends BaseNamespace {
 var VolumeControl = class {
   group;
   _player;
-  context;
-  constructor(context) {
-    this.context = context;
-    this.group = new GroupVolumeNamespace(context);
-    this._player = new PlayerVolumeNamespace(context);
+  coordinatorContext;
+  /**
+   * @param speakerContext — for per-speaker volume (playerVolume:1)
+   * @param coordinatorContext — for group volume (groupVolume:1), routed through the coordinator's connection
+   */
+  constructor(speakerContext, coordinatorContext) {
+    this.coordinatorContext = coordinatorContext ?? speakerContext;
+    this.group = new GroupVolumeNamespace(this.coordinatorContext);
+    this._player = new PlayerVolumeNamespace(speakerContext);
   }
   /** Gets the current group volume level and mute status. */
   async get() {
@@ -803,19 +807,20 @@ var VolumeControl = class {
    */
   async relative(delta) {
     const volumeEvent = new Promise((resolve) => {
+      const conn = this.coordinatorContext.connection;
       const timeout = setTimeout(() => {
-        this.context.connection.off("message", handler);
+        conn.off("message", handler);
         this.group.getVolume().then(resolve, () => resolve({ volume: 0, muted: false, fixed: false }));
       }, 2e3);
       const handler = (msg) => {
         const [headers, body] = msg;
         if (headers?.namespace === "groupVolume:1" && body?._objectType === "groupVolume") {
           clearTimeout(timeout);
-          this.context.connection.off("message", handler);
+          conn.off("message", handler);
           resolve(body);
         }
       };
-      this.context.connection.on("message", handler);
+      conn.on("message", handler);
     });
     await this.group.setRelativeVolume(delta);
     return volumeEvent;
@@ -1294,6 +1299,7 @@ var PlayerHandle = class {
   _group;
   householdId;
   _speakerConnection;
+  _coordinatorConnectionResolver;
   /** Unified volume control (group volume + per-speaker volume). */
   volume;
   /** Playback and metadata control. */
@@ -1332,7 +1338,18 @@ var PlayerHandle = class {
       getGroupId: () => this._group.id,
       getPlayerId: () => this.id
     };
-    this.volume = new VolumeControl(speakerContext);
+    const coordinatorContext = {
+      get connection() {
+        if (self._coordinatorConnectionResolver) {
+          return self._coordinatorConnectionResolver();
+        }
+        return self._speakerConnection;
+      },
+      getHouseholdId: () => this.householdId,
+      getGroupId: () => this._group.id,
+      getPlayerId: () => this.id
+    };
+    this.volume = new VolumeControl(speakerContext, coordinatorContext);
     this.playback = new PlaybackControl(speakerContext);
     this.favorites = new FavoritesAccess(speakerContext);
     this.playlists = new PlaylistsAccess(speakerContext);
@@ -1348,6 +1365,14 @@ var PlayerHandle = class {
    */
   setSpeakerConnection(connection) {
     this._speakerConnection = connection;
+  }
+  /**
+   * Sets a resolver that returns the coordinator's connection for this player's group.
+   * Used for group volume commands which must go through the coordinator's WebSocket.
+   * @internal
+   */
+  setCoordinatorConnectionResolver(resolver) {
+    this._coordinatorConnectionResolver = resolver;
   }
   /** Current group ID this player belongs to. Updated automatically on topology changes. */
   get groupId() {
@@ -1821,6 +1846,14 @@ var SonosHousehold = class extends TypedEventEmitter {
         const handle = this._players.get(player.id);
         if (handle) {
           handle.setSpeakerConnection(conn);
+          handle.setCoordinatorConnectionResolver(() => {
+            const coordId = handle["_group"]?.coordinatorId;
+            if (coordId) {
+              const coordConn = this.speakerConnections.get(coordId);
+              if (coordConn) return coordConn;
+            }
+            return this.connection;
+          });
         }
       } catch (err) {
         this.log.warn(`Failed to connect to ${player.name}:`, err);

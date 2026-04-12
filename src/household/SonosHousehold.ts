@@ -277,6 +277,17 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
         const handle = this._players.get(player.id);
         if (handle) {
           handle.setSpeakerConnection(conn);
+          // Set coordinator resolver — dynamically looks up the coordinator's connection
+          // so group volume commands route through the correct speaker.
+          handle.setCoordinatorConnectionResolver(() => {
+            const coordId = handle['_group']?.coordinatorId;
+            if (coordId) {
+              const coordConn = this.speakerConnections.get(coordId);
+              if (coordConn) return coordConn;
+            }
+            // Fallback to primary connection
+            return this.connection;
+          });
         }
       } catch (err) {
         this.log.warn(`Failed to connect to ${player.name}:`, err);

@@ -792,8 +792,12 @@ declare class GroupsNamespace extends BaseNamespace {
 declare class VolumeControl {
     private readonly group;
     private readonly _player;
-    private readonly context;
-    constructor(context: NamespaceContext);
+    private readonly coordinatorContext;
+    /**
+     * @param speakerContext — for per-speaker volume (playerVolume:1)
+     * @param coordinatorContext — for group volume (groupVolume:1), routed through the coordinator's connection
+     */
+    constructor(speakerContext: NamespaceContext, coordinatorContext?: NamespaceContext);
     /** Gets the current group volume level and mute status. */
     get(): Promise<GroupVolumeStatus>;
     /**
@@ -1055,6 +1059,7 @@ declare class PlayerHandle {
     private _group;
     private readonly householdId;
     private _speakerConnection;
+    private _coordinatorConnectionResolver?;
     /** Unified volume control (group volume + per-speaker volume). */
     readonly volume: VolumeControl;
     /** Playback and metadata control. */
@@ -1078,6 +1083,12 @@ declare class PlayerHandle {
      * @internal
      */
     setSpeakerConnection(connection: SonosConnection): void;
+    /**
+     * Sets a resolver that returns the coordinator's connection for this player's group.
+     * Used for group volume commands which must go through the coordinator's WebSocket.
+     * @internal
+     */
+    setCoordinatorConnectionResolver(resolver: () => SonosConnection): void;
     /** Current group ID this player belongs to. Updated automatically on topology changes. */
     get groupId(): string;
     /** Whether this player is the coordinator of its current group. */

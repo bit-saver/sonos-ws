@@ -13,12 +13,16 @@ import type { SonosResponse } from '../types/messages.js';
 export class VolumeControl {
   private readonly group: GroupVolumeNamespace;
   private readonly _player: PlayerVolumeNamespace;
-  private readonly context: NamespaceContext;
+  private readonly coordinatorContext: NamespaceContext;
 
-  constructor(context: NamespaceContext) {
-    this.context = context;
-    this.group = new GroupVolumeNamespace(context);
-    this._player = new PlayerVolumeNamespace(context);
+  /**
+   * @param speakerContext — for per-speaker volume (playerVolume:1)
+   * @param coordinatorContext — for group volume (groupVolume:1), routed through the coordinator's connection
+   */
+  constructor(speakerContext: NamespaceContext, coordinatorContext?: NamespaceContext) {
+    this.coordinatorContext = coordinatorContext ?? speakerContext;
+    this.group = new GroupVolumeNamespace(this.coordinatorContext);
+    this._player = new PlayerVolumeNamespace(speakerContext);
   }
 
   /** Gets the current group volume level and mute status. */
@@ -43,9 +47,9 @@ export class VolumeControl {
     // Wait for the subscription event that confirms the volume change,
     // rather than polling getVolume (which can return stale data).
     const volumeEvent = new Promise<GroupVolumeStatus>((resolve) => {
+      const conn = this.coordinatorContext.connection;
       const timeout = setTimeout(() => {
-        this.context.connection.off('message', handler);
-        // Fallback to getVolume if no event arrives within 2s
+        conn.off('message', handler);
         this.group.getVolume().then(resolve, () => resolve({ volume: 0, muted: false, fixed: false }));
       }, 2000);
 
@@ -53,12 +57,12 @@ export class VolumeControl {
         const [headers, body] = msg;
         if (headers?.namespace === 'groupVolume:1' && body?._objectType === 'groupVolume') {
           clearTimeout(timeout);
-          this.context.connection.off('message', handler);
+          conn.off('message', handler);
           resolve(body as unknown as GroupVolumeStatus);
         }
       };
 
-      this.context.connection.on('message', handler);
+      conn.on('message', handler);
     });
 
     await this.group.setRelativeVolume(delta);
