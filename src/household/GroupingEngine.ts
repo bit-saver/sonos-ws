@@ -36,9 +36,22 @@ export class GroupingEngine {
 
     let snap = await this.refreshAndSnapshot();
 
-    // Single player — ensure solo
+    // Single player
     if (playerHandles.length === 1) {
       const player = playerHandles[0]!;
+
+      // With transfer: find audio and move it to this player
+      if (options?.transfer) {
+        const audioSource = this.resolveAudioSource(playerHandles, options.transfer, snap);
+        if (audioSource && audioSource.id !== player.id) {
+          // Audio is on another speaker — shuffle it to the target
+          await this.transferAudio(audioSource, player, [player.id]);
+          await this.refreshAndSnapshot();
+          return;
+        }
+      }
+
+      // No transfer or player already has audio — just ensure solo
       if (snap.isAloneInGroup(player.id)) return;
       await this.householdGroups.createGroup([player.id]);
       await this.refreshAndSnapshot();

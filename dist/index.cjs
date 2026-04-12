@@ -800,8 +800,14 @@ var VolumeControl = class {
    * @returns The resulting volume status after the adjustment.
    */
   async relative(delta) {
+    const before = await this.group.getVolume();
     await this.group.setRelativeVolume(delta);
-    await new Promise((r) => setTimeout(r, 50));
+    const start = Date.now();
+    while (Date.now() - start < 500) {
+      await new Promise((r) => setTimeout(r, 50));
+      const after = await this.group.getVolume();
+      if (after.volume !== before.volume) return after;
+    }
     return this.group.getVolume();
   }
   /**
@@ -1379,6 +1385,14 @@ var GroupingEngine = class {
     let snap = await this.refreshAndSnapshot();
     if (playerHandles.length === 1) {
       const player = playerHandles[0];
+      if (options?.transfer) {
+        const audioSource2 = this.resolveAudioSource(playerHandles, options.transfer, snap);
+        if (audioSource2 && audioSource2.id !== player.id) {
+          await this.transferAudio(audioSource2, player, [player.id]);
+          await this.refreshAndSnapshot();
+          return;
+        }
+      }
       if (snap.isAloneInGroup(player.id)) return;
       await this.householdGroups.createGroup([player.id]);
       await this.refreshAndSnapshot();

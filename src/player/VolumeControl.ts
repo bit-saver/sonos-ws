@@ -37,9 +37,16 @@ export class VolumeControl {
    * @returns The resulting volume status after the adjustment.
    */
   async relative(delta: number): Promise<GroupVolumeStatus> {
+    const before = await this.group.getVolume();
     await this.group.setRelativeVolume(delta);
-    // Small delay for the device to process the change before reading back
-    await new Promise((r) => setTimeout(r, 50));
+    // Poll until the volume changes or timeout (500ms)
+    const start = Date.now();
+    while (Date.now() - start < 500) {
+      await new Promise((r) => setTimeout(r, 50));
+      const after = await this.group.getVolume();
+      if (after.volume !== before.volume) return after;
+    }
+    // Timeout — return whatever the current state is
     return this.group.getVolume();
   }
 
