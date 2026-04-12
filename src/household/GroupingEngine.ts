@@ -59,20 +59,29 @@ export class GroupingEngine {
       audioSource = this.resolveAudioSource(playerHandles, options.transfer, snap);
     }
 
-    // When transfer is active and the audio source is in the target group,
-    // make the audio source the coordinator to preserve playback.
-    // The coordinator shuffle kills audio — only use it when the source
-    // is OUTSIDE the target group and needs to be pulled in.
+    // Decide how to handle the audio source:
+    // 1. Source IS the desired coordinator → simpleGroup (audio preserved naturally)
+    // 2. Source is a target member but not coordinator → make source the coordinator
+    //    (overrides user preference to preserve audio)
+    // 3. Source is OUTSIDE the target group → transferAudio (shuffle to pull it in)
+    //    BUT: only if the source will end up in the final group. If the source
+    //    is not in memberIds, the shuffle would remove it entirely — which doesn't
+    //    reliably transfer audio (especially for the connected speaker). In that
+    //    case, just do simpleGroup without transfer.
     if (audioSource && audioSource.id !== coordinator.id) {
       if (memberIds.includes(audioSource.id)) {
-        // Audio source is a target member — make it the coordinator instead.
-        // This preserves audio. The user's first-in-array coordinator preference
-        // is overridden to keep the music playing.
+        // Audio source is a target member — make it the coordinator to preserve audio.
         this.log.info(`Audio source "${audioSource.name}" is in target group — using as coordinator to preserve audio`);
         await this.simpleGroup(audioSource, memberIds);
-      } else {
-        // Audio source is outside the target group — shuffle to pull it in.
+      } else if (typeof options?.transfer === 'object') {
+        // Explicit transfer source outside the target group — shuffle to pull audio in.
+        this.log.info(`Transferring audio from "${audioSource.name}" to "${coordinator.name}"`);
         await this.transferAudio(audioSource, coordinator, memberIds);
+      } else {
+        // Auto-resolve found audio outside the target group.
+        // Don't shuffle — just group the requested speakers. Audio stays where it is.
+        this.log.info(`Audio on "${audioSource.name}" (not in target group) — grouping without transfer`);
+        await this.simpleGroup(coordinator, memberIds);
       }
     } else {
       await this.simpleGroup(coordinator, memberIds);

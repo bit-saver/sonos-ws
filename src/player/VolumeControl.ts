@@ -38,6 +38,8 @@ export class VolumeControl {
    */
   async relative(delta: number): Promise<GroupVolumeStatus> {
     await this.group.setRelativeVolume(delta);
+    // Small delay for the device to process the change before reading back
+    await new Promise((r) => setTimeout(r, 50));
     return this.group.getVolume();
   }
 

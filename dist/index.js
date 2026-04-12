@@ -743,6 +743,7 @@ var VolumeControl = class {
    */
   async relative(delta) {
     await this.group.setRelativeVolume(delta);
+    await new Promise((r) => setTimeout(r, 50));
     return this.group.getVolume();
   }
   /**
@@ -1338,8 +1339,12 @@ var GroupingEngine = class {
       if (memberIds.includes(audioSource.id)) {
         this.log.info(`Audio source "${audioSource.name}" is in target group \u2014 using as coordinator to preserve audio`);
         await this.simpleGroup(audioSource, memberIds);
-      } else {
+      } else if (typeof options?.transfer === "object") {
+        this.log.info(`Transferring audio from "${audioSource.name}" to "${coordinator.name}"`);
         await this.transferAudio(audioSource, coordinator, memberIds);
+      } else {
+        this.log.info(`Audio on "${audioSource.name}" (not in target group) \u2014 grouping without transfer`);
+        await this.simpleGroup(coordinator, memberIds);
       }
     } else {
       await this.simpleGroup(coordinator, memberIds);
