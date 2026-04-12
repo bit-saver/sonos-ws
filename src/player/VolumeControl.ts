@@ -2,6 +2,7 @@ import type { NamespaceContext } from '../namespaces/BaseNamespace.js';
 import { GroupVolumeNamespace } from '../namespaces/GroupVolumeNamespace.js';
 import { PlayerVolumeNamespace } from '../namespaces/PlayerVolumeNamespace.js';
 import type { GroupVolumeStatus, PlayerVolumeStatus, VolumeResponse } from '../types/volume.js';
+import type { SonosResponse } from '../types/messages.js';
 
 /**
  * Unified volume control for a Sonos player.
@@ -12,8 +13,10 @@ import type { GroupVolumeStatus, PlayerVolumeStatus, VolumeResponse } from '../t
 export class VolumeControl {
   private readonly group: GroupVolumeNamespace;
   private readonly _player: PlayerVolumeNamespace;
+  private readonly context: NamespaceContext;
 
   constructor(context: NamespaceContext) {
+    this.context = context;
     this.group = new GroupVolumeNamespace(context);
     this._player = new PlayerVolumeNamespace(context);
   }
@@ -37,17 +40,29 @@ export class VolumeControl {
    * @returns The resulting volume status after the adjustment.
    */
   async relative(delta: number): Promise<GroupVolumeStatus> {
-    const before = await this.group.getVolume();
+    // Wait for the subscription event that confirms the volume change,
+    // rather than polling getVolume (which can return stale data).
+    const volumeEvent = new Promise<GroupVolumeStatus>((resolve) => {
+      const timeout = setTimeout(() => {
+        this.context.connection.off('message', handler);
+        // Fallback to getVolume if no event arrives within 2s
+        this.group.getVolume().then(resolve, () => resolve({ volume: 0, muted: false, fixed: false }));
+      }, 2000);
+
+      const handler = (msg: SonosResponse) => {
+        const [headers, body] = msg;
+        if (headers?.namespace === 'groupVolume:1' && body?._objectType === 'groupVolume') {
+          clearTimeout(timeout);
+          this.context.connection.off('message', handler);
+          resolve(body as unknown as GroupVolumeStatus);
+        }
+      };
+
+      this.context.connection.on('message', handler);
+    });
+
     await this.group.setRelativeVolume(delta);
-    // Poll until the volume changes or timeout (500ms)
-    const start = Date.now();
-    while (Date.now() - start < 500) {
-      await new Promise((r) => setTimeout(r, 50));
-      const after = await this.group.getVolume();
-      if (after.volume !== before.volume) return after;
-    }
-    // Timeout — return whatever the current state is
-    return this.group.getVolume();
+    return volumeEvent;
   }
 
   /**

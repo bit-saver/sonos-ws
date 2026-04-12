@@ -721,7 +721,9 @@ var PlayerVolumeNamespace = class extends BaseNamespace {
 var VolumeControl = class {
   group;
   _player;
+  context;
   constructor(context) {
+    this.context = context;
     this.group = new GroupVolumeNamespace(context);
     this._player = new PlayerVolumeNamespace(context);
   }
@@ -742,15 +744,23 @@ var VolumeControl = class {
    * @returns The resulting volume status after the adjustment.
    */
   async relative(delta) {
-    const before = await this.group.getVolume();
+    const volumeEvent = new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        this.context.connection.off("message", handler);
+        this.group.getVolume().then(resolve, () => resolve({ volume: 0, muted: false, fixed: false }));
+      }, 2e3);
+      const handler = (msg) => {
+        const [headers, body] = msg;
+        if (headers?.namespace === "groupVolume:1" && body?._objectType === "groupVolume") {
+          clearTimeout(timeout);
+          this.context.connection.off("message", handler);
+          resolve(body);
+        }
+      };
+      this.context.connection.on("message", handler);
+    });
     await this.group.setRelativeVolume(delta);
-    const start = Date.now();
-    while (Date.now() - start < 500) {
-      await new Promise((r) => setTimeout(r, 50));
-      const after = await this.group.getVolume();
-      if (after.volume !== before.volume) return after;
-    }
-    return this.group.getVolume();
+    return volumeEvent;
   }
   /**
    * Mutes or unmutes the entire group.

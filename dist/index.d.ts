@@ -792,6 +792,7 @@ declare class GroupsNamespace extends BaseNamespace {
 declare class VolumeControl {
     private readonly group;
     private readonly _player;
+    private readonly context;
     constructor(context: NamespaceContext);
     /** Gets the current group volume level and mute status. */
     get(): Promise<GroupVolumeStatus>;

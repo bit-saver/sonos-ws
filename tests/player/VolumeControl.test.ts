@@ -4,9 +4,31 @@ import type { NamespaceContext } from '../../src/namespaces/BaseNamespace.js';
 import type { SonosConnection } from '../../src/client/SonosConnection.js';
 
 function mockContext(): NamespaceContext {
+  const listeners: Record<string, Function[]> = {};
   return {
     connection: {
-      send: vi.fn().mockResolvedValue([{}, { volume: 42, muted: false, fixed: false }]),
+      send: vi.fn().mockImplementation(async (req: any) => {
+        const [headers] = req;
+        // After setRelativeVolume, simulate a subscription event
+        if (headers.command === 'setRelativeVolume') {
+          setTimeout(() => {
+            const handlers = listeners['message'] || [];
+            for (const h of handlers) {
+              h([{ namespace: 'groupVolume:1' }, { _objectType: 'groupVolume', volume: 47, muted: false, fixed: false }]);
+            }
+          }, 10);
+        }
+        return [{}, { volume: 42, muted: false, fixed: false }];
+      }),
+      on: vi.fn().mockImplementation((event: string, handler: Function) => {
+        if (!listeners[event]) listeners[event] = [];
+        listeners[event].push(handler);
+      }),
+      off: vi.fn().mockImplementation((event: string, handler: Function) => {
+        if (listeners[event]) {
+          listeners[event] = listeners[event].filter((h: Function) => h !== handler);
+        }
+      }),
     } as unknown as SonosConnection,
     getHouseholdId: () => 'HH_1',
     getGroupId: () => 'GROUP_1',
