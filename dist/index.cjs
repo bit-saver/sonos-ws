@@ -1293,6 +1293,7 @@ var PlayerHandle = class {
   capabilities;
   _group;
   householdId;
+  _speakerConnection;
   /** Unified volume control (group volume + per-speaker volume). */
   volume;
   /** Playback and metadata control. */
@@ -1309,26 +1310,44 @@ var PlayerHandle = class {
   settings;
   /** Raw group operations (used internally by SonosHousehold for grouping). */
   groups;
-  constructor(player, group, householdId, connection) {
+  constructor(player, group, householdId, speakerConnection, groupsConnection) {
     this.id = player.id;
     this.name = player.name;
     this.capabilities = player.capabilities;
     this._group = group;
     this.householdId = householdId;
-    const context = {
-      connection,
+    this._speakerConnection = speakerConnection;
+    const self = this;
+    const speakerContext = {
+      get connection() {
+        return self._speakerConnection;
+      },
       getHouseholdId: () => this.householdId,
       getGroupId: () => this._group.id,
       getPlayerId: () => this.id
     };
-    this.volume = new VolumeControl(context);
-    this.playback = new PlaybackControl(context);
-    this.favorites = new FavoritesAccess(context);
-    this.playlists = new PlaylistsAccess(context);
-    this.audioClip = new AudioClipControl(context);
-    this.homeTheater = new HomeTheaterControl(context);
-    this.settings = new SettingsControl(context);
-    this.groups = new GroupsNamespace(context);
+    const groupsContext = {
+      connection: groupsConnection,
+      getHouseholdId: () => this.householdId,
+      getGroupId: () => this._group.id,
+      getPlayerId: () => this.id
+    };
+    this.volume = new VolumeControl(speakerContext);
+    this.playback = new PlaybackControl(speakerContext);
+    this.favorites = new FavoritesAccess(speakerContext);
+    this.playlists = new PlaylistsAccess(speakerContext);
+    this.audioClip = new AudioClipControl(speakerContext);
+    this.homeTheater = new HomeTheaterControl(speakerContext);
+    this.settings = new SettingsControl(speakerContext);
+    this.groups = new GroupsNamespace(groupsContext);
+  }
+  /**
+   * Updates the speaker connection for this handle.
+   * Called by SonosHousehold after establishing per-speaker connections.
+   * @internal
+   */
+  setSpeakerConnection(connection) {
+    this._speakerConnection = connection;
   }
   /** Current group ID this player belongs to. Updated automatically on topology changes. */
   get groupId() {
@@ -1629,17 +1648,27 @@ var SonosHousehold = class extends TypedEventEmitter {
   _householdId;
   _initialConnectDone = false;
   _lastTopologyKey = "";
+  /** Per-speaker WebSocket connections. Key is player ID. */
+  speakerConnections = /* @__PURE__ */ new Map();
+  primaryHost;
+  reconnectOptions;
+  requestTimeoutMs;
+  autoConnectSpeakers;
   /** Household-scoped GroupsNamespace for createGroup calls (no groupId/playerId). */
   householdGroups;
   engine;
   constructor(options) {
     super();
     this.log = options.logger ?? noopLogger;
+    this.primaryHost = options.host;
+    this.reconnectOptions = resolveReconnectOptions(options.reconnect);
+    this.requestTimeoutMs = options.requestTimeout ?? 12e4;
+    this.autoConnectSpeakers = options.autoConnect ?? true;
     this.connection = new SonosConnection({
       host: options.host,
       port: options.port ?? 1443,
-      reconnect: resolveReconnectOptions(options.reconnect),
-      requestTimeout: options.requestTimeout ?? 12e4,
+      reconnect: this.reconnectOptions,
+      requestTimeout: this.requestTimeoutMs,
       logger: this.log
     });
     const householdContext = {
@@ -1686,10 +1715,20 @@ var SonosHousehold = class extends TypedEventEmitter {
     await this.connection.connect();
     await this.discoverHouseholdId();
     await this.refreshTopology();
+    if (this.autoConnectSpeakers) {
+      await this.connectAllSpeakers();
+    }
     this._initialConnectDone = true;
   }
-  /** Gracefully closes the WebSocket connection. */
+  /** Gracefully closes all WebSocket connections. */
   async disconnect() {
+    for (const [, conn] of this.speakerConnections) {
+      try {
+        await conn.disconnect();
+      } catch {
+      }
+    }
+    this.speakerConnections.clear();
     await this.connection.disconnect();
   }
   /**
@@ -1728,7 +1767,10 @@ var SonosHousehold = class extends TypedEventEmitter {
       if (existing) {
         existing.updateGroup(group);
       } else {
-        this._players.set(player.id, new PlayerHandle(player, group, householdId, this.connection));
+        this._players.set(
+          player.id,
+          new PlayerHandle(player, group, householdId, this.connection, this.connection)
+        );
       }
     }
     for (const [id] of this._players) {
@@ -1767,6 +1809,59 @@ var SonosHousehold = class extends TypedEventEmitter {
    */
   async ungroupAll() {
     await this.engine.ungroupAll();
+  }
+  /**
+   * Opens connections to all discovered speakers in parallel.
+   * The primary speaker reuses the existing connection.
+   */
+  async connectAllSpeakers() {
+    const promises = this._rawPlayers.map(async (player) => {
+      try {
+        const conn = await this.connectToSpeaker(player);
+        const handle = this._players.get(player.id);
+        if (handle) {
+          handle.setSpeakerConnection(conn);
+        }
+      } catch (err) {
+        this.log.warn(`Failed to connect to ${player.name}:`, err);
+      }
+    });
+    await Promise.all(promises);
+  }
+  /**
+   * Gets or creates a connection to a specific speaker.
+   * Returns the primary connection if the speaker is the primary host.
+   */
+  async connectToSpeaker(player) {
+    if (player.websocketUrl) {
+      try {
+        const url2 = new URL(player.websocketUrl);
+        if (url2.hostname === this.primaryHost) {
+          return this.connection;
+        }
+      } catch {
+      }
+    }
+    const existing = this.speakerConnections.get(player.id);
+    if (existing && existing.state === "connected") {
+      return existing;
+    }
+    if (!player.websocketUrl) {
+      this.log.warn(`No websocketUrl for player ${player.name} \u2014 using primary connection`);
+      return this.connection;
+    }
+    const url = new URL(player.websocketUrl);
+    const conn = new SonosConnection({
+      host: url.hostname,
+      port: parseInt(url.port) || 1443,
+      reconnect: this.reconnectOptions,
+      requestTimeout: this.requestTimeoutMs,
+      logger: this.log
+    });
+    await conn.connect();
+    this.speakerConnections.set(player.id, conn);
+    this.log.info(`Connected to ${player.name} at ${url.hostname}`);
+    return conn;
   }
   /**
    * Discovers the householdId by sending a raw getGroups request.
@@ -1925,7 +2020,7 @@ var SonosClient = class extends TypedEventEmitter {
       const group = result.groups?.[0];
       const player = result.players?.find((p) => p.id === group?.coordinatorId) ?? result.players?.[0];
       if (group && player) {
-        this._handle = new PlayerHandle(player, group, this._householdId ?? "", this.connection);
+        this._handle = new PlayerHandle(player, group, this._householdId ?? "", this.connection, this.connection);
       }
     } catch {
       this.log.warn("Could not discover player \u2014 provide host of a specific speaker");

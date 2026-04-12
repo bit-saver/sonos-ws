@@ -1054,6 +1054,7 @@ declare class PlayerHandle {
     readonly capabilities: PlayerCapability[];
     private _group;
     private readonly householdId;
+    private _speakerConnection;
     /** Unified volume control (group volume + per-speaker volume). */
     readonly volume: VolumeControl;
     /** Playback and metadata control. */
@@ -1070,7 +1071,13 @@ declare class PlayerHandle {
     readonly settings: SettingsControl;
     /** Raw group operations (used internally by SonosHousehold for grouping). */
     readonly groups: GroupsNamespace;
-    constructor(player: Player, group: Group, householdId: string, connection: SonosConnection);
+    constructor(player: Player, group: Group, householdId: string, speakerConnection: SonosConnection, groupsConnection: SonosConnection);
+    /**
+     * Updates the speaker connection for this handle.
+     * Called by SonosHousehold after establishing per-speaker connections.
+     * @internal
+     */
+    setSpeakerConnection(connection: SonosConnection): void;
     /** Current group ID this player belongs to. Updated automatically on topology changes. */
     get groupId(): string;
     /** Whether this player is the coordinator of its current group. */
@@ -1097,6 +1104,8 @@ interface SonosHouseholdOptions {
     logger?: Logger;
     /** Command timeout in ms. @defaultValue 5000 */
     requestTimeout?: number;
+    /** Connect to all speakers at startup. @defaultValue true */
+    autoConnect?: boolean;
 }
 /**
  * Top-level API for controlling an entire Sonos household.
@@ -1126,6 +1135,12 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     private _householdId;
     private _initialConnectDone;
     private _lastTopologyKey;
+    /** Per-speaker WebSocket connections. Key is player ID. */
+    private readonly speakerConnections;
+    private readonly primaryHost;
+    private readonly reconnectOptions;
+    private readonly requestTimeoutMs;
+    private readonly autoConnectSpeakers;
     /** Household-scoped GroupsNamespace for createGroup calls (no groupId/playerId). */
     private readonly householdGroups;
     private readonly engine;
@@ -1143,7 +1158,7 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
      * Populates {@link players} and {@link groups}.
      */
     connect(): Promise<void>;
-    /** Gracefully closes the WebSocket connection. */
+    /** Gracefully closes all WebSocket connections. */
     disconnect(): Promise<void>;
     /**
      * Gets a player handle by display name (case-insensitive) or RINCON ID.
@@ -1177,6 +1192,16 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
      * Ungroups all players in the household. Each becomes its own group.
      */
     ungroupAll(): Promise<void>;
+    /**
+     * Opens connections to all discovered speakers in parallel.
+     * The primary speaker reuses the existing connection.
+     */
+    private connectAllSpeakers;
+    /**
+     * Gets or creates a connection to a specific speaker.
+     * Returns the primary connection if the speaker is the primary host.
+     */
+    private connectToSpeaker;
     /**
      * Discovers the householdId by sending a raw getGroups request.
      */
