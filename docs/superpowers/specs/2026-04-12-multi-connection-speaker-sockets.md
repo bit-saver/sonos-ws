@@ -24,8 +24,8 @@ SonosHousehold
 
 ## Key Decisions
 
-### Lazy connections
-Speaker connections are created on the first command to that speaker, not at startup. `SonosHousehold.connect()` still opens only one connection (the primary). If you never control the Bedroom, no Bedroom connection is opened.
+### Connect all speakers at startup
+After the primary connection discovers topology, `SonosHousehold.connect()` opens connections to all discovered speakers in parallel. Every speaker is ready for commands immediately — no lazy setup, no first-command delays.
 
 ### Arc reuses primary
 The speaker matching the configured host reuses the primary connection. No duplicate WebSocket to the same speaker.
@@ -228,4 +228,3 @@ async disconnect(): Promise<void> {
 **Out of scope:**
 - Event subscriptions on per-speaker connections (primary handles all events)
 - Connection pooling or limits
-- Automatic connection for all speakers at startup
