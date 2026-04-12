@@ -1638,7 +1638,7 @@ var SonosHousehold = class extends TypedEventEmitter {
       host: options.host,
       port: options.port ?? 1443,
       reconnect: resolveReconnectOptions(options.reconnect),
-      requestTimeout: options.requestTimeout ?? 15e3,
+      requestTimeout: options.requestTimeout ?? 12e4,
       logger: this.log
     });
     const householdContext = {
@@ -1857,7 +1857,7 @@ var SonosClient = class extends TypedEventEmitter {
       host: options.host,
       port: options.port ?? 1443,
       reconnect: resolveReconnectOptions2(options.reconnect),
-      requestTimeout: options.requestTimeout ?? 5e3,
+      requestTimeout: options.requestTimeout ?? 12e4,
       logger: this.log
     });
   }

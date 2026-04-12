@@ -56,7 +56,7 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
       host: options.host,
       port: options.port ?? 1443,
       reconnect: resolveReconnectOptions(options.reconnect),
-      requestTimeout: options.requestTimeout ?? 5000,
+      requestTimeout: options.requestTimeout ?? 120000,
       logger: this.log,
     });
   }
