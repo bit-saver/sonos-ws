@@ -1443,9 +1443,17 @@ var GroupingEngine = class {
       );
       snap = await this.refreshAndSnapshot();
     }
+    const freshSnap = await this.refreshAndSnapshot();
+    for (const id of memberIds) {
+      if (id === coordinator.id) continue;
+      const memberGroup = freshSnap.findGroupOf(id);
+      if (memberGroup && memberGroup.playerIds.length > 1 && memberGroup.id !== freshSnap.findGroupOf(coordinator.id)?.id) {
+        await this.householdGroups.createGroup([id]);
+      }
+    }
     await this.withRetry(async () => {
-      const freshSnap = await this.refreshAndSnapshot();
-      const coordGroup = freshSnap.findGroupOf(coordinator.id);
+      const retrySnap = await this.refreshAndSnapshot();
+      const coordGroup = retrySnap.findGroupOf(coordinator.id);
       if (!coordGroup) return;
       const toAdd = memberIds.filter((id) => id !== coordinator.id && !coordGroup.playerIds.includes(id));
       const toRemove = coordGroup.playerIds.filter((id) => id !== coordinator.id && !memberIds.includes(id));
