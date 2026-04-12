@@ -201,19 +201,10 @@ export class GroupingEngine {
       snap = await this.refreshAndSnapshot();
     }
 
-    // Extract members from their current groups before adding them.
-    // This prevents orphaned coordinators from continuing to play audio
-    // when a member is pulled from one group into another.
-    const freshSnap = await this.refreshAndSnapshot();
-    for (const id of memberIds) {
-      if (id === coordinator.id) continue;
-      const memberGroup = freshSnap.findGroupOf(id);
-      if (memberGroup && memberGroup.playerIds.length > 1 && memberGroup.id !== freshSnap.findGroupOf(coordinator.id)?.id) {
-        await this.householdGroups.createGroup([id]);
-      }
-    }
-
     // Add/remove members with retry (delta recomputed inside closure for fresh state)
+    // Note: modifyGroupMembers handles cross-group moves atomically —
+    // members are pulled directly from their current groups without
+    // needing explicit extraction first.
     await this.withRetry(async () => {
       const retrySnap = await this.refreshAndSnapshot();
       const coordGroup = retrySnap.findGroupOf(coordinator.id);

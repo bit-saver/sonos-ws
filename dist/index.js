@@ -1487,14 +1487,6 @@ var GroupingEngine = class {
       );
       snap = await this.refreshAndSnapshot();
     }
-    const freshSnap = await this.refreshAndSnapshot();
-    for (const id of memberIds) {
-      if (id === coordinator.id) continue;
-      const memberGroup = freshSnap.findGroupOf(id);
-      if (memberGroup && memberGroup.playerIds.length > 1 && memberGroup.id !== freshSnap.findGroupOf(coordinator.id)?.id) {
-        await this.householdGroups.createGroup([id]);
-      }
-    }
     await this.withRetry(async () => {
       const retrySnap = await this.refreshAndSnapshot();
       const coordGroup = retrySnap.findGroupOf(coordinator.id);
