@@ -78,7 +78,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       host: options.host,
       port: options.port ?? 1443,
       reconnect: resolveReconnectOptions(options.reconnect),
-      requestTimeout: options.requestTimeout ?? 5000,
+      requestTimeout: options.requestTimeout ?? 15000,
       logger: this.log,
     });
 

@@ -9,7 +9,7 @@ import { ErrorCode } from '../types/errors.js';
 import { TopologySnapshot } from './TopologySnapshot.js';
 
 const POLL_INTERVAL_MS = 200;
-const POLL_DEADLINE_MS = 3000;
+const POLL_DEADLINE_MS = 8000;
 
 /**
  * Manages Sonos speaker grouping operations with robust error handling.
@@ -292,8 +292,12 @@ export class GroupingEngine {
   ): Promise<GroupsResponse | null> {
     const start = Date.now();
     while (true) {
-      const response = await this.householdGroups.getGroups();
-      if (condition(response)) return response;
+      try {
+        const response = await this.householdGroups.getGroups();
+        if (condition(response)) return response;
+      } catch {
+        // Transient error (timeout, connection hiccup) — skip and retry
+      }
       const elapsed = Date.now() - start;
       if (elapsed >= deadlineMs) return null;
       await new Promise((r) => setTimeout(r, Math.min(intervalMs, deadlineMs - elapsed)));

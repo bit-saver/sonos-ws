@@ -1315,7 +1315,7 @@ var TopologySnapshot = class {
 
 // src/household/GroupingEngine.ts
 var POLL_INTERVAL_MS = 200;
-var POLL_DEADLINE_MS = 3e3;
+var POLL_DEADLINE_MS = 8e3;
 var GroupingEngine = class {
   constructor(householdGroups, refreshTopology, players, log) {
     this.householdGroups = householdGroups;
@@ -1509,8 +1509,11 @@ var GroupingEngine = class {
   async pollUntil(condition, deadlineMs = POLL_DEADLINE_MS, intervalMs = POLL_INTERVAL_MS) {
     const start = Date.now();
     while (true) {
-      const response = await this.householdGroups.getGroups();
-      if (condition(response)) return response;
+      try {
+        const response = await this.householdGroups.getGroups();
+        if (condition(response)) return response;
+      } catch {
+      }
       const elapsed = Date.now() - start;
       if (elapsed >= deadlineMs) return null;
       await new Promise((r) => setTimeout(r, Math.min(intervalMs, deadlineMs - elapsed)));
@@ -1569,7 +1572,7 @@ var SonosHousehold = class extends TypedEventEmitter {
       host: options.host,
       port: options.port ?? 1443,
       reconnect: resolveReconnectOptions(options.reconnect),
-      requestTimeout: options.requestTimeout ?? 5e3,
+      requestTimeout: options.requestTimeout ?? 15e3,
       logger: this.log
     });
     const householdContext = {
