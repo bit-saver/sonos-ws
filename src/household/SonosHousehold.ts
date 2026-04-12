@@ -65,6 +65,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   private _rawPlayers: Player[] = [];
   private _householdId: string | undefined;
   private _initialConnectDone = false;
+  private _lastTopologyKey = '';
 
   /** Household-scoped GroupsNamespace for createGroup calls (no groupId/playerId). */
   private readonly householdGroups: GroupsNamespace;
@@ -197,7 +198,17 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       }
     }
 
-    this.emit('topologyChanged', this._groups, this._rawPlayers);
+    // Only emit topologyChanged if the topology actually differs from last time.
+    // Multiple refreshTopology() calls during a single group operation would
+    // otherwise flood listeners with duplicate events.
+    const topologyKey = result.groups
+      .map((g) => `${g.id}:${g.coordinatorId}:${g.playerIds.join(',')}:${g.playbackState ?? ''}`)
+      .sort()
+      .join('|');
+    if (topologyKey !== this._lastTopologyKey) {
+      this._lastTopologyKey = topologyKey;
+      this.emit('topologyChanged', this._groups, this._rawPlayers);
+    }
     this.log.debug(`Topology refreshed: ${this._players.size} players, ${this._groups.length} groups`);
 
     return result;

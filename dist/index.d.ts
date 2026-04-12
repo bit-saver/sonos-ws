@@ -1125,6 +1125,7 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     private _rawPlayers;
     private _householdId;
     private _initialConnectDone;
+    private _lastTopologyKey;
     /** Household-scoped GroupsNamespace for createGroup calls (no groupId/playerId). */
     private readonly householdGroups;
     private readonly engine;
