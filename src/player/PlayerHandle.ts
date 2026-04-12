@@ -30,6 +30,7 @@ export class PlayerHandle {
 
   private _group: Group;
   private readonly householdId: string;
+  private _speakerConnection: SonosConnection;
 
   /** Unified volume control (group volume + per-speaker volume). */
   readonly volume: VolumeControl;
@@ -48,28 +49,56 @@ export class PlayerHandle {
   /** Raw group operations (used internally by SonosHousehold for grouping). */
   readonly groups: GroupsNamespace;
 
-  constructor(player: Player, group: Group, householdId: string, connection: SonosConnection) {
+  constructor(
+    player: Player,
+    group: Group,
+    householdId: string,
+    speakerConnection: SonosConnection,
+    groupsConnection: SonosConnection,
+  ) {
     this.id = player.id;
     this.name = player.name;
     this.capabilities = player.capabilities;
     this._group = group;
     this.householdId = householdId;
+    this._speakerConnection = speakerConnection;
 
-    const context: NamespaceContext = {
-      connection,
+    // Speaker context — reads connection from mutable field so
+    // setSpeakerConnection() immediately affects all namespaces.
+    const self = this;
+    const speakerContext: NamespaceContext = {
+      get connection() { return self._speakerConnection; },
       getHouseholdId: () => this.householdId,
       getGroupId: () => this._group.id,
       getPlayerId: () => this.id,
     };
 
-    this.volume = new VolumeControl(context);
-    this.playback = new PlaybackControl(context);
-    this.favorites = new FavoritesAccess(context);
-    this.playlists = new PlaylistsAccess(context);
-    this.audioClip = new AudioClipControl(context);
-    this.homeTheater = new HomeTheaterControl(context);
-    this.settings = new SettingsControl(context);
-    this.groups = new GroupsNamespace(context);
+    // Groups context — uses the primary connection (group commands
+    // work from any speaker in the household).
+    const groupsContext: NamespaceContext = {
+      connection: groupsConnection,
+      getHouseholdId: () => this.householdId,
+      getGroupId: () => this._group.id,
+      getPlayerId: () => this.id,
+    };
+
+    this.volume = new VolumeControl(speakerContext);
+    this.playback = new PlaybackControl(speakerContext);
+    this.favorites = new FavoritesAccess(speakerContext);
+    this.playlists = new PlaylistsAccess(speakerContext);
+    this.audioClip = new AudioClipControl(speakerContext);
+    this.homeTheater = new HomeTheaterControl(speakerContext);
+    this.settings = new SettingsControl(speakerContext);
+    this.groups = new GroupsNamespace(groupsContext);
+  }
+
+  /**
+   * Updates the speaker connection for this handle.
+   * Called by SonosHousehold after establishing per-speaker connections.
+   * @internal
+   */
+  setSpeakerConnection(connection: SonosConnection): void {
+    this._speakerConnection = connection;
   }
 
   /** Current group ID this player belongs to. Updated automatically on topology changes. */

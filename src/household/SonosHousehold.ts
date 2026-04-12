@@ -36,6 +36,8 @@ export interface SonosHouseholdOptions {
   logger?: Logger;
   /** Command timeout in ms. @defaultValue 5000 */
   requestTimeout?: number;
+  /** Connect to all speakers at startup. @defaultValue true */
+  autoConnect?: boolean;
 }
 
 /**
@@ -67,6 +69,13 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   private _initialConnectDone = false;
   private _lastTopologyKey = '';
 
+  /** Per-speaker WebSocket connections. Key is player ID. */
+  private readonly speakerConnections = new Map<string, SonosConnection>();
+  private readonly primaryHost: string;
+  private readonly reconnectOptions: ReconnectOptions;
+  private readonly requestTimeoutMs: number;
+  private readonly autoConnectSpeakers: boolean;
+
   /** Household-scoped GroupsNamespace for createGroup calls (no groupId/playerId). */
   private readonly householdGroups: GroupsNamespace;
   private readonly engine: GroupingEngine;
@@ -74,12 +83,16 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   constructor(options: SonosHouseholdOptions) {
     super();
     this.log = options.logger ?? noopLogger;
+    this.primaryHost = options.host;
+    this.reconnectOptions = resolveReconnectOptions(options.reconnect);
+    this.requestTimeoutMs = options.requestTimeout ?? 120000;
+    this.autoConnectSpeakers = options.autoConnect ?? true;
 
     this.connection = new SonosConnection({
       host: options.host,
       port: options.port ?? 1443,
-      reconnect: resolveReconnectOptions(options.reconnect),
-      requestTimeout: options.requestTimeout ?? 120000,
+      reconnect: this.reconnectOptions,
+      requestTimeout: this.requestTimeoutMs,
       logger: this.log,
     });
 
@@ -134,11 +147,20 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     await this.connection.connect();
     await this.discoverHouseholdId();
     await this.refreshTopology();
+    if (this.autoConnectSpeakers) {
+      await this.connectAllSpeakers();
+    }
     this._initialConnectDone = true;
   }
 
-  /** Gracefully closes the WebSocket connection. */
+  /** Gracefully closes all WebSocket connections. */
   async disconnect(): Promise<void> {
+    // Close all per-speaker connections first
+    for (const [, conn] of this.speakerConnections) {
+      try { await conn.disconnect(); } catch { /* best effort */ }
+    }
+    this.speakerConnections.clear();
+    // Close primary connection
     await this.connection.disconnect();
   }
 
@@ -187,7 +209,10 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       if (existing) {
         existing.updateGroup(group);
       } else {
-        this._players.set(player.id, new PlayerHandle(player, group, householdId, this.connection));
+        this._players.set(
+          player.id,
+          new PlayerHandle(player, group, householdId, this.connection, this.connection),
+        );
       }
     }
 
@@ -239,6 +264,67 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
    */
   async ungroupAll(): Promise<void> {
     await this.engine.ungroupAll();
+  }
+
+  /**
+   * Opens connections to all discovered speakers in parallel.
+   * The primary speaker reuses the existing connection.
+   */
+  private async connectAllSpeakers(): Promise<void> {
+    const promises = this._rawPlayers.map(async (player) => {
+      try {
+        const conn = await this.connectToSpeaker(player);
+        const handle = this._players.get(player.id);
+        if (handle) {
+          handle.setSpeakerConnection(conn);
+        }
+      } catch (err) {
+        this.log.warn(`Failed to connect to ${player.name}:`, err);
+      }
+    });
+    await Promise.all(promises);
+  }
+
+  /**
+   * Gets or creates a connection to a specific speaker.
+   * Returns the primary connection if the speaker is the primary host.
+   */
+  private async connectToSpeaker(player: Player): Promise<SonosConnection> {
+    // If this speaker is the primary host, reuse the primary connection
+    if (player.websocketUrl) {
+      try {
+        const url = new URL(player.websocketUrl);
+        if (url.hostname === this.primaryHost) {
+          return this.connection;
+        }
+      } catch { /* fall through to create new connection */ }
+    }
+
+    // Return existing connection if already connected
+    const existing = this.speakerConnections.get(player.id);
+    if (existing && existing.state === 'connected') {
+      return existing;
+    }
+
+    // Parse host from the player's WebSocket URL
+    if (!player.websocketUrl) {
+      this.log.warn(`No websocketUrl for player ${player.name} — using primary connection`);
+      return this.connection;
+    }
+
+    const url = new URL(player.websocketUrl);
+    const conn = new SonosConnection({
+      host: url.hostname,
+      port: parseInt(url.port) || 1443,
+      reconnect: this.reconnectOptions,
+      requestTimeout: this.requestTimeoutMs,
+      logger: this.log,
+    });
+
+    await conn.connect();
+    this.speakerConnections.set(player.id, conn);
+    this.log.info(`Connected to ${player.name} at ${url.hostname}`);
+    return conn;
   }
 
   /**

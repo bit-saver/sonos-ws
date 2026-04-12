@@ -110,7 +110,7 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
       const player = result.players?.find((p) => p.id === group?.coordinatorId) ?? result.players?.[0];
 
       if (group && player) {
-        this._handle = new PlayerHandle(player, group, this._householdId ?? '', this.connection);
+        this._handle = new PlayerHandle(player, group, this._householdId ?? '', this.connection, this.connection);
       }
     } catch {
       this.log.warn('Could not discover player — provide host of a specific speaker');
