@@ -5,13 +5,14 @@ import type { GroupVolumeStatus, PlayerVolumeStatus, VolumeResponse } from '../t
 import type { SonosResponse } from '../types/messages.js';
 
 /**
- * Unified volume control for a Sonos player.
+ * Volume control for a Sonos player.
  *
- * Primary methods control the group volume (all speakers in this player's group).
- * The {@link player} sub-object controls this individual speaker within its group.
+ * Primary methods control this individual speaker's volume.
+ * The {@link group} sub-object controls the entire group's volume
+ * (all speakers in the group adjust proportionally).
  */
 export class VolumeControl {
-  private readonly group: GroupVolumeNamespace;
+  private readonly _group: GroupVolumeNamespace;
   private readonly _player: PlayerVolumeNamespace;
   private readonly coordinatorContext: NamespaceContext;
 
@@ -21,115 +22,120 @@ export class VolumeControl {
    */
   constructor(speakerContext: NamespaceContext, coordinatorContext?: NamespaceContext) {
     this.coordinatorContext = coordinatorContext ?? speakerContext;
-    this.group = new GroupVolumeNamespace(this.coordinatorContext);
+    this._group = new GroupVolumeNamespace(this.coordinatorContext);
     this._player = new PlayerVolumeNamespace(speakerContext);
   }
 
-  /** Gets the current group volume level and mute status. */
-  async get(): Promise<GroupVolumeStatus> {
-    return this.group.getVolume();
+  // ── Individual speaker volume (default) ─────────────────────────────
+
+  /** Gets the current volume and mute status for this speaker. */
+  async get(): Promise<PlayerVolumeStatus> {
+    return this._player.getVolume();
   }
 
   /**
-   * Sets the absolute group volume.
+   * Sets the absolute volume for this speaker.
    * @param volume - Volume level (0–100).
+   * @param muted - Optionally set mute state simultaneously.
    */
-  async set(volume: number): Promise<void> {
-    return this.group.setVolume(volume);
+  async set(volume: number, muted?: boolean): Promise<void> {
+    return this._player.setVolume(volume, muted);
   }
 
   /**
-   * Adjusts the group volume by a relative amount.
+   * Adjusts this speaker's volume by a relative amount.
    * @param delta - Amount to adjust (positive to increase, negative to decrease).
-   * @returns The resulting volume status after the adjustment.
+   * @returns The resulting volume level.
    */
-  async relative(delta: number): Promise<GroupVolumeStatus> {
-    // Wait for the subscription event that confirms the volume change,
-    // rather than polling getVolume (which can return stale data).
-    const volumeEvent = new Promise<GroupVolumeStatus>((resolve) => {
-      const conn = this.coordinatorContext.connection;
-      const timeout = setTimeout(() => {
-        conn.off('message', handler);
-        this.group.getVolume().then(resolve, () => resolve({ volume: 0, muted: false, fixed: false }));
-      }, 2000);
-
-      const handler = (msg: SonosResponse) => {
-        const [headers, body] = msg;
-        if (headers?.namespace === 'groupVolume:1' && body?._objectType === 'groupVolume') {
-          clearTimeout(timeout);
-          conn.off('message', handler);
-          resolve(body as unknown as GroupVolumeStatus);
-        }
-      };
-
-      conn.on('message', handler);
-    });
-
-    await this.group.setRelativeVolume(delta);
-    return volumeEvent;
+  async relative(delta: number): Promise<VolumeResponse> {
+    return this._player.setRelativeVolume(delta);
   }
 
   /**
-   * Mutes or unmutes the entire group.
+   * Mutes or unmutes this individual speaker.
    * @param muted - `true` to mute, `false` to unmute.
    */
   async mute(muted: boolean): Promise<void> {
-    return this.group.setMute(muted);
+    return this._player.setMute(muted);
   }
 
-  /**
-   * Subscribes to real-time group volume change events.
-   * After subscribing, the household emits `volumeChanged` events.
-   */
+  /** Subscribes to per-speaker volume events. */
   async subscribe(): Promise<void> {
-    return this.group.subscribe();
+    return this._player.subscribe();
   }
 
-  /** Unsubscribes from group volume events. */
+  /** Unsubscribes from per-speaker volume events. */
   async unsubscribe(): Promise<void> {
-    return this.group.unsubscribe();
+    return this._player.unsubscribe();
   }
+
+  // ── Group volume ────────────────────────────────────────────────────
 
   /**
-   * Per-speaker volume control.
-   * Controls this individual speaker independently within its group.
-   * Use this to adjust one speaker's volume without affecting others in the group.
+   * Group volume control.
+   * Controls all speakers in this player's group proportionally.
+   * Automatically routes through the group coordinator's connection.
    */
-  readonly player = {
-    /** Gets the current volume and mute status for this individual speaker. */
-    get: (): Promise<PlayerVolumeStatus> => {
-      return this._player.getVolume();
+  readonly group = {
+    /** Gets the current group volume level and mute status. */
+    get: (): Promise<GroupVolumeStatus> => {
+      return this._group.getVolume();
     },
+
     /**
-     * Sets the absolute volume for this speaker.
+     * Sets the absolute group volume.
      * @param volume - Volume level (0–100).
-     * @param muted - Optionally set mute state simultaneously.
      */
-    set: (volume: number, muted?: boolean): Promise<void> => {
-      return this._player.setVolume(volume, muted);
+    set: (volume: number): Promise<void> => {
+      return this._group.setVolume(volume);
     },
+
     /**
-     * Adjusts this speaker's volume by a relative amount.
-     * @param delta - Amount to adjust.
-     * @returns The resulting volume level.
+     * Adjusts the group volume by a relative amount.
+     * @param delta - Amount to adjust (positive to increase, negative to decrease).
+     * @returns The resulting group volume status after the adjustment.
      */
-    relative: (delta: number): Promise<VolumeResponse> => {
-      return this._player.setRelativeVolume(delta);
+    relative: async (delta: number): Promise<GroupVolumeStatus> => {
+      // Wait for the subscription event that confirms the volume change.
+      const volumeEvent = new Promise<GroupVolumeStatus>((resolve) => {
+        const conn = this.coordinatorContext.connection;
+        const timeout = setTimeout(() => {
+          conn.off('message', handler);
+          this._group.getVolume().then(resolve, () => resolve({ volume: 0, muted: false, fixed: false }));
+        }, 2000);
+
+        const handler = (msg: SonosResponse) => {
+          const [headers, body] = msg;
+          if (headers?.namespace === 'groupVolume:1' && body?._objectType === 'groupVolume') {
+            clearTimeout(timeout);
+            conn.off('message', handler);
+            resolve(body as unknown as GroupVolumeStatus);
+          }
+        };
+
+        conn.on('message', handler);
+      });
+
+      await this._group.setRelativeVolume(delta);
+      return volumeEvent;
     },
+
     /**
-     * Mutes or unmutes this individual speaker.
+     * Mutes or unmutes the entire group.
      * @param muted - `true` to mute, `false` to unmute.
      */
     mute: (muted: boolean): Promise<void> => {
-      return this._player.setMute(muted);
+      return this._group.setMute(muted);
     },
-    /** Subscribes to per-speaker volume events. */
+
+    /** Subscribes to group volume change events. */
     subscribe: (): Promise<void> => {
-      return this._player.subscribe();
+      return this._group.subscribe();
     },
-    /** Unsubscribes from per-speaker volume events. */
+
+    /** Unsubscribes from group volume events. */
     unsubscribe: (): Promise<void> => {
-      return this._player.unsubscribe();
+      return this._group.unsubscribe();
     },
   };
 }

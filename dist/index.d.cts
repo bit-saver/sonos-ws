@@ -784,13 +784,14 @@ declare class GroupsNamespace extends BaseNamespace {
 }
 
 /**
- * Unified volume control for a Sonos player.
+ * Volume control for a Sonos player.
  *
- * Primary methods control the group volume (all speakers in this player's group).
- * The {@link player} sub-object controls this individual speaker within its group.
+ * Primary methods control this individual speaker's volume.
+ * The {@link group} sub-object controls the entire group's volume
+ * (all speakers in the group adjust proportionally).
  */
 declare class VolumeControl {
-    private readonly group;
+    private readonly _group;
     private readonly _player;
     private readonly coordinatorContext;
     /**
@@ -798,59 +799,56 @@ declare class VolumeControl {
      * @param coordinatorContext — for group volume (groupVolume:1), routed through the coordinator's connection
      */
     constructor(speakerContext: NamespaceContext, coordinatorContext?: NamespaceContext);
-    /** Gets the current group volume level and mute status. */
-    get(): Promise<GroupVolumeStatus>;
+    /** Gets the current volume and mute status for this speaker. */
+    get(): Promise<PlayerVolumeStatus>;
     /**
-     * Sets the absolute group volume.
+     * Sets the absolute volume for this speaker.
      * @param volume - Volume level (0–100).
+     * @param muted - Optionally set mute state simultaneously.
      */
-    set(volume: number): Promise<void>;
+    set(volume: number, muted?: boolean): Promise<void>;
     /**
-     * Adjusts the group volume by a relative amount.
+     * Adjusts this speaker's volume by a relative amount.
      * @param delta - Amount to adjust (positive to increase, negative to decrease).
-     * @returns The resulting volume status after the adjustment.
+     * @returns The resulting volume level.
      */
-    relative(delta: number): Promise<GroupVolumeStatus>;
+    relative(delta: number): Promise<VolumeResponse>;
     /**
-     * Mutes or unmutes the entire group.
+     * Mutes or unmutes this individual speaker.
      * @param muted - `true` to mute, `false` to unmute.
      */
     mute(muted: boolean): Promise<void>;
-    /**
-     * Subscribes to real-time group volume change events.
-     * After subscribing, the household emits `volumeChanged` events.
-     */
+    /** Subscribes to per-speaker volume events. */
     subscribe(): Promise<void>;
-    /** Unsubscribes from group volume events. */
+    /** Unsubscribes from per-speaker volume events. */
     unsubscribe(): Promise<void>;
     /**
-     * Per-speaker volume control.
-     * Controls this individual speaker independently within its group.
-     * Use this to adjust one speaker's volume without affecting others in the group.
+     * Group volume control.
+     * Controls all speakers in this player's group proportionally.
+     * Automatically routes through the group coordinator's connection.
      */
-    readonly player: {
-        /** Gets the current volume and mute status for this individual speaker. */
-        get: () => Promise<PlayerVolumeStatus>;
+    readonly group: {
+        /** Gets the current group volume level and mute status. */
+        get: () => Promise<GroupVolumeStatus>;
         /**
-         * Sets the absolute volume for this speaker.
+         * Sets the absolute group volume.
          * @param volume - Volume level (0–100).
-         * @param muted - Optionally set mute state simultaneously.
          */
-        set: (volume: number, muted?: boolean) => Promise<void>;
+        set: (volume: number) => Promise<void>;
         /**
-         * Adjusts this speaker's volume by a relative amount.
-         * @param delta - Amount to adjust.
-         * @returns The resulting volume level.
+         * Adjusts the group volume by a relative amount.
+         * @param delta - Amount to adjust (positive to increase, negative to decrease).
+         * @returns The resulting group volume status after the adjustment.
          */
-        relative: (delta: number) => Promise<VolumeResponse>;
+        relative: (delta: number) => Promise<GroupVolumeStatus>;
         /**
-         * Mutes or unmutes this individual speaker.
+         * Mutes or unmutes the entire group.
          * @param muted - `true` to mute, `false` to unmute.
          */
         mute: (muted: boolean) => Promise<void>;
-        /** Subscribes to per-speaker volume events. */
+        /** Subscribes to group volume change events. */
         subscribe: () => Promise<void>;
-        /** Unsubscribes from per-speaker volume events. */
+        /** Unsubscribes from group volume events. */
         unsubscribe: () => Promise<void>;
     };
 }

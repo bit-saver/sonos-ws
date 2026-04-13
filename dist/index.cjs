@@ -777,7 +777,7 @@ var PlayerVolumeNamespace = class extends BaseNamespace {
 
 // src/player/VolumeControl.ts
 var VolumeControl = class {
-  group;
+  _group;
   _player;
   coordinatorContext;
   /**
@@ -786,103 +786,102 @@ var VolumeControl = class {
    */
   constructor(speakerContext, coordinatorContext) {
     this.coordinatorContext = coordinatorContext ?? speakerContext;
-    this.group = new GroupVolumeNamespace(this.coordinatorContext);
+    this._group = new GroupVolumeNamespace(this.coordinatorContext);
     this._player = new PlayerVolumeNamespace(speakerContext);
   }
-  /** Gets the current group volume level and mute status. */
+  // ── Individual speaker volume (default) ─────────────────────────────
+  /** Gets the current volume and mute status for this speaker. */
   async get() {
-    return this.group.getVolume();
+    return this._player.getVolume();
   }
   /**
-   * Sets the absolute group volume.
+   * Sets the absolute volume for this speaker.
    * @param volume - Volume level (0–100).
+   * @param muted - Optionally set mute state simultaneously.
    */
-  async set(volume) {
-    return this.group.setVolume(volume);
+  async set(volume, muted) {
+    return this._player.setVolume(volume, muted);
   }
   /**
-   * Adjusts the group volume by a relative amount.
+   * Adjusts this speaker's volume by a relative amount.
    * @param delta - Amount to adjust (positive to increase, negative to decrease).
-   * @returns The resulting volume status after the adjustment.
+   * @returns The resulting volume level.
    */
   async relative(delta) {
-    const volumeEvent = new Promise((resolve) => {
-      const conn = this.coordinatorContext.connection;
-      const timeout = setTimeout(() => {
-        conn.off("message", handler);
-        this.group.getVolume().then(resolve, () => resolve({ volume: 0, muted: false, fixed: false }));
-      }, 2e3);
-      const handler = (msg) => {
-        const [headers, body] = msg;
-        if (headers?.namespace === "groupVolume:1" && body?._objectType === "groupVolume") {
-          clearTimeout(timeout);
-          conn.off("message", handler);
-          resolve(body);
-        }
-      };
-      conn.on("message", handler);
-    });
-    await this.group.setRelativeVolume(delta);
-    return volumeEvent;
+    return this._player.setRelativeVolume(delta);
   }
   /**
-   * Mutes or unmutes the entire group.
+   * Mutes or unmutes this individual speaker.
    * @param muted - `true` to mute, `false` to unmute.
    */
   async mute(muted) {
-    return this.group.setMute(muted);
+    return this._player.setMute(muted);
   }
-  /**
-   * Subscribes to real-time group volume change events.
-   * After subscribing, the household emits `volumeChanged` events.
-   */
+  /** Subscribes to per-speaker volume events. */
   async subscribe() {
-    return this.group.subscribe();
+    return this._player.subscribe();
   }
-  /** Unsubscribes from group volume events. */
+  /** Unsubscribes from per-speaker volume events. */
   async unsubscribe() {
-    return this.group.unsubscribe();
+    return this._player.unsubscribe();
   }
+  // ── Group volume ────────────────────────────────────────────────────
   /**
-   * Per-speaker volume control.
-   * Controls this individual speaker independently within its group.
-   * Use this to adjust one speaker's volume without affecting others in the group.
+   * Group volume control.
+   * Controls all speakers in this player's group proportionally.
+   * Automatically routes through the group coordinator's connection.
    */
-  player = {
-    /** Gets the current volume and mute status for this individual speaker. */
+  group = {
+    /** Gets the current group volume level and mute status. */
     get: () => {
-      return this._player.getVolume();
+      return this._group.getVolume();
     },
     /**
-     * Sets the absolute volume for this speaker.
+     * Sets the absolute group volume.
      * @param volume - Volume level (0–100).
-     * @param muted - Optionally set mute state simultaneously.
      */
-    set: (volume, muted) => {
-      return this._player.setVolume(volume, muted);
+    set: (volume) => {
+      return this._group.setVolume(volume);
     },
     /**
-     * Adjusts this speaker's volume by a relative amount.
-     * @param delta - Amount to adjust.
-     * @returns The resulting volume level.
+     * Adjusts the group volume by a relative amount.
+     * @param delta - Amount to adjust (positive to increase, negative to decrease).
+     * @returns The resulting group volume status after the adjustment.
      */
-    relative: (delta) => {
-      return this._player.setRelativeVolume(delta);
+    relative: async (delta) => {
+      const volumeEvent = new Promise((resolve) => {
+        const conn = this.coordinatorContext.connection;
+        const timeout = setTimeout(() => {
+          conn.off("message", handler);
+          this._group.getVolume().then(resolve, () => resolve({ volume: 0, muted: false, fixed: false }));
+        }, 2e3);
+        const handler = (msg) => {
+          const [headers, body] = msg;
+          if (headers?.namespace === "groupVolume:1" && body?._objectType === "groupVolume") {
+            clearTimeout(timeout);
+            conn.off("message", handler);
+            resolve(body);
+          }
+        };
+        conn.on("message", handler);
+      });
+      await this._group.setRelativeVolume(delta);
+      return volumeEvent;
     },
     /**
-     * Mutes or unmutes this individual speaker.
+     * Mutes or unmutes the entire group.
      * @param muted - `true` to mute, `false` to unmute.
      */
     mute: (muted) => {
-      return this._player.setMute(muted);
+      return this._group.setMute(muted);
     },
-    /** Subscribes to per-speaker volume events. */
+    /** Subscribes to group volume change events. */
     subscribe: () => {
-      return this._player.subscribe();
+      return this._group.subscribe();
     },
-    /** Unsubscribes from per-speaker volume events. */
+    /** Unsubscribes from group volume events. */
     unsubscribe: () => {
-      return this._player.unsubscribe();
+      return this._group.unsubscribe();
     }
   };
 };
