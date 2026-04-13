@@ -51,9 +51,21 @@ export class GroupingEngine {
         }
       }
 
-      // No transfer or player already has audio — just ensure solo
+      // Ensure player is solo
       if (snap.isAloneInGroup(player.id)) return;
-      await this.householdGroups.createGroup([player.id]);
+
+      // If this player is the coordinator of its group, remove other members
+      // instead of extracting the player. Extracting the coordinator via
+      // createGroup causes the remaining members to inherit the audio source.
+      const playerGroup = snap.findGroupOf(player.id);
+      if (playerGroup && playerGroup.coordinatorId === player.id && playerGroup.playerIds.length > 1) {
+        const othersToRemove = playerGroup.playerIds.filter((id) => id !== player.id);
+        for (const otherId of othersToRemove) {
+          await this.householdGroups.createGroup([otherId]);
+        }
+      } else {
+        await this.householdGroups.createGroup([player.id]);
+      }
       await this.refreshAndSnapshot();
       return;
     }

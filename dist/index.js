@@ -1389,7 +1389,15 @@ var GroupingEngine = class {
         }
       }
       if (snap.isAloneInGroup(player.id)) return;
-      await this.householdGroups.createGroup([player.id]);
+      const playerGroup = snap.findGroupOf(player.id);
+      if (playerGroup && playerGroup.coordinatorId === player.id && playerGroup.playerIds.length > 1) {
+        const othersToRemove = playerGroup.playerIds.filter((id) => id !== player.id);
+        for (const otherId of othersToRemove) {
+          await this.householdGroups.createGroup([otherId]);
+        }
+      } else {
+        await this.householdGroups.createGroup([player.id]);
+      }
       await this.refreshAndSnapshot();
       return;
     }
