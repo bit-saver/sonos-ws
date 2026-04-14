@@ -40,11 +40,13 @@ export class GroupingEngine {
     if (playerHandles.length === 1) {
       const player = playerHandles[0]!;
 
-      // With transfer: find audio and move it to this player
+      // With transfer: find audio elsewhere and move it to this player
       if (options?.transfer) {
-        const audioSource = this.resolveAudioSource(playerHandles, options.transfer, snap);
-        if (audioSource && audioSource.id !== player.id) {
-          // Audio is on another speaker — shuffle it to the target
+        // For single-player transfer, look for audio on OTHER speakers.
+        // Skip the target player itself — if it's already playing, that's
+        // not what needs transferring. The intent is "bring me someone else's audio."
+        const audioSource = this.resolveAudioSourceExcluding(player.id, options.transfer, snap);
+        if (audioSource) {
           await this.transferAudio(audioSource, player, [player.id]);
           await this.refreshAndSnapshot();
           return;
@@ -192,6 +194,46 @@ export class GroupingEngine {
         if (group.playbackState === phase) {
           const coord = this.players.get(group.coordinatorId);
           if (coord && !targetIds.has(coord.id)) return coord;
+        }
+      }
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Like resolveAudioSource but skips a specific player.
+   * Used for single-player transfer where the target player's own audio
+   * is not what we want — we're looking for audio on OTHER speakers.
+   */
+  private resolveAudioSourceExcluding(
+    excludePlayerId: string,
+    transfer: boolean | { readonly id: string },
+    snap: TopologySnapshot,
+  ): PlayerHandle | undefined {
+    // Explicit source — honor it regardless of exclude
+    if (typeof transfer === 'object') {
+      const source = this.players.get(transfer.id);
+      if (!source) {
+        throw new SonosError(ErrorCode.PLAYER_NOT_FOUND, `Transfer source not found: ${transfer.id}`);
+      }
+      const sourceGroup = snap.findGroupOf(source.id);
+      if (
+        !sourceGroup
+        || (sourceGroup.playbackState !== 'PLAYBACK_STATE_PLAYING'
+          && sourceGroup.playbackState !== 'PLAYBACK_STATE_PAUSED')
+      ) {
+        throw new SonosError(ErrorCode.ERROR_NO_CONTENT, `Transfer source "${source.name}" has no content`);
+      }
+      return source;
+    }
+
+    // Auto-resolve — scan all groups, skipping the excluded player's group
+    for (const phase of ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_PAUSED'] as const) {
+      for (const group of snap.groups) {
+        if (group.playbackState === phase) {
+          const coord = this.players.get(group.coordinatorId);
+          if (coord && coord.id !== excludePlayerId) return coord;
         }
       }
     }

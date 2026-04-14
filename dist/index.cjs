@@ -1439,8 +1439,8 @@ var GroupingEngine = class {
     if (playerHandles.length === 1) {
       const player = playerHandles[0];
       if (options?.transfer) {
-        const audioSource2 = this.resolveAudioSource(playerHandles, options.transfer, snap);
-        if (audioSource2 && audioSource2.id !== player.id) {
+        const audioSource2 = this.resolveAudioSourceExcluding(player.id, options.transfer, snap);
+        if (audioSource2) {
           await this.transferAudio(audioSource2, player, [player.id]);
           await this.refreshAndSnapshot();
           return;
@@ -1536,6 +1536,33 @@ var GroupingEngine = class {
         if (group.playbackState === phase) {
           const coord = this.players.get(group.coordinatorId);
           if (coord && !targetIds.has(coord.id)) return coord;
+        }
+      }
+    }
+    return void 0;
+  }
+  /**
+   * Like resolveAudioSource but skips a specific player.
+   * Used for single-player transfer where the target player's own audio
+   * is not what we want — we're looking for audio on OTHER speakers.
+   */
+  resolveAudioSourceExcluding(excludePlayerId, transfer, snap) {
+    if (typeof transfer === "object") {
+      const source = this.players.get(transfer.id);
+      if (!source) {
+        throw new SonosError("PLAYER_NOT_FOUND" /* PLAYER_NOT_FOUND */, `Transfer source not found: ${transfer.id}`);
+      }
+      const sourceGroup = snap.findGroupOf(source.id);
+      if (!sourceGroup || sourceGroup.playbackState !== "PLAYBACK_STATE_PLAYING" && sourceGroup.playbackState !== "PLAYBACK_STATE_PAUSED") {
+        throw new SonosError("ERROR_NO_CONTENT" /* ERROR_NO_CONTENT */, `Transfer source "${source.name}" has no content`);
+      }
+      return source;
+    }
+    for (const phase of ["PLAYBACK_STATE_PLAYING", "PLAYBACK_STATE_PAUSED"]) {
+      for (const group of snap.groups) {
+        if (group.playbackState === phase) {
+          const coord = this.players.get(group.coordinatorId);
+          if (coord && coord.id !== excludePlayerId) return coord;
         }
       }
     }
