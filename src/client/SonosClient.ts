@@ -28,6 +28,7 @@ export interface SonosClientOptions {
 
 const DEFAULT_RECONNECT: ReconnectOptions = {
   enabled: true, initialDelay: 1000, maxDelay: 30000, factor: 2, maxAttempts: Infinity,
+  pingInterval: 30000, pongTimeout: 10000,
 };
 
 /**

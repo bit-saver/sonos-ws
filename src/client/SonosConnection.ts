@@ -44,6 +44,10 @@ export interface ReconnectOptions {
   factor: number;
   /** Maximum number of reconnect attempts before giving up. Use `Infinity` for unlimited. */
   maxAttempts: number;
+  /** Milliseconds between WebSocket pings. Set to 0 to disable keepalive. */
+  pingInterval: number;
+  /** Milliseconds to wait for a pong reply before declaring the connection dead. */
+  pongTimeout: number;
 }
 
 /** Low-level options passed to the {@link SonosConnection} constructor. */

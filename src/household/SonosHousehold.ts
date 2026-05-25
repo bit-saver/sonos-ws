@@ -20,6 +20,8 @@ const DEFAULT_RECONNECT: ReconnectOptions = {
   maxDelay: 30000,
   factor: 2,
   maxAttempts: Infinity,
+  pingInterval: 30000,
+  pongTimeout: 10000,
 };
 
 /**
