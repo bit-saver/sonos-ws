@@ -356,6 +356,8 @@ var SonosConnection = class extends TypedEventEmitter {
   reconnectAttempt = 0;
   reconnectTimer = null;
   intentionalClose = false;
+  pingTimer = null;
+  pongDeadlineTimer = null;
   constructor(options) {
     super();
     this.options = options;
@@ -399,6 +401,13 @@ var SonosConnection = class extends TypedEventEmitter {
           this.emit("error", err);
         });
         this.emit("connected");
+        this.ws.on("pong", () => {
+          if (this.pongDeadlineTimer) {
+            clearTimeout(this.pongDeadlineTimer);
+            this.pongDeadlineTimer = null;
+          }
+        });
+        this.startPing();
         resolve();
       };
       const onError = (err) => {
@@ -443,6 +452,7 @@ var SonosConnection = class extends TypedEventEmitter {
     this.correlator.rejectAll(
       new ConnectionError("CONNECTION_LOST" /* CONNECTION_LOST */, "Client disconnected")
     );
+    this.stopPing();
     if (this.ws) {
       if (this.ws.readyState === import_ws.default.OPEN) {
         this.ws.close(1e3, "client disconnect");
@@ -466,6 +476,9 @@ var SonosConnection = class extends TypedEventEmitter {
    * @throws {TimeoutError} If no response is received within the configured timeout.
    */
   async send(request) {
+    if (this._state === "reconnecting") {
+      await this.waitForReconnect();
+    }
     if (!this.ws || this.ws.readyState !== import_ws.default.OPEN) {
       throw new ConnectionError("CONNECTION_LOST" /* CONNECTION_LOST */, "Not connected");
     }
@@ -508,6 +521,7 @@ var SonosConnection = class extends TypedEventEmitter {
     this.emit("message", parsed);
   }
   handleClose(code, reason) {
+    this.stopPing();
     this.log.info(`Connection closed: ${code} ${reason}`);
     this.correlator.rejectAll(
       new ConnectionError("CONNECTION_LOST" /* CONNECTION_LOST */, `Connection closed: ${code} ${reason}`)
@@ -556,6 +570,57 @@ var SonosConnection = class extends TypedEventEmitter {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+  }
+  startPing() {
+    const { pingInterval, pongTimeout } = this.options.reconnect;
+    if (!pingInterval || !this.ws) return;
+    this.pingTimer = setInterval(() => {
+      if (!this.ws || this.ws.readyState !== import_ws.default.OPEN) return;
+      this.ws.ping();
+      this.pongDeadlineTimer = setTimeout(() => {
+        this.log.warn(`No pong received within ${pongTimeout}ms \u2014 terminating connection`);
+        this.ws?.terminate();
+      }, pongTimeout);
+    }, pingInterval);
+  }
+  stopPing() {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+    if (this.pongDeadlineTimer) {
+      clearTimeout(this.pongDeadlineTimer);
+      this.pongDeadlineTimer = null;
+    }
+  }
+  waitForReconnect() {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new ConnectionError(
+          "CONNECTION_LOST" /* CONNECTION_LOST */,
+          `Reconnection did not complete within ${this.options.requestTimeout}ms`
+        ));
+      }, this.options.requestTimeout);
+      const onConnected = () => {
+        cleanup();
+        resolve();
+      };
+      const onDisconnected = () => {
+        cleanup();
+        reject(new ConnectionError(
+          "CONNECTION_LOST" /* CONNECTION_LOST */,
+          "Connection lost during reconnection"
+        ));
+      };
+      const cleanup = () => {
+        clearTimeout(timeout);
+        this.off("connected", onConnected);
+        this.off("disconnected", onDisconnected);
+      };
+      this.on("connected", onConnected);
+      this.on("disconnected", onDisconnected);
+    });
   }
 };
 
@@ -1688,7 +1753,9 @@ var DEFAULT_RECONNECT = {
   initialDelay: 1e3,
   maxDelay: 3e4,
   factor: 2,
-  maxAttempts: Infinity
+  maxAttempts: Infinity,
+  pingInterval: 3e4,
+  pongTimeout: 1e4
 };
 var SonosHousehold = class extends TypedEventEmitter {
   connection;
@@ -1970,12 +2037,50 @@ var SonosHousehold = class extends TypedEventEmitter {
     }
   }
   /**
+   * Reconnects any per-speaker connections that have dropped, and connects
+   * to newly discovered players not yet in the speakerConnections map.
+   * Called as a safety net after the primary connection reconnects.
+   */
+  async reconnectSpeakers() {
+    const reconnectPromises = [];
+    for (const [playerId, conn] of this.speakerConnections) {
+      if (conn.state === "disconnected") {
+        this.log.info(`Reconnecting speaker ${playerId}`);
+        reconnectPromises.push(
+          conn.connect().catch((err) => this.log.warn(`Failed to reconnect speaker ${playerId}:`, err))
+        );
+      }
+    }
+    for (const player of this._rawPlayers) {
+      if (!this.speakerConnections.has(player.id)) {
+        reconnectPromises.push(
+          this.connectToSpeaker(player).then((conn) => {
+            const handle = this._players.get(player.id);
+            if (handle) handle.setSpeakerConnection(conn);
+          }).catch((err) => this.log.warn(`Failed to connect new speaker ${player.name}:`, err))
+        );
+      }
+    }
+    await Promise.allSettled(reconnectPromises);
+    for (const handle of this._players.values()) {
+      handle.setCoordinatorConnectionResolver(() => {
+        const coordId = handle["_group"]?.coordinatorId;
+        if (coordId) {
+          const coordConn = this.speakerConnections.get(coordId);
+          if (coordConn) return coordConn;
+        }
+        return this.connection;
+      });
+    }
+  }
+  /**
    * Handles reconnection events. Only refreshes topology on reconnect,
    * not on initial connect (which is handled by connect() directly).
    */
   async handleReconnected() {
     if (this._initialConnectDone) {
       await this.refreshTopology().catch((err) => this.log.warn("Failed to refresh topology on reconnect", err));
+      await this.reconnectSpeakers();
       for (const handle of this._players.values()) {
         try {
           await handle.volume.subscribe();
@@ -2002,7 +2107,9 @@ var DEFAULT_RECONNECT2 = {
   initialDelay: 1e3,
   maxDelay: 3e4,
   factor: 2,
-  maxAttempts: Infinity
+  maxAttempts: Infinity,
+  pingInterval: 3e4,
+  pongTimeout: 1e4
 };
 var SonosClient = class extends TypedEventEmitter {
   connection;

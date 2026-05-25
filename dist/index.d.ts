@@ -143,6 +143,10 @@ interface ReconnectOptions {
     factor: number;
     /** Maximum number of reconnect attempts before giving up. Use `Infinity` for unlimited. */
     maxAttempts: number;
+    /** Milliseconds between WebSocket pings. Set to 0 to disable keepalive. */
+    pingInterval: number;
+    /** Milliseconds to wait for a pong reply before declaring the connection dead. */
+    pongTimeout: number;
 }
 /** Low-level options passed to the {@link SonosConnection} constructor. */
 interface ConnectionOptions {
@@ -174,6 +178,8 @@ declare class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
     private reconnectAttempt;
     private reconnectTimer;
     private intentionalClose;
+    private pingTimer;
+    private pongDeadlineTimer;
     constructor(options: ConnectionOptions);
     /** Current connection state. */
     get state(): ConnectionState;
@@ -210,6 +216,9 @@ declare class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
     private handleClose;
     private scheduleReconnect;
     private clearReconnectTimer;
+    private startPing;
+    private stopPing;
+    private waitForReconnect;
 }
 
 /** Current volume state for a Sonos group. */
@@ -1220,6 +1229,12 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
      * Filters by `_objectType` to avoid double-firing and Volume: undefined.
      */
     private handleMessage;
+    /**
+     * Reconnects any per-speaker connections that have dropped, and connects
+     * to newly discovered players not yet in the speakerConnections map.
+     * Called as a safety net after the primary connection reconnects.
+     */
+    private reconnectSpeakers;
     /**
      * Handles reconnection events. Only refreshes topology on reconnect,
      * not on initial connect (which is handled by connect() directly).
