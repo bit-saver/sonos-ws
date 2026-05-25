@@ -229,6 +229,10 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
    * @throws {TimeoutError} If no response is received within the configured timeout.
    */
   async send(request: SonosRequest): Promise<SonosResponse> {
+    if (this._state === 'reconnecting') {
+      await this.waitForReconnect();
+    }
+
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new ConnectionError(ErrorCode.CONNECTION_LOST, 'Not connected');
     }
@@ -368,5 +372,39 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
       clearTimeout(this.pongDeadlineTimer);
       this.pongDeadlineTimer = null;
     }
+  }
+
+  private waitForReconnect(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new ConnectionError(
+          ErrorCode.CONNECTION_LOST,
+          `Reconnection did not complete within ${this.options.requestTimeout}ms`,
+        ));
+      }, this.options.requestTimeout);
+
+      const onConnected = () => {
+        cleanup();
+        resolve();
+      };
+
+      const onDisconnected = () => {
+        cleanup();
+        reject(new ConnectionError(
+          ErrorCode.CONNECTION_LOST,
+          'Connection lost during reconnection',
+        ));
+      };
+
+      const cleanup = () => {
+        clearTimeout(timeout);
+        this.off('connected', onConnected);
+        this.off('disconnected', onDisconnected);
+      };
+
+      this.on('connected', onConnected);
+      this.on('disconnected', onDisconnected);
+    });
   }
 }
