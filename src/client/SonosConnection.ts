@@ -85,6 +85,8 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private intentionalClose = false;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private pongDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: ConnectionOptions) {
     super();
@@ -137,6 +139,15 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
         });
 
         this.emit('connected');
+
+        this.ws!.on('pong', () => {
+          if (this.pongDeadlineTimer) {
+            clearTimeout(this.pongDeadlineTimer);
+            this.pongDeadlineTimer = null;
+          }
+        });
+
+        this.startPing();
         resolve();
       };
 
@@ -190,6 +201,8 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
     this.correlator.rejectAll(
       new ConnectionError(ErrorCode.CONNECTION_LOST, 'Client disconnected'),
     );
+
+    this.stopPing();
 
     if (this.ws) {
       if (this.ws.readyState === WebSocket.OPEN) {
@@ -274,6 +287,7 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
   }
 
   private handleClose(code: number, reason: string): void {
+    this.stopPing();
     this.log.info(`Connection closed: ${code} ${reason}`);
     this.correlator.rejectAll(
       new ConnectionError(ErrorCode.CONNECTION_LOST, `Connection closed: ${code} ${reason}`),
@@ -328,6 +342,31 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+  }
+
+  private startPing(): void {
+    const { pingInterval, pongTimeout } = this.options.reconnect;
+    if (!pingInterval || !this.ws) return;
+
+    this.pingTimer = setInterval(() => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      this.ws.ping();
+      this.pongDeadlineTimer = setTimeout(() => {
+        this.log.warn(`No pong received within ${pongTimeout}ms — terminating connection`);
+        this.ws?.terminate();
+      }, pongTimeout);
+    }, pingInterval);
+  }
+
+  private stopPing(): void {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+    if (this.pongDeadlineTimer) {
+      clearTimeout(this.pongDeadlineTimer);
+      this.pongDeadlineTimer = null;
     }
   }
 }
