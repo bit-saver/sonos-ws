@@ -170,3 +170,88 @@ describe('SonosHousehold grouping', () => {
     expect(mockConn.send.mock.calls.length).toBe(initialCallCount + 1);
   });
 });
+
+describe('SonosHousehold speaker reconnection', () => {
+  let household: SonosHousehold;
+  let mockConn: any;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    const Constructor = SonosConnection as unknown as ReturnType<typeof vi.fn>;
+    Constructor.mockClear();
+
+    household = new SonosHousehold({ host: '192.168.68.96' });
+    mockConn = getMockConnection();
+
+    mockConn._listeners.clear();
+    mockConn.on.mockImplementation((event: string, handler: Function) => {
+      if (!mockConn._listeners.has(event)) mockConn._listeners.set(event, []);
+      mockConn._listeners.get(event)!.push(handler);
+      return mockConn;
+    });
+
+    mockConn.send.mockImplementation((request: any) => {
+      const [headers] = request;
+      if (headers.namespace === 'groups:1' && headers.command === 'getGroups') {
+        return Promise.resolve([
+          { householdId: 'HH_1', success: true },
+          mockTopology,
+        ]);
+      }
+      return Promise.resolve([{ success: true }, {}]);
+    });
+
+    await household.connect();
+  });
+
+  it('reconnects dead speaker connections when primary reconnects', async () => {
+    const speakerConnections = (household as any).speakerConnections as Map<string, any>;
+
+    const deadConn = {
+      state: 'disconnected',
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn().mockReturnThis(),
+      off: vi.fn().mockReturnThis(),
+    };
+    const aliveConn = {
+      state: 'connected',
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn().mockReturnThis(),
+      off: vi.fn().mockReturnThis(),
+    };
+
+    speakerConnections.set('RINCON_OFFICE', deadConn);
+    speakerConnections.set('RINCON_BED', aliveConn);
+
+    // Trigger handleReconnected via the 'connected' event listener
+    const connectedHandlers = mockConn._listeners.get('connected') || [];
+    expect(connectedHandlers.length).toBeGreaterThan(0);
+    await connectedHandlers[0]();
+
+    // Dead connection should have been reconnected
+    expect(deadConn.connect).toHaveBeenCalled();
+    // Alive connection should have been left alone
+    expect(aliveConn.connect).not.toHaveBeenCalled();
+  });
+
+  it('does not interfere with connections that are already reconnecting', async () => {
+    const speakerConnections = (household as any).speakerConnections as Map<string, any>;
+
+    const reconnectingConn = {
+      state: 'reconnecting',
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn().mockReturnThis(),
+      off: vi.fn().mockReturnThis(),
+    };
+
+    speakerConnections.set('RINCON_OFFICE', reconnectingConn);
+
+    const connectedHandlers = mockConn._listeners.get('connected') || [];
+    await connectedHandlers[0]();
+
+    expect(reconnectingConn.connect).not.toHaveBeenCalled();
+  });
+});

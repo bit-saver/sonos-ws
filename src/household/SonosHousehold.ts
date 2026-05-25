@@ -402,6 +402,54 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   }
 
   /**
+   * Reconnects any per-speaker connections that have dropped, and connects
+   * to newly discovered players not yet in the speakerConnections map.
+   * Called as a safety net after the primary connection reconnects.
+   */
+  private async reconnectSpeakers(): Promise<void> {
+    const reconnectPromises: Promise<void>[] = [];
+
+    for (const [playerId, conn] of this.speakerConnections) {
+      if (conn.state === 'disconnected') {
+        this.log.info(`Reconnecting speaker ${playerId}`);
+        reconnectPromises.push(
+          conn.connect().catch((err: unknown) =>
+            this.log.warn(`Failed to reconnect speaker ${playerId}:`, err)),
+        );
+      }
+    }
+
+    // Connect any newly discovered players not in the map
+    for (const player of this._rawPlayers) {
+      if (!this.speakerConnections.has(player.id)) {
+        reconnectPromises.push(
+          this.connectToSpeaker(player)
+            .then((conn) => {
+              const handle = this._players.get(player.id);
+              if (handle) handle.setSpeakerConnection(conn);
+            })
+            .catch((err: unknown) =>
+              this.log.warn(`Failed to connect new speaker ${player.name}:`, err)),
+        );
+      }
+    }
+
+    await Promise.allSettled(reconnectPromises);
+
+    // Re-wire coordinator resolvers for all handles (topology may have changed)
+    for (const handle of this._players.values()) {
+      handle.setCoordinatorConnectionResolver(() => {
+        const coordId = handle['_group']?.coordinatorId;
+        if (coordId) {
+          const coordConn = this.speakerConnections.get(coordId);
+          if (coordConn) return coordConn;
+        }
+        return this.connection;
+      });
+    }
+  }
+
+  /**
    * Handles reconnection events. Only refreshes topology on reconnect,
    * not on initial connect (which is handled by connect() directly).
    */
@@ -409,7 +457,9 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     if (this._initialConnectDone) {
       await this.refreshTopology().catch((err) =>
         this.log.warn('Failed to refresh topology on reconnect', err));
-      // Resubscribe all player handle namespaces
+
+      await this.reconnectSpeakers();
+
       for (const handle of this._players.values()) {
         try { await handle.volume.subscribe(); } catch { /* best effort */ }
       }
