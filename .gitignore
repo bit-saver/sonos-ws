@@ -139,3 +139,8 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 handoff/
 .remember/
+# Added by code-review-graph
+.code-review-graph/
+.claude
+.mcp.json
+.opencode.json

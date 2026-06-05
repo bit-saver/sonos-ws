@@ -337,7 +337,6 @@ var SonosConnection = class extends TypedEventEmitter {
         this._state = "connected";
         this.reconnectAttempt = 0;
         this.connectPromise = null;
-        this.log.info("Connected");
         this.ws.on("error", (err) => {
           this.log.error("WebSocket error", err.message);
           this.emit("error", err);
