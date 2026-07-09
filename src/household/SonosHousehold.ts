@@ -111,6 +111,13 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       this._players,
       this.log,
     );
+
+    // Safety-net error listener: guarantees emit('error') never throws for
+    // lack of a listener (Node EventEmitter default), which would otherwise
+    // crash the host app. User-attached listeners still fire alongside.
+    this.on('error', (err) => {
+      this.log.error(`Unhandled household error: ${err.message}`);
+    });
   }
 
   /** All discovered players in the household, keyed by RINCON player ID. */

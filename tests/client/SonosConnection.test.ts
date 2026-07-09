@@ -250,3 +250,64 @@ describe('SonosConnection send-during-reconnect', () => {
     await sendPromise;
   });
 });
+
+describe('SonosConnection safety-net error listener', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('does not throw when emit("error") fires with no user listener attached', () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const conn = new SonosConnection({
+      host: '192.168.68.96',
+      port: 1443,
+      reconnect: {
+        enabled: true,
+        initialDelay: 100,
+        maxDelay: 1000,
+        factor: 2,
+        maxAttempts: 3,
+        pingInterval: 0,
+        pongTimeout: 200,
+      },
+      requestTimeout: 5000,
+      logger,
+    });
+
+    // Access protected emit via type cast for test purposes
+    const emit = (conn as unknown as { emit: (event: string, ...args: unknown[]) => boolean }).emit.bind(conn);
+
+    expect(() => emit('error', new Error('boom'))).not.toThrow();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('Unhandled connection error: boom'),
+    );
+  });
+
+  it('user listener still fires alongside the safety-net listener', () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const conn = new SonosConnection({
+      host: '192.168.68.96',
+      port: 1443,
+      reconnect: {
+        enabled: true,
+        initialDelay: 100,
+        maxDelay: 1000,
+        factor: 2,
+        maxAttempts: 3,
+        pingInterval: 0,
+        pongTimeout: 200,
+      },
+      requestTimeout: 5000,
+      logger,
+    });
+
+    const userHandler = vi.fn();
+    conn.on('error', userHandler);
+
+    const emit = (conn as unknown as { emit: (event: string, ...args: unknown[]) => boolean }).emit.bind(conn);
+    emit('error', new Error('boom'));
+
+    expect(userHandler).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalled();
+  });
+});

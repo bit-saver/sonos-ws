@@ -255,3 +255,23 @@ describe('SonosHousehold speaker reconnection', () => {
     expect(reconnectingConn.connect).not.toHaveBeenCalled();
   });
 });
+
+describe('SonosHousehold safety-net error listener', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const Constructor = SonosConnection as unknown as ReturnType<typeof vi.fn>;
+    Constructor.mockClear();
+  });
+
+  it('does not throw when emit("error") fires with no user listener attached', () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const household = new SonosHousehold({ host: '192.168.68.96', logger });
+
+    const emit = (household as unknown as { emit: (event: string, ...args: unknown[]) => boolean }).emit.bind(household);
+
+    expect(() => emit('error', new Error('boom'))).not.toThrow();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('Unhandled household error: boom'),
+    );
+  });
+});

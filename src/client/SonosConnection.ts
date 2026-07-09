@@ -93,6 +93,13 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
     this.options = options;
     this.log = options.logger ?? noopLogger;
     this.correlator = new MessageCorrelator(options.requestTimeout);
+
+    // Safety-net error listener: guarantees emit('error') never throws for
+    // lack of a listener (Node EventEmitter default), which would otherwise
+    // crash the host app. User-attached listeners still fire alongside.
+    this.on('error', (err) => {
+      this.log.error(`Unhandled connection error: ${err.message}`);
+    });
   }
 
   /** Current connection state. */
