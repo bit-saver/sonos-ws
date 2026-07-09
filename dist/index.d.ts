@@ -1236,8 +1236,10 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
      */
     private reconnectSpeakers;
     /**
-     * Handles reconnection events. Only refreshes topology on reconnect,
-     * not on initial connect (which is handled by connect() directly).
+     * Handles reconnection events. Runs full initial setup on the first
+     * successful connect (whether that's the caller's first attempt or after
+     * a background reconnect loop), and reconnect-specific work on every
+     * subsequent reconnect.
      */
     private handleReconnected;
 }

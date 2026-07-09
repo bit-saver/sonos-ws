@@ -363,6 +363,9 @@ var SonosConnection = class extends TypedEventEmitter {
     this.options = options;
     this.log = options.logger ?? noopLogger;
     this.correlator = new MessageCorrelator(options.requestTimeout);
+    this.on("error", (err) => {
+      this.log.error(`Unhandled connection error: ${err.message}`);
+    });
   }
   /** Current connection state. */
   get state() {
@@ -424,6 +427,9 @@ var SonosConnection = class extends TypedEventEmitter {
         );
         this.emit("error", connErr);
         reject(connErr);
+        if (this.options.reconnect.enabled && !this.intentionalClose) {
+          this.scheduleReconnect();
+        }
       };
       const cleanup = () => {
         this.ws?.removeListener("open", onOpen);
@@ -1801,6 +1807,9 @@ var SonosHousehold = class extends TypedEventEmitter {
       this._players,
       this.log
     );
+    this.on("error", (err) => {
+      this.log.error(`Unhandled household error: ${err.message}`);
+    });
   }
   /** All discovered players in the household, keyed by RINCON player ID. */
   get players() {
@@ -1824,18 +1833,26 @@ var SonosHousehold = class extends TypedEventEmitter {
    */
   async connect() {
     this._initialConnectDone = false;
-    this.connection.on("connected", () => this.handleReconnected());
+    let resolveSetup;
+    let rejectSetup;
+    const initialSetupPromise = new Promise((res, rej) => {
+      resolveSetup = res;
+      rejectSetup = rej;
+    });
+    this.connection.on("connected", async () => {
+      try {
+        await this.handleReconnected();
+        if (this._initialConnectDone) resolveSetup();
+      } catch (err) {
+        rejectSetup(err);
+      }
+    });
     this.connection.on("disconnected", (r) => this.emit("disconnected", r));
     this.connection.on("reconnecting", (a, d) => this.emit("reconnecting", a, d));
     this.connection.on("error", (e) => this.emit("error", e));
     this.connection.on("message", (msg) => this.handleMessage(msg));
     await this.connection.connect();
-    await this.discoverHouseholdId();
-    await this.refreshTopology();
-    if (this.autoConnectSpeakers) {
-      await this.connectAllSpeakers();
-    }
-    this._initialConnectDone = true;
+    await initialSetupPromise;
   }
   /** Gracefully closes all WebSocket connections. */
   async disconnect() {
@@ -1976,16 +1993,20 @@ var SonosHousehold = class extends TypedEventEmitter {
       return this.connection;
     }
     const url = new URL(player.websocketUrl);
-    const conn = new SonosConnection({
+    const conn = existing ?? new SonosConnection({
       host: url.hostname,
       port: parseInt(url.port) || 1443,
       reconnect: this.reconnectOptions,
       requestTimeout: this.requestTimeoutMs,
       logger: this.log
     });
-    await conn.connect();
     this.speakerConnections.set(player.id, conn);
-    this.log.info(`Connected to ${player.name} at ${url.hostname}`);
+    try {
+      await conn.connect();
+      this.log.info(`Connected to ${player.name} at ${url.hostname}`);
+    } catch (err) {
+      this.log.warn(`Initial connect to ${player.name} failed; reconnect loop will retry`, err);
+    }
     return conn;
   }
   /**
@@ -2073,11 +2094,25 @@ var SonosHousehold = class extends TypedEventEmitter {
     }
   }
   /**
-   * Handles reconnection events. Only refreshes topology on reconnect,
-   * not on initial connect (which is handled by connect() directly).
+   * Handles reconnection events. Runs full initial setup on the first
+   * successful connect (whether that's the caller's first attempt or after
+   * a background reconnect loop), and reconnect-specific work on every
+   * subsequent reconnect.
    */
   async handleReconnected() {
-    if (this._initialConnectDone) {
+    if (!this._initialConnectDone) {
+      try {
+        await this.discoverHouseholdId();
+        await this.refreshTopology();
+        if (this.autoConnectSpeakers) {
+          await this.connectAllSpeakers();
+        }
+        this._initialConnectDone = true;
+      } catch (err) {
+        this.log.warn("Failed initial setup on connect", err);
+        throw err;
+      }
+    } else {
       await this.refreshTopology().catch((err) => this.log.warn("Failed to refresh topology on reconnect", err));
       await this.reconnectSpeakers();
       for (const handle of this._players.values()) {
@@ -2124,6 +2159,9 @@ var SonosClient = class extends TypedEventEmitter {
       reconnect: resolveReconnectOptions2(options.reconnect),
       requestTimeout: options.requestTimeout ?? 12e4,
       logger: this.log
+    });
+    this.on("error", (err) => {
+      this.log.error(`Unhandled client error: ${err.message}`);
     });
   }
   get connected() {
