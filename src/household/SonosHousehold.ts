@@ -147,19 +147,28 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   async connect(): Promise<void> {
     this._initialConnectDone = false;
 
-    this.connection.on('connected', () => this.handleReconnected());
+    let resolveSetup!: () => void;
+    let rejectSetup!: (err: unknown) => void;
+    const initialSetupPromise = new Promise<void>((res, rej) => {
+      resolveSetup = res;
+      rejectSetup = rej;
+    });
+
+    this.connection.on('connected', async () => {
+      try {
+        await this.handleReconnected();
+        if (this._initialConnectDone) resolveSetup();
+      } catch (err) {
+        rejectSetup(err);
+      }
+    });
     this.connection.on('disconnected', (r) => this.emit('disconnected', r));
     this.connection.on('reconnecting', (a, d) => this.emit('reconnecting', a, d));
     this.connection.on('error', (e) => this.emit('error', e));
     this.connection.on('message', (msg) => this.handleMessage(msg));
 
     await this.connection.connect();
-    await this.discoverHouseholdId();
-    await this.refreshTopology();
-    if (this.autoConnectSpeakers) {
-      await this.connectAllSpeakers();
-    }
-    this._initialConnectDone = true;
+    await initialSetupPromise;
   }
 
   /** Gracefully closes all WebSocket connections. */
@@ -457,11 +466,29 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   }
 
   /**
-   * Handles reconnection events. Only refreshes topology on reconnect,
-   * not on initial connect (which is handled by connect() directly).
+   * Handles reconnection events. Runs full initial setup on the first
+   * successful connect (whether that's the caller's first attempt or after
+   * a background reconnect loop), and reconnect-specific work on every
+   * subsequent reconnect.
    */
   private async handleReconnected(): Promise<void> {
-    if (this._initialConnectDone) {
+    if (!this._initialConnectDone) {
+      // First successful connect — full initial setup. Runs either after
+      // the caller's `await connect()` completes on first try OR after a
+      // background reconnect loop (started by SonosConnection.onError)
+      // eventually succeeds.
+      try {
+        await this.discoverHouseholdId();
+        await this.refreshTopology();
+        if (this.autoConnectSpeakers) {
+          await this.connectAllSpeakers();
+        }
+        this._initialConnectDone = true;
+      } catch (err) {
+        this.log.warn('Failed initial setup on connect', err);
+      }
+    } else {
+      // Reconnect after prior success — reconnect-specific work.
       await this.refreshTopology().catch((err) =>
         this.log.warn('Failed to refresh topology on reconnect', err));
 

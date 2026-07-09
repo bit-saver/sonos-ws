@@ -7,7 +7,13 @@ import type { GroupsResponse, Group, Player } from '../../src/types/groups.js';
 vi.mock('../../src/client/SonosConnection.js', () => {
   const listeners = new Map<string, Function[]>();
   const mockConnection = {
-    connect: vi.fn().mockResolvedValue(undefined),
+    // Mirrors the real SonosConnection: fires 'connected' listeners
+    // (fire-and-forget, not awaited) before resolving connect(), so
+    // household.connect()'s internal 'connected' handler always runs.
+    connect: vi.fn().mockImplementation(async () => {
+      const handlers = listeners.get('connected') || [];
+      for (const handler of handlers) handler();
+    }),
     disconnect: vi.fn().mockResolvedValue(undefined),
     state: 'connected',
     on: vi.fn((event: string, handler: Function) => {
@@ -273,5 +279,60 @@ describe('SonosHousehold safety-net error listener', () => {
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining('Unhandled household error: boom'),
     );
+  });
+});
+
+describe('SonosHousehold first-connect-after-fail setup', () => {
+  let household: SonosHousehold;
+  let mockConn: any;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const Constructor = SonosConnection as unknown as ReturnType<typeof vi.fn>;
+    Constructor.mockClear();
+
+    household = new SonosHousehold({ host: '192.168.68.96' });
+    mockConn = getMockConnection();
+
+    mockConn._listeners.clear();
+    mockConn.on.mockImplementation((event: string, handler: Function) => {
+      if (!mockConn._listeners.has(event)) mockConn._listeners.set(event, []);
+      mockConn._listeners.get(event)!.push(handler);
+      return mockConn;
+    });
+
+    mockConn.send.mockImplementation((request: any) => {
+      const [headers] = request;
+      if (headers.namespace === 'groups:1' && headers.command === 'getGroups') {
+        return Promise.resolve([
+          { householdId: 'HH_1', success: true },
+          mockTopology,
+        ]);
+      }
+      return Promise.resolve([{ success: true }, {}]);
+    });
+  });
+
+  it('runs full initial setup when handleReconnected fires and _initialConnectDone is false', async () => {
+    // Kick off connect
+    const connectPromise = household.connect();
+
+    // Simulate the connection successfully opening
+    // (this fires the 'connected' handler that was registered in connect())
+    const connectedHandlers = mockConn._listeners.get('connected') || [];
+    expect(connectedHandlers.length).toBeGreaterThan(0);
+
+    // Simulate mockConn.connect resolving
+    await Promise.resolve();
+
+    // Trigger the 'connected' event that handleReconnected listens to
+    await connectedHandlers[0]();
+
+    // Now connectPromise should be able to complete
+    await connectPromise;
+
+    // Household should have discovered topology
+    expect(household.players.size).toBe(3);
+    expect(household.householdId).toBe('HH_1');
   });
 });
