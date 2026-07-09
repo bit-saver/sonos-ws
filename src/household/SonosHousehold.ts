@@ -335,14 +335,13 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       return existing;
     }
 
-    // Parse host from the player's WebSocket URL
     if (!player.websocketUrl) {
       this.log.warn(`No websocketUrl for player ${player.name} — using primary connection`);
       return this.connection;
     }
 
     const url = new URL(player.websocketUrl);
-    const conn = new SonosConnection({
+    const conn = existing ?? new SonosConnection({
       host: url.hostname,
       port: parseInt(url.port) || 1443,
       reconnect: this.reconnectOptions,
@@ -350,9 +349,19 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       logger: this.log,
     });
 
-    await conn.connect();
+    // Store BEFORE awaiting connect so a failure still leaves the
+    // reconnect loop running in the background. The connection's own
+    // scheduleReconnect will keep trying until it succeeds or exhausts.
     this.speakerConnections.set(player.id, conn);
-    this.log.info(`Connected to ${player.name} at ${url.hostname}`);
+
+    try {
+      await conn.connect();
+      this.log.info(`Connected to ${player.name} at ${url.hostname}`);
+    } catch (err) {
+      this.log.warn(`Initial connect to ${player.name} failed; reconnect loop will retry`, err);
+      // Do not rethrow — connection is in the map with reconnect scheduled.
+    }
+
     return conn;
   }
 

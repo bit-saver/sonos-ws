@@ -349,3 +349,110 @@ describe('SonosHousehold first-connect-after-fail setup', () => {
     await expect(household.connect()).rejects.toThrow();
   }, 5000);
 });
+
+describe('SonosHousehold per-speaker resilience', () => {
+  let household: SonosHousehold;
+  let mockConn: any;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    const Constructor = SonosConnection as unknown as ReturnType<typeof vi.fn>;
+    Constructor.mockClear();
+
+    household = new SonosHousehold({ host: '192.168.68.96' });
+    mockConn = getMockConnection();
+
+    mockConn._listeners.clear();
+    mockConn.on.mockImplementation((event: string, handler: Function) => {
+      if (!mockConn._listeners.has(event)) mockConn._listeners.set(event, []);
+      mockConn._listeners.get(event)!.push(handler);
+      return mockConn;
+    });
+
+    mockConn.send.mockImplementation((request: any) => {
+      const [headers] = request;
+      if (headers.namespace === 'groups:1' && headers.command === 'getGroups') {
+        return Promise.resolve([
+          { householdId: 'HH_1', success: true },
+          {
+            groups: [
+              { id: 'g1', name: 'Arc', coordinatorId: 'RINCON_ARC', playbackState: 'PLAYBACK_STATE_IDLE', playerIds: ['RINCON_ARC'] },
+              { id: 'g2', name: 'Office', coordinatorId: 'RINCON_OFFICE', playbackState: 'PLAYBACK_STATE_IDLE', playerIds: ['RINCON_OFFICE'] },
+            ],
+            players: [
+              { id: 'RINCON_ARC', name: 'Arc', capabilities: ['PLAYBACK'], websocketUrl: 'wss://192.168.68.96:1443/websocket/api' },
+              { id: 'RINCON_OFFICE', name: 'Office', capabilities: ['PLAYBACK'], websocketUrl: 'wss://192.168.68.225:1443/websocket/api' },
+            ],
+          },
+        ]);
+      }
+      return Promise.resolve([{ success: true }, {}]);
+    });
+  });
+
+  it('stores per-speaker connection in map even when initial connect rejects', async () => {
+    // Make the second SonosConnection instance reject on connect
+    const Constructor = SonosConnection as unknown as ReturnType<typeof vi.fn>;
+    let callCount = 0;
+    Constructor.mockImplementation(() => {
+      callCount++;
+      const listeners = new Map<string, Function[]>();
+      const inst: any = {
+        state: callCount === 1 ? 'connected' : 'disconnected',
+        connect: vi.fn().mockImplementation(() => {
+          if (callCount === 1) return Promise.resolve();
+          return Promise.reject(new Error('ECONNREFUSED'));
+        }),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        on: vi.fn((event: string, handler: Function) => {
+          if (!listeners.has(event)) listeners.set(event, []);
+          listeners.get(event)!.push(handler);
+          return inst;
+        }),
+        off: vi.fn().mockReturnThis(),
+        once: vi.fn().mockReturnThis(),
+        removeAllListeners: vi.fn().mockReturnThis(),
+        emit: vi.fn(),
+        send: vi.fn(),
+        _listeners: listeners,
+      };
+      return inst;
+    });
+
+    // Re-create household with new mock behavior
+    household = new SonosHousehold({ host: '192.168.68.96' });
+    const primaryMock = (SonosConnection as unknown as ReturnType<typeof vi.fn>).mock.results[
+      (SonosConnection as unknown as ReturnType<typeof vi.fn>).mock.results.length - 1
+    ].value;
+
+    primaryMock.send.mockImplementation((request: any) => {
+      const [headers] = request;
+      if (headers.namespace === 'groups:1' && headers.command === 'getGroups') {
+        return Promise.resolve([
+          { householdId: 'HH_1', success: true },
+          {
+            groups: [
+              { id: 'g1', name: 'Arc', coordinatorId: 'RINCON_ARC', playbackState: 'PLAYBACK_STATE_IDLE', playerIds: ['RINCON_ARC'] },
+              { id: 'g2', name: 'Office', coordinatorId: 'RINCON_OFFICE', playbackState: 'PLAYBACK_STATE_IDLE', playerIds: ['RINCON_OFFICE'] },
+            ],
+            players: [
+              { id: 'RINCON_ARC', name: 'Arc', capabilities: ['PLAYBACK'], websocketUrl: 'wss://192.168.68.96:1443/websocket/api' },
+              { id: 'RINCON_OFFICE', name: 'Office', capabilities: ['PLAYBACK'], websocketUrl: 'wss://192.168.68.225:1443/websocket/api' },
+            ],
+          },
+        ]);
+      }
+      return Promise.resolve([{ success: true }, {}]);
+    });
+
+    // Trigger connect flow, simulating 'connected' event
+    const connectPromise = household.connect();
+    const connectedHandlers = primaryMock._listeners.get('connected') || [];
+    await connectedHandlers[0]();
+    await connectPromise;
+
+    // The Office connection failed but should still be in the map
+    const speakerConnections = (household as any).speakerConnections as Map<string, any>;
+    expect(speakerConnections.has('RINCON_OFFICE')).toBe(true);
+  });
+});
