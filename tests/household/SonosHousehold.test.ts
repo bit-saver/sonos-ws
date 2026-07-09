@@ -335,4 +335,17 @@ describe('SonosHousehold first-connect-after-fail setup', () => {
     expect(household.players.size).toBe(3);
     expect(household.householdId).toBe('HH_1');
   });
+
+  it('rejects connect() when initial setup fails, does not hang', async () => {
+    // Override send to fail on getGroups — simulates refreshTopology failing
+    mockConn.send.mockImplementation((request: any) => {
+      const [headers] = request;
+      if (headers.namespace === 'groups:1' && headers.command === 'getGroups') {
+        return Promise.reject(new Error('getGroups failed'));
+      }
+      return Promise.resolve([{ success: true }, {}]);
+    });
+
+    await expect(household.connect()).rejects.toThrow();
+  }, 5000);
 });

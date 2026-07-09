@@ -486,6 +486,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
         this._initialConnectDone = true;
       } catch (err) {
         this.log.warn('Failed initial setup on connect', err);
+        throw err;
       }
     } else {
       // Reconnect after prior success — reconnect-specific work.
