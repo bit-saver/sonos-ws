@@ -352,7 +352,9 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
       try {
         await this.connect();
       } catch {
-        this.scheduleReconnect();
+        // onError already scheduled the next reconnect attempt for this
+        // failure — do not schedule again here or we double-emit
+        // RECONNECT_EXHAUSTED and halve the effective maxAttempts.
       }
     }, delay);
   }

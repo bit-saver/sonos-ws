@@ -373,4 +373,34 @@ describe('SonosConnection retry initial connect failure', () => {
     expect(connectedHandler).toHaveBeenCalled();
     expect(conn.state).toBe('connected');
   });
+
+  it('emits RECONNECT_EXHAUSTED exactly once when maxAttempts is reached', async () => {
+    const errors: any[] = [];
+    const disconnects: string[] = [];
+    const conn = new SonosConnection(makeOptions({ maxAttempts: 1, initialDelay: 50 }));
+    conn.on('error', (e: any) => errors.push(e));
+    conn.on('disconnected', (r: string) => disconnects.push(r));
+
+    // First connect fails
+    const p1 = conn.connect();
+    const ws1 = getLastMockWs();
+    ws1._emit('error', new Error('ECONNREFUSED'));
+    await expect(p1).rejects.toThrow();
+
+    // A reconnect is scheduled (attempt 1). Advance and let it fire.
+    vi.advanceTimersByTime(50);
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Fail the retry attempt
+    const ws2 = getLastMockWs();
+    ws2._emit('error', new Error('ECONNREFUSED'));
+    // Let microtasks settle for onError -> emit -> catches
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Expected: exactly one RECONNECT_EXHAUSTED and one 'reconnect exhausted' disconnect.
+    const exhausted = errors.filter((e) => e?.code === 'RECONNECT_EXHAUSTED');
+    const exhaustedDisconnects = disconnects.filter((r) => r === 'reconnect exhausted');
+    expect(exhausted.length).toBe(1);
+    expect(exhaustedDisconnects.length).toBe(1);
+  });
 });
