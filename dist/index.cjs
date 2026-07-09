@@ -566,7 +566,6 @@ var SonosConnection = class extends TypedEventEmitter {
       try {
         await this.connect();
       } catch {
-        this.scheduleReconnect();
       }
     }, delay);
   }
