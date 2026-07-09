@@ -175,6 +175,14 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
         );
         this.emit('error', connErr);
         reject(connErr);
+
+        // Initial connect failed. If reconnect is enabled, start the loop
+        // in the background so a later network recovery re-establishes the
+        // connection. The rejected promise above informs the caller of the
+        // initial failure immediately.
+        if (this.options.reconnect.enabled && !this.intentionalClose) {
+          this.scheduleReconnect();
+        }
       };
 
       const cleanup = () => {

@@ -311,3 +311,66 @@ describe('SonosConnection safety-net error listener', () => {
     expect(logger.error).toHaveBeenCalled();
   });
 });
+
+describe('SonosConnection retry initial connect failure', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('starts reconnect loop after initial connect failure when reconnect enabled', async () => {
+    const conn = new SonosConnection(makeOptions());
+    conn.on('error', () => {}); // consume error so promise rejection is expected
+
+    const connectPromise = conn.connect();
+    const ws1 = getLastMockWs();
+
+    // Simulate WebSocket error before open — initial connect fails
+    ws1._emit('error', new Error('ECONNREFUSED'));
+
+    await expect(connectPromise).rejects.toThrow('Failed to connect');
+    expect(conn.state).toBe('reconnecting');
+  });
+
+  it('does not start reconnect loop after initial failure when reconnect disabled', async () => {
+    const conn = new SonosConnection(makeOptions({ enabled: false }));
+    conn.on('error', () => {});
+
+    const connectPromise = conn.connect();
+    const ws1 = getLastMockWs();
+    ws1._emit('error', new Error('ECONNREFUSED'));
+
+    await expect(connectPromise).rejects.toThrow('Failed to connect');
+    expect(conn.state).toBe('disconnected');
+  });
+
+  it('reconnect loop eventually succeeds and fires "connected"', async () => {
+    const conn = new SonosConnection(makeOptions());
+    conn.on('error', () => {});
+
+    const connectedHandler = vi.fn();
+    conn.on('connected', connectedHandler);
+
+    // Initial connect fails
+    const connectPromise = conn.connect();
+    const ws1 = getLastMockWs();
+    ws1._emit('error', new Error('ECONNREFUSED'));
+    await expect(connectPromise).rejects.toThrow();
+
+    // Advance past reconnect delay — new connection attempted
+    vi.advanceTimersByTime(100);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const ws2 = getLastMockWs();
+    ws2.readyState = 1;
+    ws2._emit('open');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(connectedHandler).toHaveBeenCalled();
+    expect(conn.state).toBe('connected');
+  });
+});
