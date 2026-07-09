@@ -60,6 +60,13 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
       requestTimeout: options.requestTimeout ?? 120000,
       logger: this.log,
     });
+
+    // Safety-net error listener: guarantees emit('error') never throws for
+    // lack of a listener (Node EventEmitter default), which would otherwise
+    // crash the host app. User-attached listeners still fire alongside.
+    this.on('error', (err) => {
+      this.log.error(`Unhandled client error: ${err.message}`);
+    });
   }
 
   get connected(): boolean { return this.connection.state === 'connected'; }
