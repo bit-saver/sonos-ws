@@ -525,7 +525,13 @@ var SonosConnection = class extends TypedEventEmitter {
       this.ws.ping();
       this.pongDeadlineTimer = setTimeout(() => {
         this.log.warn(`No pong received within ${pongTimeout}ms \u2014 terminating connection`);
-        this.ws?.terminate();
+        const dead = this.ws;
+        if (dead) {
+          dead.removeAllListeners();
+          dead.terminate();
+          this.ws = null;
+        }
+        this.handleClose(1006, "ping timeout");
       }, pongTimeout);
     }, pingInterval);
   }
