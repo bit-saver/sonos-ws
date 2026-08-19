@@ -375,7 +375,18 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
       this.ws.ping();
       this.pongDeadlineTimer = setTimeout(() => {
         this.log.warn(`No pong received within ${pongTimeout}ms — terminating connection`);
-        this.ws?.terminate();
+        const dead = this.ws;
+        if (dead) {
+          // Detach BEFORE terminate so a late 'close' event has no listener
+          // and cannot double-fire handleClose / scheduleReconnect.
+          dead.removeAllListeners();
+          dead.terminate();
+          this.ws = null;
+        }
+        // Drive recovery directly. In some runtimes (Bun) terminate() does
+        // not reliably fire 'close', which leaves _state stuck at 'connected'
+        // while the socket is dead.
+        this.handleClose(1006, 'ping timeout');
       }, pongTimeout);
     }, pingInterval);
   }

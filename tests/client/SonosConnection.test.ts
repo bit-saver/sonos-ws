@@ -85,6 +85,9 @@ describe('SonosConnection keepalive', () => {
     vi.advanceTimersByTime(500);
     expect(ws.ping).toHaveBeenCalledTimes(1);
 
+    // Simulate pong to clear the pong deadline timer
+    ws._emit('pong');
+
     vi.advanceTimersByTime(500);
     expect(ws.ping).toHaveBeenCalledTimes(2);
   });
@@ -401,6 +404,98 @@ describe('SonosConnection retry initial connect failure', () => {
     const exhausted = errors.filter((e) => e?.code === 'RECONNECT_EXHAUSTED');
     const exhaustedDisconnects = disconnects.filter((r) => r === 'reconnect exhausted');
     expect(exhausted.length).toBe(1);
+    expect(exhaustedDisconnects.length).toBe(1);
+  });
+});
+
+describe('SonosConnection ping timeout recovery (terminate-close independent)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('recovers when terminate() does not fire the close event', async () => {
+    // pingInterval 200ms, pongTimeout 100ms, reconnect initialDelay 50ms
+    const conn = new SonosConnection(makeOptions({
+      pingInterval: 200,
+      pongTimeout: 100,
+      initialDelay: 50,
+    }));
+    conn.on('error', () => {}); // consume potential errors safely
+
+    // Connect first
+    const p = conn.connect();
+    const ws1 = getLastMockWs();
+    ws1._emit('open');
+    await p;
+    expect(conn.state).toBe('connected');
+
+    // Trigger a ping (advance to interval boundary)
+    vi.advanceTimersByTime(200);
+    expect(ws1.ping).toHaveBeenCalled();
+
+    // Simulate a runtime where terminate() does NOT fire 'close'.
+    // The mock's terminate is a plain vi.fn() with no side effects — good,
+    // that already models "close never fires". We advance past pongTimeout.
+    vi.advanceTimersByTime(100);
+    expect(ws1.terminate).toHaveBeenCalled();
+
+    // Even though 'close' never fired, state must transition to 'reconnecting'
+    // and a reconnect timer must be scheduled.
+    expect(conn.state).toBe('reconnecting');
+
+    // Advance past the reconnect delay — connect() should construct a new ws
+    vi.advanceTimersByTime(50);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const ws2 = getLastMockWs();
+    expect(ws2).not.toBe(ws1); // new WebSocket constructed
+  });
+
+  it('is safe against a late close event after ping-timeout recovery', async () => {
+    const conn = new SonosConnection(makeOptions({
+      pingInterval: 200,
+      pongTimeout: 100,
+      initialDelay: 50,
+      maxAttempts: 1,
+    }));
+    const errors: any[] = [];
+    const disconnects: string[] = [];
+    conn.on('error', (e: any) => errors.push(e));
+    conn.on('disconnected', (r: string) => disconnects.push(r));
+
+    const p = conn.connect();
+    const ws1 = getLastMockWs();
+    ws1._emit('open');
+    await p;
+
+    // Ping + pong-timeout fires our recovery path
+    vi.advanceTimersByTime(200);
+    vi.advanceTimersByTime(100);
+    expect(conn.state).toBe('reconnecting');
+
+    // Simulate ws1 belatedly firing close after our recovery already ran.
+    // The recovery must have removed listeners so this is a no-op:
+    // no extra scheduleReconnect, no extra emissions.
+    const attemptsBefore = errors.filter((e) => e?.code === 'RECONNECT_EXHAUSTED').length;
+    ws1._emit('close', 1006, Buffer.from('ping timeout'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Advance through reconnect attempts to exhaustion (maxAttempts=1)
+    vi.advanceTimersByTime(50);
+    await vi.advanceTimersByTimeAsync(0);
+    const ws2 = getLastMockWs();
+    ws2._emit('error', new Error('still no route'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    const exhausted = errors.filter((e) => e?.code === 'RECONNECT_EXHAUSTED');
+    const exhaustedDisconnects = disconnects.filter((r) => r === 'reconnect exhausted');
+    // Exactly one exhaustion event — no double-fire from a late close.
+    expect(exhausted.length - attemptsBefore).toBe(1);
     expect(exhaustedDisconnects.length).toBe(1);
   });
 });
