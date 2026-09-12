@@ -470,6 +470,15 @@ describe('default backoff shape is a published contract', () => {
   //
   // These values are not sacred. If you change one, change it deliberately
   // and tell the consumers; this test failing is the reminder to do that.
+  //
+  // The coupling runs both ways, and the reverse direction fails *quietly*.
+  // The 94 below is a copy of Neurotto's RECONNECT_POLICY, not something we
+  // control: if they move off it, this test keeps computing the window for
+  // 94, keeps passing, and silently becomes an assertion about a number
+  // nobody uses. It will not tell you it has gone stale. So when Neurotto's
+  // cap changes, update the input and the bound together — and if you are
+  // reading this while wondering whether 94 is still real, check
+  // `RECONNECT_POLICY` in their `Sonos.ts` rather than trusting this block.
   function optionsHandedToConnection() {
     const Constructor = SonosConnection as unknown as ReturnType<typeof vi.fn>;
     Constructor.mockClear();
