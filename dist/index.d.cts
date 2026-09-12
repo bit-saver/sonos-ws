@@ -175,6 +175,14 @@ declare class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
     private readonly options;
     private readonly log;
     private connectPromise;
+    /**
+     * Rejecter for the in-flight {@link connectPromise}.
+     *
+     * Held on the instance because a socket can emit `'close'` without ever
+     * emitting `'open'` or `'error'`, and only those two closures can settle
+     * the promise. Without this, `handleClose` cannot unblock a caller.
+     */
+    private connectReject;
     private reconnectAttempt;
     private reconnectTimer;
     private intentionalClose;
@@ -213,6 +221,21 @@ declare class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
      */
     send(request: SonosRequest): Promise<SonosResponse>;
     private handleMessage;
+    /**
+     * Detaches our handlers from a socket we are done with, leaving a single
+     * permanent `'error'` sink behind.
+     *
+     * Dropping our reference does not kill the socket: it stays alive inside
+     * `ws` and can still emit `'error'` afterwards — Bun reliably does, with a
+     * browser-style `ErrorEvent` rather than a Node `Error`. An EventEmitter
+     * with no `'error'` listener *throws*, which escapes as an
+     * `uncaughtException` and takes the host application down. The sink makes
+     * every abandonment path safe without reviving the connection.
+     *
+     * No `'close'` listener is re-attached, so callers that detach before
+     * `terminate()` to prevent a double `handleClose` keep that guarantee.
+     */
+    private abandonSocket;
     private handleClose;
     private scheduleReconnect;
     private clearReconnectTimer;
