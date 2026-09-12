@@ -138,10 +138,37 @@ passed vacuously. This is the load-bearing part of the test setup.
 - Retrying in-flight commands after reconnection. Unchanged.
 - Neurotto's crash-loop hold behaviour, and whether it should self-heal.
   Consumer-side, and Tyler's call.
-- Neurotto's `reconnect: { maxAttempts: 20 }` override
-  (`Sonos.ts:112`). Against the library default of `Infinity` this caps
-  recovery at roughly 8 minutes — 1+2+4+8+16s then 15×30s — after which the
-  library gives up by instruction and a manual `sonos reconnect` is
-  required. Raising or removing the cap is the simplest route to
-  background self-healing, but it trades away the exhaustion notification.
-  Consumer-side decision, raised with the Neurotto session.
+## Consumer follow-up (settled 2026-09-12)
+
+Neurotto had capped recovery with `reconnect: { maxAttempts: 20 }`
+(`Sonos.ts:112`), which against this library's backoff is roughly 8 minutes
+— 1+2+4+8+16s then 15×30s — after which the library gives up *by
+instruction* and a human has to run `sonos reconnect`. That cap, not a
+library limit, was why Sonos stayed dead after exhaustion.
+
+Raising it was the whole fix for background self-healing: no new machinery
+on either side. Neurotto moved to `maxAttempts: 94` — a 45.0 minute ladder
+(`31s + 89×30s = 2701s`) — deliberately finite, because `Infinity` would
+self-heal forever but never emit `RECONNECT_EXHAUSTED` and would silently
+trade away their "Sonos may be offline" notification.
+
+Sequencing mattered: raising the cap *before* the close-before-open fix
+would have built a longer ladder that still froze silently, since a wedged
+ladder never reaches exhaustion at all.
+
+**This gives us a consumer that computes a wall-clock window from three of
+our defaults.** `DEFAULT_RECONNECT` is module-private, so no test of theirs
+can assert against it, and changing `initialDelay`, `factor` or `maxDelay`
+would silently resize their window with nothing failing anywhere. Pinned
+here instead, in `tests/household/SonosHousehold.test.ts` ("default backoff
+shape is a published contract") — asserted through the options handed to
+`SonosConnection`, with the third test recomputing the derived window so it
+catches a change in shape rather than a change in a literal.
+Mutation-verified. Those values remain changeable; the test is the reminder
+to tell consumers when you do.
+
+Neurotto declined a bounded escape from the inert crash-hold: the guard
+only fires after three crashes in 60s, so three genuine attempts have
+already happened, and a fourth is just a slower crash loop. Staying inert
+preserves `crash.log`, and the CRASH-HOLD push notification is confirmed
+working end to end, so the state is alarmed rather than silent.
