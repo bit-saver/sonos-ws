@@ -456,3 +456,56 @@ describe('SonosHousehold per-speaker resilience', () => {
     expect(speakerConnections.has('RINCON_OFFICE')).toBe(true);
   });
 });
+
+describe('default backoff shape is a published contract', () => {
+  // Consumers size their recovery window by multiplying these three defaults
+  // out to a wall-clock duration. Neurotto does exactly this: it sets
+  // maxAttempts to 94 to get a ~45 minute ladder before RECONNECT_EXHAUSTED,
+  // and keeps it finite so the exhaustion notification still fires.
+  //
+  // DEFAULT_RECONNECT is module-private, so no downstream test can assert
+  // against it. Changing initialDelay, factor or maxDelay would silently
+  // resize every consumer's window with nothing failing anywhere — so the
+  // tripwire lives here, where the change would be made.
+  //
+  // These values are not sacred. If you change one, change it deliberately
+  // and tell the consumers; this test failing is the reminder to do that.
+  function optionsHandedToConnection() {
+    const Constructor = SonosConnection as unknown as ReturnType<typeof vi.fn>;
+    Constructor.mockClear();
+    new SonosHousehold({ host: '192.168.68.96' });
+    return Constructor.mock.calls[0][0] as {
+      reconnect: { initialDelay: number; factor: number; maxDelay: number; maxAttempts: number };
+    };
+  }
+
+  it('uses 1s initial delay, factor 2, 30s ceiling', () => {
+    const { reconnect } = optionsHandedToConnection();
+    expect(reconnect.initialDelay).toBe(1000);
+    expect(reconnect.factor).toBe(2);
+    expect(reconnect.maxDelay).toBe(30000);
+  });
+
+  it('retries indefinitely unless the consumer caps it', () => {
+    const { reconnect } = optionsHandedToConnection();
+    expect(reconnect.maxAttempts).toBe(Infinity);
+  });
+
+  it('yields a ~45 minute ladder at the cap Neurotto chose', () => {
+    const { reconnect } = optionsHandedToConnection();
+    const { initialDelay, factor, maxDelay } = reconnect;
+
+    // Mirrors scheduleReconnect(): delay n = min(initialDelay * factor^n, maxDelay)
+    const windowFor = (maxAttempts: number) => {
+      let total = 0;
+      for (let n = 0; n < maxAttempts; n++) {
+        total += Math.min(initialDelay * Math.pow(factor, n), maxDelay);
+      }
+      return total;
+    };
+
+    const minutes = windowFor(94) / 60000;
+    expect(minutes).toBeGreaterThanOrEqual(44);
+    expect(minutes).toBeLessThanOrEqual(46);
+  });
+});
