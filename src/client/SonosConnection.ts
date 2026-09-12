@@ -82,6 +82,15 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
   private readonly log: Logger;
   private connectPromise: Promise<void> | null = null;
 
+  /**
+   * Rejecter for the in-flight {@link connectPromise}.
+   *
+   * Held on the instance because a socket can emit `'close'` without ever
+   * emitting `'open'` or `'error'`, and only those two closures can settle
+   * the promise. Without this, `handleClose` cannot unblock a caller.
+   */
+  private connectReject: ((err: Error) => void) | null = null;
+
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private intentionalClose = false;
@@ -123,6 +132,7 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
     this._state = 'connecting';
 
     this.connectPromise = new Promise<void>((resolve, reject) => {
+      this.connectReject = reject;
       const url = `wss://${this.options.host}:${this.options.port}/websocket/api`;
       this.log.info(`Connecting to ${url}`);
 
@@ -138,6 +148,7 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
         this._state = 'connected';
         this.reconnectAttempt = 0;
         this.connectPromise = null;
+        this.connectReject = null;
         // this.log.info('Connected');
 
         this.ws!.on('error', (err: Error) => {
@@ -162,9 +173,10 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
         cleanup();
         this._state = 'disconnected';
         this.connectPromise = null;
+        this.connectReject = null;
 
         if (this.ws) {
-          this.ws.removeAllListeners();
+          this.abandonSocket(this.ws);
           this.ws = null;
         }
 
@@ -213,6 +225,7 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
     this.intentionalClose = true;
     this.clearReconnectTimer();
     this.connectPromise = null;
+    this.connectReject = null;
     this.correlator.rejectAll(
       new ConnectionError(ErrorCode.CONNECTION_LOST, 'Client disconnected'),
     );
@@ -223,7 +236,7 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
       if (this.ws.readyState === WebSocket.OPEN) {
         this.ws.close(1000, 'client disconnect');
       }
-      this.ws.removeAllListeners();
+      this.abandonSocket(this.ws);
       this.ws = null;
     }
 
@@ -305,12 +318,52 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
     this.emit('message', parsed);
   }
 
+  /**
+   * Detaches our handlers from a socket we are done with, leaving a single
+   * permanent `'error'` sink behind.
+   *
+   * Dropping our reference does not kill the socket: it stays alive inside
+   * `ws` and can still emit `'error'` afterwards — Bun reliably does, with a
+   * browser-style `ErrorEvent` rather than a Node `Error`. An EventEmitter
+   * with no `'error'` listener *throws*, which escapes as an
+   * `uncaughtException` and takes the host application down. The sink makes
+   * every abandonment path safe without reviving the connection.
+   *
+   * No `'close'` listener is re-attached, so callers that detach before
+   * `terminate()` to prevent a double `handleClose` keep that guarantee.
+   */
+  private abandonSocket(ws: WebSocket): void {
+    ws.removeAllListeners();
+    ws.on('error', (err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      this.log.debug(`Ignoring error from abandoned socket: ${message}`);
+    });
+  }
+
   private handleClose(code: number, reason: string): void {
     this.stopPing();
     this.log.info(`Connection closed: ${code} ${reason}`);
     this.correlator.rejectAll(
       new ConnectionError(ErrorCode.CONNECTION_LOST, `Connection closed: ${code} ${reason}`),
     );
+
+    // A socket can emit 'close' having never emitted 'open' or 'error' — a
+    // handshake aborted mid-flight. Only those two closures settle and clear
+    // connectPromise, so without this the promise stays set AND unsettled
+    // forever: connect() short-circuits on it at the top, the reconnect
+    // ladder awaits a promise that can never resolve, and recovery goes
+    // permanently silent with no further attempts and no exhaustion event.
+    if (this.connectPromise) {
+      const rejectPending = this.connectReject;
+      this.connectPromise = null;
+      this.connectReject = null;
+      rejectPending?.(
+        new ConnectionError(
+          ErrorCode.CONNECTION_LOST,
+          `Connection closed before open: ${code} ${reason}`,
+        ),
+      );
+    }
 
     if (this.intentionalClose) {
       this._state = 'disconnected';
@@ -378,8 +431,10 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
         const dead = this.ws;
         if (dead) {
           // Detach BEFORE terminate so a late 'close' event has no listener
-          // and cannot double-fire handleClose / scheduleReconnect.
-          dead.removeAllListeners();
+          // and cannot double-fire handleClose / scheduleReconnect. The
+          // error sink left behind absorbs the 'error' that terminate()
+          // itself can provoke.
+          this.abandonSocket(dead);
           dead.terminate();
           this.ws = null;
         }

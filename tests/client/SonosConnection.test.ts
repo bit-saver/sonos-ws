@@ -31,6 +31,16 @@ vi.mock('ws', () => {
       _listeners: listeners,
       _emit(event: string, ...args: any[]) {
         const handlers = [...(listeners.get(event) || [])];
+        // Mirror Node's EventEmitter: an 'error' event with no listener
+        // throws rather than being silently dropped. Without this the mock
+        // cannot reproduce the uncaughtException that an abandoned-but-live
+        // socket causes, which is exactly the bug these tests guard.
+        if (event === 'error' && handlers.length === 0) {
+          const err = args[0];
+          throw new Error(
+            `Unhandled error. (${err instanceof Error ? err.message : String(err)})`,
+          );
+        }
         for (const h of handlers) h(...args);
       },
     };
@@ -497,5 +507,86 @@ describe('SonosConnection ping timeout recovery (terminate-close independent)', 
     // Exactly one exhaustion event — no double-fire from a late close.
     expect(exhausted.length - attemptsBefore).toBe(1);
     expect(exhaustedDisconnects.length).toBe(1);
+  });
+});
+
+describe('abandoned sockets never leave an unlistened error emitter', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('absorbs a late error after an initial connect failure', async () => {
+    const conn = new SonosConnection(makeOptions());
+    conn.on('error', () => {});
+
+    const pending = conn.connect();
+    const ws1 = getLastMockWs();
+    ws1._emit('error', new Error('ECONNREFUSED'));
+    await expect(pending).rejects.toThrow(/Failed to connect/);
+
+    // The socket is still alive inside ws and can emit 'error' again — Bun
+    // does exactly this, with a browser-style ErrorEvent. Nothing is
+    // listening, so Node's EventEmitter throws and kills the host process.
+    expect(() => ws1._emit('error', new Error('late ECONNRESET'))).not.toThrow();
+  });
+
+  it('absorbs a late error after an intentional disconnect', async () => {
+    const conn = new SonosConnection(makeOptions());
+    conn.on('error', () => {});
+
+    const pending = conn.connect();
+    const ws1 = getLastMockWs();
+    ws1._emit('open');
+    await pending;
+
+    await conn.disconnect();
+
+    expect(() => ws1._emit('error', new Error('late error after close'))).not.toThrow();
+  });
+
+  it('keeps reconnecting when a socket closes before it ever opens', async () => {
+    const conn = new SonosConnection(makeOptions());
+    conn.on('error', () => {});
+
+    // Never awaited: if the bug is present this promise never settles.
+    conn.connect().catch(() => {});
+    const ws1 = getLastMockWs();
+
+    // The socket dies mid-handshake: 'close' arrives with no preceding
+    // 'open' and no 'error', so neither of the two paths that clear
+    // connectPromise ever runs.
+    ws1._emit('close', 1006, Buffer.from('handshake aborted'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The reconnect ladder must build a genuinely new socket. With a stale
+    // connectPromise still set, connect() short-circuits and returns it,
+    // so no second socket is ever constructed and the ladder goes silent.
+    await vi.advanceTimersByTimeAsync(200);
+    const ws2 = getLastMockWs();
+
+    expect(ws2).not.toBe(ws1);
+  });
+
+  it('absorbs a late error after a ping timeout terminates the socket', async () => {
+    const conn = new SonosConnection(makeOptions({ maxAttempts: 1 }));
+    conn.on('error', () => {});
+
+    const pending = conn.connect();
+    const ws1 = getLastMockWs();
+    ws1._emit('open');
+    await pending;
+
+    // Drive one ping, then let the pong deadline lapse so the pong-timeout
+    // path detaches and terminates the socket.
+    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(ws1.terminate).toHaveBeenCalled();
+
+    expect(() => ws1._emit('error', new Error('late error after terminate'))).not.toThrow();
   });
 });
