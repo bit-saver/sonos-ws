@@ -158,6 +158,11 @@ interface ConnectionOptions {
     reconnect: ReconnectOptions;
     /** Timeout in milliseconds for individual request/response correlation. */
     requestTimeout: number;
+    /**
+     * Milliseconds to wait for a WebSocket handshake to open or fail before
+     * abandoning it. Defaults to 10 000 ms.
+     */
+    connectTimeout?: number;
     /** Logger instance for debug, info, warn, and error output. */
     logger: Logger;
 }

@@ -344,6 +344,7 @@ var CommandError = class extends SonosError {
 };
 
 // src/client/SonosConnection.ts
+var DEFAULT_CONNECT_TIMEOUT = 1e4;
 var SUB_PROTOCOL = "v1.api.smartspeaker.audio";
 var API_KEY = "123e4567-e89b-12d3-a456-426655440000";
 var SonosConnection = class extends TypedEventEmitter {
@@ -442,14 +443,31 @@ var SonosConnection = class extends TypedEventEmitter {
           this.scheduleReconnect();
         }
       };
+      let handshakeTimer = null;
+      const clearHandshakeTimer = () => {
+        if (handshakeTimer) {
+          clearTimeout(handshakeTimer);
+          handshakeTimer = null;
+        }
+      };
       const cleanup = () => {
+        clearHandshakeTimer();
         this.ws?.removeListener("open", onOpen);
         this.ws?.removeListener("error", onError);
       };
+      const socket = this.ws;
+      const connectTimeout = this.options.connectTimeout ?? DEFAULT_CONNECT_TIMEOUT;
+      handshakeTimer = setTimeout(() => {
+        handshakeTimer = null;
+        if (this.ws !== socket) return;
+        onError(new Error(`handshake timed out after ${connectTimeout}ms`));
+        socket.terminate();
+      }, connectTimeout);
       this.ws.once("open", onOpen);
       this.ws.once("error", onError);
       this.ws.on("message", (data) => this.handleMessage(data));
       this.ws.on("close", (code, reason) => {
+        clearHandshakeTimer();
         this.handleClose(code, reason.toString());
       });
     });
@@ -554,8 +572,10 @@ var SonosConnection = class extends TypedEventEmitter {
   abandonSocket(ws) {
     ws.removeAllListeners();
     ws.on("error", (err) => {
-      const message = err instanceof Error ? err.message : String(err);
-      this.log.debug(`Ignoring error from abandoned socket: ${message}`);
+      const message = err?.message;
+      this.log.debug(
+        `Ignoring error from abandoned socket: ${typeof message === "string" ? message : String(err)}`
+      );
     });
   }
   handleClose(code, reason) {
