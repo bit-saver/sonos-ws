@@ -172,3 +172,111 @@ only fires after three crashes in 60s, so three genuine attempts have
 already happened, and a fourth is just a slower crash loop. Staying inert
 preserves `crash.log`, and the CRASH-HOLD push notification is confirmed
 working end to end, so the state is alarmed rather than silent.
+
+## Addendum 2026-09-18 — handshake timeout (`7822ad9`, dist `2e098aa`)
+
+Neurotto reported three symptoms six days after the above shipped. Six days
+of rotated detail logs (09/13–09/18) were analysed programmatically.
+
+### 3. A handshake that never ends (fixed)
+
+On 09/15 at 20:52:03 a reconnect attempt to the Arc logged `Connecting to
+wss://192.168.68.96:1443` and then produced nothing: zero socket lines of
+any level for 73 minutes, no open, no error, no close, no next attempt.
+Every command in that window threw `Not connected` (13 user-visible volume
+failures) until a manual `sonos reconnect` at 22:09. A successful primary
+reconnect always logs `Topology refreshed` within a second, so this was a
+hung handshake, not a silent success.
+
+`connect()` had no deadline. Under Bun a handshake can emit no event at all,
+and `ws`'s own `handshakeTimeout` option cannot be relied on because Bun
+ignores `ws` options. So the promise never settled, the ladder awaiting it
+stalled, and `send()` — which only waits when `_state === 'reconnecting'` —
+threw immediately in `'connecting'`.
+
+Fix: a library-level handshake timer, `connectTimeout` default 10s. On expiry
+it runs the existing `onError` path (abandon, reject, schedule next attempt)
+and *then* terminates. Cleared on open, error, and close-before-open; guarded
+by socket identity. Five tests; the close-clear, the identity guard and the
+abandon-then-terminate order were each proven by a mutant that fails exactly
+one test. Independently verified under real Bun 1.3.14 and Node 22 against a
+server that accepts TCP and never answers the handshake.
+
+That evening the Arc was flapping for ~30 minutes before the hang: repeated
+`1013 Timeout` closes at ~117–120s and ping timeouts. That instability is
+upstream of the library; the library's failure was only in not recovering
+when it ended.
+
+### Stale topology after a regroup (found, not yet fixed)
+
+On 09/18 at 05:46:52, after Neurotto's morning preset regrouped the house,
+`refreshTopology()` adopted a mid-transition `getGroups` snapshot: 3 players,
+**1 group**. Arc and Office were in no group, so their handles kept the
+groupId of the group they had just left. The player map is not truncated —
+players are only deleted when absent from `players` — but `groups` is
+adopted verbatim. Nothing corrected it for 38 minutes, because the household
+never subscribes to `groups:1`: topology is re-read only on a primary
+reconnect, a `groupCoordinatorChanged` reply, or a grouping call. It was
+finally corrected by an unrelated user-initiated `ungroup`.
+
+Source of the transitional read: `GroupingEngine.transferAudio` step 5
+issues a final `modifyGroupMembers` and does not wait for it to settle.
+
+Two candidate fixes, choice pending with the user because the first changes
+Neurotto's event traffic: subscribe to `groups:1` and refresh on change
+(also catches regroups made from the Sonos app), or poll after each
+mutation until every known player is in a group (quieter, misses external
+changes).
+
+### Ignored setVolume (unexplained, n=1)
+
+09/18 06:24:08–13: five consecutive `playerVolume:1.setVolume` calls on the
+Arc resolved successfully and changed nothing — no `playerVolume` event, and
+each next pre-read unchanged at 16 (four downs and one up, so not a floor or
+clamp). Every set resolved rather than rejected: a `success:false` response
+throws `CommandError` before Neurotto's follow-up read, and that read was
+sent every time. The library sent the right command on the right socket.
+
+It is the only genuine episode in six days (an apparent 09/12 one was a set
+to the already-current value). It followed `togglePlayPause` by 5–10s, and
+it is the only toggle in six days sent while the Arc's handle held a dead
+groupId from the stale-topology window above. Neither condition alone
+reproduces it: a set at 06:25:04 applied while topology was still stale,
+and the user confirms toggle-then-volume normally works. Sets were working
+again by 06:25:04 without intervention.
+
+Working hypothesis: a group-scoped command sent with a dead groupId briefly
+leaves the Arc ignoring volume. Unproven. Fixing stale topology removes the
+only precondition it has been seen under; if it recurs after that, it is
+something else and needs a deliberate reproduction.
+
+### Reviewer findings deferred to a planned follow-up
+
+Surfaced by the review of the handshake timeout; all pre-date it and none
+block it. Each is a "promise never settles" or "two ladders" bug of the
+kind this spec exists to eliminate, so they belong together in one planned
+change rather than bolted onto this one.
+
+- **`disconnect()` during a handshake never settles the caller.** It nulls
+  `connectReject` without calling it and only closes sockets already OPEN,
+  so a CONNECTING socket keeps handshaking with no listeners and can open as
+  an orphan. Fix: reject the pending caller and `terminate()` when
+  CONNECTING.
+- **Two reconnect ladders can run at once.** An external `connect()` while
+  `'reconnecting'` that then fails lets `onError` schedule a second ladder;
+  `scheduleReconnect` overwrites `reconnectTimer` without clearing it. The
+  reviewer reproduced `RECONNECT_EXHAUSTED` emitted twice. Reachable from
+  `SonosHousehold.connectToSpeaker` on setup retry. Fix: clear the reconnect
+  timer when a fresh attempt starts, and defensively in `scheduleReconnect`.
+- **`onError` acts on `this.ws`, not its own socket**, and a close-before-open
+  leaves `onOpen`/`onError` attached to the dead socket. A late `'error'` on
+  it during the next attempt would abandon the *new* socket. Fix: have each
+  attempt's handlers act only on their own socket.
+- **`connectTimeout` accepts values that fail every handshake** (0,
+  `Infinity`, `NaN`, negatives, > 2^31−1 all clamp to ~1ms). Unreachable
+  today — `ConnectionOptions` is not exported and nothing forwards the
+  option — so validate it when it becomes public.
+- **`send()` throws immediately in `'connecting'`** rather than waiting as it
+  does in `'reconnecting'`. Whether a volume press should wait out a
+  reconnect or fail fast is a UX question — a delayed burst of presses
+  landing at once is its own bug — so it needs a decision, not a patch.

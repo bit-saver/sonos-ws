@@ -35,3 +35,11 @@ Same principle caught a real hole in the same session: the `ws` mock's `_emit` s
 The backoff-contract test fails loudly if *we* change a default, and fails not at all if the *consumer* changes its cap — the consumer's 94 is a literal input on our side, so their move leaves the test green and asserting about a number nobody uses. Silent staleness reads as verified truth, which is worse than a red test.
 
 **How to apply:** when a test guards a cross-repo coupling, state at the point of use which direction it protects and which it doesn't, and point at the other repo's source of truth rather than restating its value — a restated value is a third copy waiting to drift.
+
+## 2026-09-18 — A recipe step that silently no-ops gets diagnosed, not out-muscled
+
+Deploying to Neurotto, `bun update sonos-ws` reported success and installed the *old* commit. I escalated straight to a more forceful workaround — deleting the lock entry to force re-resolution — and `bun install` then failed to resolve the package and regenerated the entire lockfile, upgrading dozens of unrelated packages in another session's workspace. The snapshot I had taken first is the only reason it was cheap to undo.
+
+`bun update --verbose` would have shown the cause in one command: it fetched the tarball of the *locked* sha and never re-resolved the branch. The fix was a one-line lock edit, found only after the damage.
+
+**How to apply:** when a step that worked last time now reports success and changes nothing, the next action is `--verbose` (or the tool's equivalent), not a bigger hammer. And before touching state another session owns — a lockfile, a `node_modules`, a config — snapshot it and name the exact command that restores it, so the fallback exists before it is needed. The working deploy recipe lives in memory: `feedback_deploy_sonos_ws_to_neurotto`.
