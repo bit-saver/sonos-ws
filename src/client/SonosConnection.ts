@@ -157,6 +157,11 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
         },
       });
 
+      // Every handler below acts on THIS attempt's socket, never on
+      // this.ws — which, by the time a late event arrives, may already be
+      // the next attempt's socket.
+      const socket = this.ws;
+
       const onOpen = () => {
         cleanup();
         this._state = 'connected';
@@ -165,14 +170,14 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
         this.connectReject = null;
         // this.log.info('Connected');
 
-        this.ws!.on('error', (err: Error) => {
+        socket.on('error', (err: Error) => {
           this.log.error('WebSocket error', err.message);
           this.emit('error', err);
         });
 
         this.emit('connected');
 
-        this.ws!.on('pong', () => {
+        socket.on('pong', () => {
           if (this.pongDeadlineTimer) {
             clearTimeout(this.pongDeadlineTimer);
             this.pongDeadlineTimer = null;
@@ -189,10 +194,8 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
         this.connectPromise = null;
         this.connectReject = null;
 
-        if (this.ws) {
-          this.abandonSocket(this.ws);
-          this.ws = null;
-        }
+        this.abandonSocket(socket);
+        if (this.ws === socket) this.ws = null;
 
         const connErr = new ConnectionError(
           ErrorCode.CONNECTION_FAILED,
@@ -221,11 +224,10 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
 
       const cleanup = () => {
         clearHandshakeTimer();
-        this.ws?.removeListener('open', onOpen);
-        this.ws?.removeListener('error', onError);
+        socket.removeListener('open', onOpen);
+        socket.removeListener('error', onError);
       };
 
-      const socket = this.ws;
       const connectTimeout = this.options.connectTimeout ?? DEFAULT_CONNECT_TIMEOUT;
       handshakeTimer = setTimeout(() => {
         handshakeTimer = null;
@@ -238,16 +240,20 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
         socket.terminate();
       }, connectTimeout);
 
-      this.ws.once('open', onOpen);
-      this.ws.once('error', onError);
+      socket.once('open', onOpen);
+      socket.once('error', onError);
 
-      this.ws.on('message', (data: WebSocket.Data) => this.handleMessage(data));
+      socket.on('message', (data: WebSocket.Data) => this.handleMessage(data));
 
-      this.ws.on('close', (code: number, reason: Buffer) => {
-        // A close-before-open already fails this attempt and schedules the
-        // next one via handleClose. A surviving handshake timer would fail it
-        // a second time and double-schedule the reconnect.
-        clearHandshakeTimer();
+      socket.on('close', (code: number, reason: Buffer) => {
+        // The socket is finished. Strip every listener of this attempt —
+        // including onOpen/onError, which a close-before-open would otherwise
+        // leave armed — so nothing late from it can reach the next attempt.
+        // A surviving handshake timer would also double-schedule the
+        // reconnect handleClose is about to schedule.
+        cleanup();
+        this.abandonSocket(socket);
+        if (this.ws === socket) this.ws = null;
         this.handleClose(code, reason.toString());
       });
     });

@@ -798,4 +798,27 @@ describe('connection lifecycle', () => {
 
     expect(exhausted).toHaveLength(1);
   });
+
+  it('a late error from a socket that closed before opening does not touch the next attempt', async () => {
+    const conn = new SonosConnection({ ...makeOptions({ pingInterval: 0 }), connectTimeout: 60_000 });
+    conn.on('error', () => {});
+
+    conn.connect().catch(() => {});
+    const ws1 = getLastMockWs();
+    ws1._emit('close', 1006, Buffer.from('handshake aborted'));
+
+    // initialDelay is 100: the ladder's next attempt builds a new socket.
+    await vi.advanceTimersByTimeAsync(100);
+    const ws2 = getLastMockWs();
+    expect(ws2).not.toBe(ws1);
+
+    // The dead socket emits late, as Bun's do.
+    expect(() => ws1._emit('error', new Error('late ECONNRESET'))).not.toThrow();
+    expect(ws2.removeAllListeners).not.toHaveBeenCalled();
+
+    // Attempt 2 must still be able to complete.
+    ws2._emit('open');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(conn.state).toBe('connected');
+  });
 });
