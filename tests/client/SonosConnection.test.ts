@@ -762,4 +762,40 @@ describe('connection lifecycle', () => {
     expect(ws1.close).not.toHaveBeenCalled();
     expect(conn.state).toBe('disconnected');
   });
+
+  it('an external connect() while a ladder waits does not start a second ladder', async () => {
+    // factor 2 staggers the two ladders' timers so they cannot merge into
+    // one attempt by coincidence: ladder A's first retry lands at t=1000,
+    // the external failure at t=500 schedules its retry for t=2500.
+    const conn = new SonosConnection({
+      ...makeOptions({ maxAttempts: 4, initialDelay: 1000, maxDelay: 16_000, factor: 2, pingInterval: 0 }),
+      connectTimeout: 60_000,
+    });
+    const exhausted: unknown[] = [];
+    conn.on('error', (e: any) => {
+      if (e?.code === 'RECONNECT_EXHAUSTED') exhausted.push(e);
+    });
+
+    // Initial attempt fails at t=0: ladder retry scheduled for t=1000.
+    conn.connect().catch(() => {});
+    getLastMockWs()._emit('error', new Error('ECONNREFUSED'));
+
+    // Something outside the ladder calls connect() while it waits; that fails too.
+    await vi.advanceTimersByTimeAsync(500);
+    conn.connect().catch(() => {});
+    getLastMockWs()._emit('error', new Error('ECONNREFUSED'));
+
+    // Fail every attempt that follows, until nothing is left scheduled.
+    let seen = getLastMockWs();
+    for (let t = 0; t < 120_000; t += 250) {
+      await vi.advanceTimersByTimeAsync(250);
+      const ws = getLastMockWs();
+      if (ws !== seen) {
+        seen = ws;
+        ws._emit('error', new Error('ECONNREFUSED'));
+      }
+    }
+
+    expect(exhausted).toHaveLength(1);
+  });
 });

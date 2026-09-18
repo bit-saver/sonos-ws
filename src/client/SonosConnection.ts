@@ -437,6 +437,11 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
   }
 
   private scheduleReconnect(): void {
+    // At most one ladder. A failure outside the ladder (an external
+    // connect() while it waits) reaches here with the ladder's timer still
+    // pending; overwriting it would leave both running and exhaust twice.
+    this.clearReconnectTimer();
+
     if (this.reconnectAttempt >= this.options.reconnect.maxAttempts) {
       this._state = 'disconnected';
       const err = new ConnectionError(
