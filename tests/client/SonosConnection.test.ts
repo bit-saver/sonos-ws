@@ -734,3 +734,32 @@ describe('handshake timeout', () => {
     expect(attempts).toEqual([1]);
   });
 });
+
+describe('connection lifecycle', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('disconnect() during a handshake rejects the waiting caller and tears the socket down', async () => {
+    // A long connectTimeout, so the rejection can only come from disconnect().
+    const conn = new SonosConnection({ ...makeOptions({ pingInterval: 0 }), connectTimeout: 60_000 });
+    conn.on('error', () => {});
+
+    const pending = conn.connect();
+    const ws1 = getLastMockWs();
+    ws1.readyState = 0; // CONNECTING — the mock defaults to OPEN
+    const assertion = expect(pending).rejects.toThrow(/Client disconnected/);
+
+    await conn.disconnect();
+
+    await assertion;
+    expect(ws1.terminate).toHaveBeenCalled();
+    expect(ws1.close).not.toHaveBeenCalled();
+    expect(conn.state).toBe('disconnected');
+  });
+});

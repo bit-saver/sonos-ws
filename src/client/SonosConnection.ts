@@ -264,8 +264,14 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
   async disconnect(): Promise<void> {
     this.intentionalClose = true;
     this.clearReconnectTimer();
+
+    // A caller may still be awaiting a handshake. Settle it: nulling the
+    // rejecter without calling it leaves that caller waiting forever.
+    const rejectPending = this.connectReject;
     this.connectPromise = null;
     this.connectReject = null;
+    rejectPending?.(new ConnectionError(ErrorCode.CONNECTION_LOST, 'Client disconnected'));
+
     this.correlator.rejectAll(
       new ConnectionError(ErrorCode.CONNECTION_LOST, 'Client disconnected'),
     );
@@ -273,11 +279,18 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
     this.stopPing();
 
     if (this.ws) {
-      if (this.ws.readyState === WebSocket.OPEN) {
-        this.ws.close(1000, 'client disconnect');
-      }
-      this.abandonSocket(this.ws);
+      const socket = this.ws;
       this.ws = null;
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.close(1000, 'client disconnect');
+        this.abandonSocket(socket);
+      } else {
+        // Still handshaking: left alone it would finish in the background
+        // and open as an orphan with no listeners. Abandon first so the
+        // teardown's own 'error'/'close' land on the sink, then terminate.
+        this.abandonSocket(socket);
+        socket.terminate();
+      }
     }
 
     this._state = 'disconnected';
