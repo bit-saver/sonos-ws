@@ -802,6 +802,8 @@ describe('connection lifecycle', () => {
   it('a late error from a socket that closed before opening does not touch the next attempt', async () => {
     const conn = new SonosConnection({ ...makeOptions({ pingInterval: 0 }), connectTimeout: 60_000 });
     conn.on('error', () => {});
+    const attempts: number[] = [];
+    conn.on('reconnecting', (attempt) => attempts.push(attempt));
 
     conn.connect().catch(() => {});
     const ws1 = getLastMockWs();
@@ -815,6 +817,8 @@ describe('connection lifecycle', () => {
     // The dead socket emits late, as Bun's do.
     expect(() => ws1._emit('error', new Error('late ECONNRESET'))).not.toThrow();
     expect(ws2.removeAllListeners).not.toHaveBeenCalled();
+    expect(conn.state).toBe('connecting');
+    expect(attempts).toEqual([1]);
 
     // Attempt 2 must still be able to complete.
     ws2._emit('open');
