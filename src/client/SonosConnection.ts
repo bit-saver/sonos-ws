@@ -60,9 +60,23 @@ export interface ConnectionOptions {
   reconnect: ReconnectOptions;
   /** Timeout in milliseconds for individual request/response correlation. */
   requestTimeout: number;
+  /**
+   * Milliseconds to wait for a WebSocket handshake to open or fail before
+   * abandoning it. Defaults to 10 000 ms.
+   */
+  connectTimeout?: number;
   /** Logger instance for debug, info, warn, and error output. */
   logger: Logger;
 }
+
+/**
+ * A healthy handshake to a speaker on the LAN completes in well under a
+ * second. Anything still pending after this long is not coming: under Bun a
+ * handshake can produce no `'open'`, no `'error'` and no `'close'` at all, and
+ * without a deadline the attempt — and the reconnect ladder awaiting it —
+ * never ends.
+ */
+const DEFAULT_CONNECT_TIMEOUT = 10_000;
 
 const SUB_PROTOCOL = 'v1.api.smartspeaker.audio';
 const API_KEY = '123e4567-e89b-12d3-a456-426655440000';
@@ -197,10 +211,32 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
         }
       };
 
+      let handshakeTimer: ReturnType<typeof setTimeout> | null = null;
+      const clearHandshakeTimer = () => {
+        if (handshakeTimer) {
+          clearTimeout(handshakeTimer);
+          handshakeTimer = null;
+        }
+      };
+
       const cleanup = () => {
+        clearHandshakeTimer();
         this.ws?.removeListener('open', onOpen);
         this.ws?.removeListener('error', onError);
       };
+
+      const socket = this.ws;
+      const connectTimeout = this.options.connectTimeout ?? DEFAULT_CONNECT_TIMEOUT;
+      handshakeTimer = setTimeout(() => {
+        handshakeTimer = null;
+        if (this.ws !== socket) return;
+        // Fail the attempt through the normal error path first — it abandons
+        // the socket (listeners off, error sink on) and schedules the next
+        // attempt — and only then terminate, so the teardown cannot re-enter
+        // onError or handleClose.
+        onError(new Error(`handshake timed out after ${connectTimeout}ms`));
+        socket.terminate();
+      }, connectTimeout);
 
       this.ws.once('open', onOpen);
       this.ws.once('error', onError);
@@ -208,6 +244,10 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
       this.ws.on('message', (data: WebSocket.Data) => this.handleMessage(data));
 
       this.ws.on('close', (code: number, reason: Buffer) => {
+        // A close-before-open already fails this attempt and schedules the
+        // next one via handleClose. A surviving handshake timer would fail it
+        // a second time and double-schedule the reconnect.
+        clearHandshakeTimer();
         this.handleClose(code, reason.toString());
       });
     });
@@ -335,8 +375,12 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
   private abandonSocket(ws: WebSocket): void {
     ws.removeAllListeners();
     ws.on('error', (err: unknown) => {
-      const message = err instanceof Error ? err.message : String(err);
-      this.log.debug(`Ignoring error from abandoned socket: ${message}`);
+      // Bun passes a browser-style ErrorEvent, which is not an Error but
+      // does carry a message; String() on it yields "[object ErrorEvent]".
+      const message = (err as { message?: unknown } | null)?.message;
+      this.log.debug(
+        `Ignoring error from abandoned socket: ${typeof message === 'string' ? message : String(err)}`,
+      );
     });
   }
 

@@ -535,6 +535,27 @@ describe('abandoned sockets never leave an unlistened error emitter', () => {
     expect(() => ws1._emit('error', new Error('late ECONNRESET'))).not.toThrow();
   });
 
+  it("logs a Bun ErrorEvent's message rather than [object ErrorEvent]", async () => {
+    // Bun hands 'error' listeners a browser-style ErrorEvent, not an Error.
+    // Production logged "Ignoring error from abandoned socket: [object
+    // ErrorEvent]" — true, and useless for diagnosis.
+    const options = makeOptions();
+    const conn = new SonosConnection(options);
+    conn.on('error', () => {});
+
+    const pending = conn.connect();
+    const ws1 = getLastMockWs();
+    ws1._emit('error', new Error('ECONNREFUSED'));
+    await expect(pending).rejects.toThrow(/Failed to connect/);
+
+    const errorEvent = { type: 'error', isTrusted: true, message: 'Failed to connect' };
+    ws1._emit('error', errorEvent);
+
+    expect(options.logger.debug).toHaveBeenCalledWith(
+      'Ignoring error from abandoned socket: Failed to connect',
+    );
+  });
+
   it('absorbs a late error after an intentional disconnect', async () => {
     const conn = new SonosConnection(makeOptions());
     conn.on('error', () => {});
@@ -588,5 +609,128 @@ describe('abandoned sockets never leave an unlistened error emitter', () => {
     expect(ws1.terminate).toHaveBeenCalled();
 
     expect(() => ws1._emit('error', new Error('late error after terminate'))).not.toThrow();
+  });
+});
+
+describe('handshake timeout', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('abandons a handshake that never opens, errors or closes, and keeps the ladder going', async () => {
+    // Seen in production 2026-09-15: a reconnect logged "Connecting to" and
+    // then produced no event of any kind for 77 minutes. With no timeout the
+    // attempt — and the reconnect ladder awaiting it — never ended.
+    // No connectTimeout passed: consumers get the protection by default.
+    const conn = new SonosConnection(makeOptions());
+    conn.on('error', () => {});
+    const attempts: number[] = [];
+    conn.on('reconnecting', (attempt) => attempts.push(attempt));
+
+    const pending = conn.connect();
+    const assertion = expect(pending).rejects.toThrow(/timed out/);
+    const ws1 = getLastMockWs();
+
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(ws1.terminate).not.toHaveBeenCalled();
+    expect(attempts).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await assertion;
+    expect(ws1.terminate).toHaveBeenCalled();
+    expect(attempts).toEqual([1]);
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(getLastMockWs()).not.toBe(ws1);
+  });
+
+  it('abandons the socket before terminating it, so a synchronous teardown cannot re-enter', async () => {
+    // Neither Bun nor Node emits synchronously from terminate() today, so this
+    // pins the ordering against a runtime that does. Terminate-then-fail
+    // would let the teardown's 'error' and 'close' reach live listeners and
+    // schedule the reconnect more than once.
+    const conn = new SonosConnection({
+      ...makeOptions({ initialDelay: 5000, maxDelay: 5000 }),
+      connectTimeout: 1000,
+    });
+    conn.on('error', () => {});
+    const attempts: number[] = [];
+    conn.on('reconnecting', (attempt) => attempts.push(attempt));
+
+    conn.connect().catch(() => {});
+    const ws1 = getLastMockWs();
+    ws1.terminate.mockImplementation(() => {
+      ws1._emit('error', new Error('WebSocket was closed before the connection was established'));
+      ws1._emit('close', 1006, Buffer.from(''));
+    });
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(attempts).toEqual([1]);
+    expect(() => ws1._emit('error', new Error('late'))).not.toThrow();
+  });
+
+  it('a stale timer from a disconnected attempt does not touch a newer attempt', async () => {
+    // Without the socket-identity guard the old attempt's timer, firing
+    // during the new handshake, would run the failure path against the NEW
+    // socket and leave its caller waiting forever.
+    const conn = new SonosConnection({ ...makeOptions({ pingInterval: 0 }), connectTimeout: 1000 });
+    conn.on('error', () => {});
+
+    conn.connect().catch(() => {});
+    await conn.disconnect();
+    await vi.advanceTimersByTimeAsync(500);
+
+    const second = conn.connect();
+    const ws2 = getLastMockWs();
+    // The first attempt's deadline (t=1000) passes; the second's (t=1500) has not.
+    await vi.advanceTimersByTimeAsync(600);
+    expect(ws2.removeAllListeners).not.toHaveBeenCalled();
+
+    ws2._emit('open');
+    await second;
+    expect(conn.state).toBe('connected');
+  });
+
+  it('leaves a handshake that opened alone', async () => {
+    const conn = new SonosConnection({ ...makeOptions({ pingInterval: 0 }), connectTimeout: 1000 });
+    conn.on('error', () => {});
+
+    const pending = conn.connect();
+    const ws1 = getLastMockWs();
+    ws1._emit('open');
+    await pending;
+
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(ws1.terminate).not.toHaveBeenCalled();
+    expect(conn.state).toBe('connected');
+  });
+
+  it('does not double-schedule a reconnect when the socket closed before the deadline', async () => {
+    // A close-before-open already schedules the next attempt. If the
+    // handshake timer survives it, it fires later, fails the dead attempt a
+    // second time and schedules a second reconnect — the double-schedule
+    // class fixed in 96b51c4. A long backoff opens the window for it.
+    const conn = new SonosConnection({
+      ...makeOptions({ initialDelay: 5000, maxDelay: 5000 }),
+      connectTimeout: 1000,
+    });
+    conn.on('error', () => {});
+    const attempts: number[] = [];
+    conn.on('reconnecting', (attempt) => attempts.push(attempt));
+
+    conn.connect().catch(() => {});
+    const ws1 = getLastMockWs();
+    ws1._emit('close', 1006, Buffer.from('handshake aborted'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts).toEqual([1]);
+
+    // Past the stale handshake deadline, before the 5s backoff elapses.
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(attempts).toEqual([1]);
   });
 });
