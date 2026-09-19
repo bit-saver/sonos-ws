@@ -207,7 +207,7 @@ That evening the Arc was flapping for ~30 minutes before the hang: repeated
 upstream of the library; the library's failure was only in not recovering
 when it ended.
 
-### Stale topology after a regroup (found, not yet fixed)
+### Stale topology after a regroup (fixed — see the evening addendum below)
 
 On 09/18 at 05:46:52, after Neurotto's morning preset regrouped the house,
 `refreshTopology()` adopted a mid-transition `getGroups` snapshot: 3 players,
@@ -222,8 +222,8 @@ finally corrected by an unrelated user-initiated `ungroup`.
 Source of the transitional read: `GroupingEngine.transferAudio` step 5
 issues a final `modifyGroupMembers` and does not wait for it to settle.
 
-Two candidate fixes, choice pending with the user because the first changes
-Neurotto's event traffic: subscribe to `groups:1` and refresh on change
+Two candidate fixes were put to the user, because the first changes
+Neurotto's event traffic (the user chose the subscription): subscribe to `groups:1` and refresh on change
 (also catches regroups made from the Sonos app), or poll after each
 mutation until every known player is in a group (quieter, misses external
 changes).
@@ -250,7 +250,7 @@ leaves the Arc ignoring volume. Unproven. Fixing stale topology removes the
 only precondition it has been seen under; if it recurs after that, it is
 something else and needs a deliberate reproduction.
 
-### Reviewer findings deferred to a planned follow-up
+### Reviewer findings deferred to a planned follow-up (first three fixed — see the evening addendum below)
 
 Surfaced by the review of the handshake timeout; all pre-date it and none
 block it. Each is a "promise never settles" or "two ladders" bug of the
@@ -280,3 +280,55 @@ change rather than bolted onto this one.
   does in `'reconnecting'`. Whether a volume press should wait out a
   reconnect or fail fast is a UX question — a delayed burst of presses
   landing at once is its own bug — so it needs a decision, not a patch.
+
+## Addendum 2026-09-18 (evening) — lifecycle and topology freshness
+
+Plan: `docs/superpowers/plans/2026-09-18-lifecycle-and-topology-freshness.md`,
+executed subagent-driven with a task review per task and a whole-branch
+review. Merged to main at `24ceaaa` (dist), deployed to Neurotto 2026-09-18
+19:37. 81 tests.
+
+- **`disconnect()` mid-handshake** (`1eb4458`, test `596fb5e`): rejects the
+  pending `connect()` with `CONNECTION_LOST 'Client disconnected'`, and
+  abandons then terminates a socket that is not yet OPEN.
+- **One reconnect ladder** (`54095a4`): `scheduleReconnect()` clears any
+  pending timer first. The spec's other suggestion — clearing when a fresh
+  attempt starts — was unnecessary: a successful external attempt makes the
+  surviving timer hit `connect()`'s `connected` short-circuit.
+- **Per-attempt handlers** (`c38af08`, test `025da35`): every handler in an
+  attempt acts on its own captured `socket`; the `'close'` listener strips
+  the attempt (`cleanup()`, `abandonSocket`) before `handleClose`. The
+  plan's original regression test did not guard this once handlers were
+  socket-scoped; the review caught it and the test now asserts that a
+  stale socket cannot change `_state` or schedule a second reconnect.
+- **Topology follows `groups:1`** (`c69cebe`): the household subscribes
+  after first connect and every reconnect, and re-reads topology once a
+  burst of `groups:1` events has been quiet for 250 ms. A side effect: the
+  household now emits `groupsChanged` (it was routed before but never
+  subscribed). Neurotto does not listen for it.
+- **Setup aborts on a disconnect mid-setup** (`0580638`): found by the
+  whole-branch review, and a defect in the plan — the best-effort subscribe
+  swallowed the `Client disconnected` rejection, so setup went on to open
+  per-speaker connections on a torn-down household and `connect()`
+  resolved. `handleReconnected()` now throws `CONNECTION_LOST 'Disconnected
+  during setup'` before `connectAllSpeakers()` / `reconnectSpeakers()` if
+  the primary is no longer connected. In the reconnect branch that throw is
+  absorbed without its own log line; the triggering drop is already logged
+  by the connection, and the next successful reconnect re-runs setup.
+- **Unhandled rejection of `initialSetupPromise`** (`bb3fdee`,
+  pre-existing): if the first connect failed, the caller stopped awaiting
+  setup, and a later setup failure after the background ladder succeeded
+  became an unhandled rejection — a host-process crash. A no-op `.catch`
+  keeps it handled while the awaiting caller still receives it.
+
+Live verification at deploy: `groups:1.subscribe` sent and answered at
+boot, no `Failed to subscribe to group changes`, three sockets up. The
+regroup path itself is verified at the next regroup: expect `Event:
+groups:1…` lines and one `Topology refreshed` ~250 ms after the last.
+
+Still open (follow-ups): a log line for the reconnect-branch setup abort;
+two `handleReconnected()` runs can interleave if the connection drops and
+recovers during setup; `connectTimeout` validation; `send()` in
+`'connecting'` (a UX decision); subscribe-then-read ordering (a regroup
+finishing inside the initial read's round trip is caught only if Sonos
+sends an event on subscribe).
