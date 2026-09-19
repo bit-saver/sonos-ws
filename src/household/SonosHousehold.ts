@@ -8,6 +8,7 @@ import type { SonosRequest, SonosResponse } from '../types/messages.js';
 import type { Logger } from '../util/logger.js';
 import { noopLogger } from '../util/logger.js';
 import { SonosError } from '../errors/SonosError.js';
+import { ConnectionError } from '../errors/ConnectionError.js';
 import { ErrorCode } from '../types/errors.js';
 import { PlayerHandle } from '../player/PlayerHandle.js';
 import { GroupingEngine } from './GroupingEngine.js';
@@ -459,8 +460,9 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     // Skip events with empty body (subscribe confirmations)
     if (!objectType) return;
 
-    // Any groups:1 event means topology moved. Keyed on the namespace, not
-    // on the event's _objectType, which this library does not pin.
+    // Any groups:1 event carrying an object triggers a re-read, whatever its
+    // _objectType value (the empty-body check above already filtered out
+    // subscribe confirmations, which have none).
     if (namespace === 'groups:1') this.scheduleTopologyRefresh();
 
     // Route to typed event
@@ -534,6 +536,14 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
         await this.discoverHouseholdId();
         await this.refreshTopology();
         await this.subscribeToTopology();
+        // subscribeToTopology() swallows its own errors (see its docstring),
+        // including the ConnectionError a disconnect() mid-subscribe produces
+        // via correlator.rejectAll. Without this check that swallow is
+        // indistinguishable from "subscribe merely failed" and setup would
+        // continue on to open per-speaker connections after teardown.
+        if (this.connection.state !== 'connected') {
+          throw new ConnectionError(ErrorCode.CONNECTION_LOST, 'Disconnected during setup');
+        }
         if (this.autoConnectSpeakers) {
           await this.connectAllSpeakers();
         }
@@ -547,6 +557,13 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       await this.refreshTopology().catch((err) =>
         this.log.warn('Failed to refresh topology on reconnect', err));
       await this.subscribeToTopology();
+
+      // Same reasoning as the first-connect branch above: a disconnect that
+      // lands while subscribeToTopology() is in flight must not let this
+      // fall through into reconnecting per-speaker connections.
+      if (this.connection.state !== 'connected') {
+        throw new ConnectionError(ErrorCode.CONNECTION_LOST, 'Disconnected during setup');
+      }
 
       await this.reconnectSpeakers();
 

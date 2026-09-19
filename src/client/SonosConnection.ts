@@ -266,6 +266,10 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
    *
    * All pending requests are rejected with a {@link ConnectionError}, the
    * reconnect timer is cancelled, and no automatic reconnection will occur.
+   * A `connect()` still in flight is rejected the same way, with
+   * `ConnectionError(CONNECTION_LOST, 'Client disconnected')`, and if its
+   * socket is still handshaking (not yet open) it is terminated rather than
+   * left to finish in the background as an orphan.
    */
   async disconnect(): Promise<void> {
     this.intentionalClose = true;
