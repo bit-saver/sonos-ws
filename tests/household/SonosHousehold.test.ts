@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SonosHousehold } from '../../src/household/SonosHousehold.js';
 import { SonosConnection } from '../../src/client/SonosConnection.js';
 import type { GroupsResponse, Group, Player } from '../../src/types/groups.js';
@@ -390,6 +390,14 @@ describe('SonosHousehold per-speaker resilience', () => {
     });
   });
 
+  afterEach(() => {
+    // The test below replaces the SonosConnection constructor mock with a
+    // one-off implementation. Restore the shared singleton afterward so
+    // later describe blocks that construct a SonosHousehold get the usual
+    // mock connection instead of this test's leftover closure.
+    (SonosConnection as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => mockConn);
+  });
+
   it('stores per-speaker connection in map even when initial connect rejects', async () => {
     // Make the second SonosConnection instance reject on connect
     const Constructor = SonosConnection as unknown as ReturnType<typeof vi.fn>;
@@ -516,5 +524,97 @@ describe('default backoff shape is a published contract', () => {
     const minutes = windowFor(94) / 60000;
     expect(minutes).toBeGreaterThanOrEqual(44);
     expect(minutes).toBeLessThanOrEqual(46);
+  });
+});
+
+describe('topology follows group changes', () => {
+  let household: SonosHousehold;
+  let mockConn: any;
+  let topology: GroupsResponse;
+
+  const regrouped: GroupsResponse = {
+    ...mockTopology,
+    groups: [
+      { id: 'RINCON_ARC:999', name: 'Arc + Office', coordinatorId: 'RINCON_ARC', playbackState: 'PLAYBACK_STATE_IDLE', playerIds: ['RINCON_ARC', 'RINCON_OFFICE'] },
+      { id: 'RINCON_BED:789', name: 'Bedroom', coordinatorId: 'RINCON_BED', playbackState: 'PLAYBACK_STATE_IDLE', playerIds: ['RINCON_BED'] },
+    ] as Group[],
+  };
+
+  const sent = (namespace: string, command: string) =>
+    mockConn.send.mock.calls.filter(
+      ([req]: any) => req[0].namespace === namespace && req[0].command === command,
+    ).length;
+
+  const groupsEvent = () => {
+    const onMessage = mockConn._listeners.get('message')![0];
+    onMessage([
+      { namespace: 'groups:1', type: 'groups', householdId: 'HH_1' },
+      { _objectType: 'groups', ...topology },
+    ]);
+  };
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    (SonosConnection as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+    topology = mockTopology;
+    household = new SonosHousehold({ host: '192.168.68.96', autoConnect: false });
+    mockConn = getMockConnection();
+    mockConn._listeners.clear();
+    mockConn.on.mockImplementation((event: string, handler: Function) => {
+      if (!mockConn._listeners.has(event)) mockConn._listeners.set(event, []);
+      mockConn._listeners.get(event)!.push(handler);
+      return mockConn;
+    });
+    mockConn.send.mockImplementation((request: any) => {
+      const [headers] = request;
+      if (headers.namespace === 'groups:1' && headers.command === 'getGroups') {
+        return Promise.resolve([{ householdId: 'HH_1', success: true }, topology]);
+      }
+      return Promise.resolve([{ success: true }, {}]);
+    });
+
+    await household.connect();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('subscribes to groups:1 once connected', () => {
+    expect(sent('groups:1', 'subscribe')).toBe(1);
+  });
+
+  it('re-reads topology once after a burst of group events settles', async () => {
+    const readsBefore = sent('groups:1', 'getGroups');
+    topology = regrouped;
+
+    groupsEvent();
+    await vi.advanceTimersByTimeAsync(100);
+    groupsEvent();
+    await vi.advanceTimersByTimeAsync(100);
+    groupsEvent();
+
+    await vi.advanceTimersByTimeAsync(249);
+    expect(sent('groups:1', 'getGroups')).toBe(readsBefore);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sent('groups:1', 'getGroups')).toBe(readsBefore + 1);
+    expect(household.groups).toHaveLength(2);
+  });
+
+  it('re-subscribes after a reconnect', async () => {
+    const onConnected = mockConn._listeners.get('connected')![0];
+    await onConnected();
+    expect(sent('groups:1', 'subscribe')).toBe(2);
+  });
+
+  it('a pending refresh does not run after disconnect()', async () => {
+    const readsBefore = sent('groups:1', 'getGroups');
+    groupsEvent();
+    await household.disconnect();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(sent('groups:1', 'getGroups')).toBe(readsBefore);
   });
 });

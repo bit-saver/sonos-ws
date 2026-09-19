@@ -25,6 +25,13 @@ const DEFAULT_RECONNECT: ReconnectOptions = {
 };
 
 /**
+ * A regroup emits several groups:1 events in quick succession, and a read
+ * taken between them can catch players in no group at all. Waiting for the
+ * burst to go quiet means the one read that follows sees the settled state.
+ */
+const TOPOLOGY_EVENT_DEBOUNCE_MS = 250;
+
+/**
  * Configuration options for creating a {@link SonosHousehold} instance.
  */
 export interface SonosHouseholdOptions {
@@ -70,6 +77,8 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   private _householdId: string | undefined;
   private _initialConnectDone = false;
   private _lastTopologyKey = '';
+  /** Pending debounced topology re-read, armed by groups:1 events. */
+  private topologyRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Per-speaker WebSocket connections. Key is player ID. */
   private readonly speakerConnections = new Map<string, SonosConnection>();
@@ -173,6 +182,10 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
 
   /** Gracefully closes all WebSocket connections. */
   async disconnect(): Promise<void> {
+    if (this.topologyRefreshTimer) {
+      clearTimeout(this.topologyRefreshTimer);
+      this.topologyRefreshTimer = null;
+    }
     // Close all per-speaker connections first
     for (const [, conn] of this.speakerConnections) {
       try { await conn.disconnect(); } catch { /* best effort */ }
@@ -255,6 +268,33 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     this.log.debug(`Topology refreshed: ${this._players.size} players, ${this._groups.length} groups`);
 
     return result;
+  }
+
+  /**
+   * Re-reads topology once a burst of groups:1 events has gone quiet.
+   * Each new event restarts the wait, so a regroup costs one read, taken
+   * after it settles.
+   */
+  private scheduleTopologyRefresh(): void {
+    if (this.topologyRefreshTimer) clearTimeout(this.topologyRefreshTimer);
+    this.topologyRefreshTimer = setTimeout(() => {
+      this.topologyRefreshTimer = null;
+      this.refreshTopology().catch((err) => this.log.warn('Failed to refresh topology', err));
+    }, TOPOLOGY_EVENT_DEBOUNCE_MS);
+  }
+
+  /**
+   * Subscribes to household group changes, so topology follows every
+   * regroup — including ones made from the Sonos app — instead of only
+   * those this library performs. Best effort: a failure leaves the older
+   * refresh triggers (reconnect, coordinator change, grouping calls) intact.
+   */
+  private async subscribeToTopology(): Promise<void> {
+    try {
+      await this.householdGroups.subscribe();
+    } catch (err) {
+      this.log.warn('Failed to subscribe to group changes', err);
+    }
   }
 
   /**
@@ -419,6 +459,10 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     // Skip events with empty body (subscribe confirmations)
     if (!objectType) return;
 
+    // Any groups:1 event means topology moved. Keyed on the namespace, not
+    // on the event's _objectType, which this library does not pin.
+    if (namespace === 'groups:1') this.scheduleTopologyRefresh();
+
     // Route to typed event
     const eventName = NAMESPACE_EVENT_MAP[namespace];
     if (eventName) {
@@ -489,6 +533,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       try {
         await this.discoverHouseholdId();
         await this.refreshTopology();
+        await this.subscribeToTopology();
         if (this.autoConnectSpeakers) {
           await this.connectAllSpeakers();
         }
@@ -501,6 +546,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       // Reconnect after prior success — reconnect-specific work.
       await this.refreshTopology().catch((err) =>
         this.log.warn('Failed to refresh topology on reconnect', err));
+      await this.subscribeToTopology();
 
       await this.reconnectSpeakers();
 
