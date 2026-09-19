@@ -403,18 +403,19 @@ var SonosConnection = class extends TypedEventEmitter {
           "X-Sonos-Api-Key": API_KEY
         }
       });
+      const socket = this.ws;
       const onOpen = () => {
         cleanup();
         this._state = "connected";
         this.reconnectAttempt = 0;
         this.connectPromise = null;
         this.connectReject = null;
-        this.ws.on("error", (err) => {
+        socket.on("error", (err) => {
           this.log.error("WebSocket error", err.message);
           this.emit("error", err);
         });
         this.emit("connected");
-        this.ws.on("pong", () => {
+        socket.on("pong", () => {
           if (this.pongDeadlineTimer) {
             clearTimeout(this.pongDeadlineTimer);
             this.pongDeadlineTimer = null;
@@ -428,10 +429,8 @@ var SonosConnection = class extends TypedEventEmitter {
         this._state = "disconnected";
         this.connectPromise = null;
         this.connectReject = null;
-        if (this.ws) {
-          this.abandonSocket(this.ws);
-          this.ws = null;
-        }
+        this.abandonSocket(socket);
+        if (this.ws === socket) this.ws = null;
         const connErr = new ConnectionError(
           "CONNECTION_FAILED" /* CONNECTION_FAILED */,
           `Failed to connect: ${err.message}`,
@@ -452,10 +451,9 @@ var SonosConnection = class extends TypedEventEmitter {
       };
       const cleanup = () => {
         clearHandshakeTimer();
-        this.ws?.removeListener("open", onOpen);
-        this.ws?.removeListener("error", onError);
+        socket.removeListener("open", onOpen);
+        socket.removeListener("error", onError);
       };
-      const socket = this.ws;
       const connectTimeout = this.options.connectTimeout ?? DEFAULT_CONNECT_TIMEOUT;
       handshakeTimer = setTimeout(() => {
         handshakeTimer = null;
@@ -463,11 +461,13 @@ var SonosConnection = class extends TypedEventEmitter {
         onError(new Error(`handshake timed out after ${connectTimeout}ms`));
         socket.terminate();
       }, connectTimeout);
-      this.ws.once("open", onOpen);
-      this.ws.once("error", onError);
-      this.ws.on("message", (data) => this.handleMessage(data));
-      this.ws.on("close", (code, reason) => {
-        clearHandshakeTimer();
+      socket.once("open", onOpen);
+      socket.once("error", onError);
+      socket.on("message", (data) => this.handleMessage(data));
+      socket.on("close", (code, reason) => {
+        cleanup();
+        this.abandonSocket(socket);
+        if (this.ws === socket) this.ws = null;
         this.handleClose(code, reason.toString());
       });
     });
@@ -478,22 +478,32 @@ var SonosConnection = class extends TypedEventEmitter {
    *
    * All pending requests are rejected with a {@link ConnectionError}, the
    * reconnect timer is cancelled, and no automatic reconnection will occur.
+   * A `connect()` still in flight is rejected the same way, with
+   * `ConnectionError(CONNECTION_LOST, 'Client disconnected')`, and if its
+   * socket is still handshaking (not yet open) it is terminated rather than
+   * left to finish in the background as an orphan.
    */
   async disconnect() {
     this.intentionalClose = true;
     this.clearReconnectTimer();
+    const rejectPending = this.connectReject;
     this.connectPromise = null;
     this.connectReject = null;
+    rejectPending?.(new ConnectionError("CONNECTION_LOST" /* CONNECTION_LOST */, "Client disconnected"));
     this.correlator.rejectAll(
       new ConnectionError("CONNECTION_LOST" /* CONNECTION_LOST */, "Client disconnected")
     );
     this.stopPing();
     if (this.ws) {
-      if (this.ws.readyState === import_ws.default.OPEN) {
-        this.ws.close(1e3, "client disconnect");
-      }
-      this.abandonSocket(this.ws);
+      const socket = this.ws;
       this.ws = null;
+      if (socket.readyState === import_ws.default.OPEN) {
+        socket.close(1e3, "client disconnect");
+        this.abandonSocket(socket);
+      } else {
+        this.abandonSocket(socket);
+        socket.terminate();
+      }
     }
     this._state = "disconnected";
     this.emit("disconnected", "client disconnect");
@@ -608,6 +618,7 @@ var SonosConnection = class extends TypedEventEmitter {
     }
   }
   scheduleReconnect() {
+    this.clearReconnectTimer();
     if (this.reconnectAttempt >= this.options.reconnect.maxAttempts) {
       this._state = "disconnected";
       const err = new ConnectionError(
@@ -1831,6 +1842,7 @@ var DEFAULT_RECONNECT = {
   pingInterval: 3e4,
   pongTimeout: 1e4
 };
+var TOPOLOGY_EVENT_DEBOUNCE_MS = 250;
 var SonosHousehold = class extends TypedEventEmitter {
   connection;
   log;
@@ -1840,6 +1852,8 @@ var SonosHousehold = class extends TypedEventEmitter {
   _householdId;
   _initialConnectDone = false;
   _lastTopologyKey = "";
+  /** Pending debounced topology re-read, armed by groups:1 events. */
+  topologyRefreshTimer = null;
   /** Per-speaker WebSocket connections. Key is player ID. */
   speakerConnections = /* @__PURE__ */ new Map();
   primaryHost;
@@ -1908,6 +1922,8 @@ var SonosHousehold = class extends TypedEventEmitter {
       resolveSetup = res;
       rejectSetup = rej;
     });
+    initialSetupPromise.catch(() => {
+    });
     this.connection.on("connected", async () => {
       try {
         await this.handleReconnected();
@@ -1925,6 +1941,10 @@ var SonosHousehold = class extends TypedEventEmitter {
   }
   /** Gracefully closes all WebSocket connections. */
   async disconnect() {
+    if (this.topologyRefreshTimer) {
+      clearTimeout(this.topologyRefreshTimer);
+      this.topologyRefreshTimer = null;
+    }
     for (const [, conn] of this.speakerConnections) {
       try {
         await conn.disconnect();
@@ -1988,6 +2008,31 @@ var SonosHousehold = class extends TypedEventEmitter {
     }
     this.log.debug(`Topology refreshed: ${this._players.size} players, ${this._groups.length} groups`);
     return result;
+  }
+  /**
+   * Re-reads topology once a burst of groups:1 events has gone quiet.
+   * Each new event restarts the wait, so a regroup costs one read, taken
+   * after it settles.
+   */
+  scheduleTopologyRefresh() {
+    if (this.topologyRefreshTimer) clearTimeout(this.topologyRefreshTimer);
+    this.topologyRefreshTimer = setTimeout(() => {
+      this.topologyRefreshTimer = null;
+      this.refreshTopology().catch((err) => this.log.warn("Failed to refresh topology", err));
+    }, TOPOLOGY_EVENT_DEBOUNCE_MS);
+  }
+  /**
+   * Subscribes to household group changes, so topology follows every
+   * regroup — including ones made from the Sonos app — instead of only
+   * those this library performs. Best effort: a failure leaves the older
+   * refresh triggers (reconnect, coordinator change, grouping calls) intact.
+   */
+  async subscribeToTopology() {
+    try {
+      await this.householdGroups.subscribe();
+    } catch (err) {
+      this.log.warn("Failed to subscribe to group changes", err);
+    }
   }
   /**
    * Groups the specified players. The first player in the array becomes the coordinator.
@@ -2120,6 +2165,7 @@ var SonosHousehold = class extends TypedEventEmitter {
       return;
     }
     if (!objectType) return;
+    if (namespace === "groups:1") this.scheduleTopologyRefresh();
     const eventName = NAMESPACE_EVENT_MAP[namespace];
     if (eventName) {
       this.emit(eventName, body);
@@ -2173,6 +2219,10 @@ var SonosHousehold = class extends TypedEventEmitter {
       try {
         await this.discoverHouseholdId();
         await this.refreshTopology();
+        await this.subscribeToTopology();
+        if (this.connection.state !== "connected") {
+          throw new ConnectionError("CONNECTION_LOST" /* CONNECTION_LOST */, "Disconnected during setup");
+        }
         if (this.autoConnectSpeakers) {
           await this.connectAllSpeakers();
         }
@@ -2183,6 +2233,10 @@ var SonosHousehold = class extends TypedEventEmitter {
       }
     } else {
       await this.refreshTopology().catch((err) => this.log.warn("Failed to refresh topology on reconnect", err));
+      await this.subscribeToTopology();
+      if (this.connection.state !== "connected") {
+        throw new ConnectionError("CONNECTION_LOST" /* CONNECTION_LOST */, "Disconnected during setup");
+      }
       await this.reconnectSpeakers();
       for (const handle of this._players.values()) {
         try {

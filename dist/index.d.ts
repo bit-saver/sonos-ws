@@ -210,6 +210,10 @@ declare class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
      *
      * All pending requests are rejected with a {@link ConnectionError}, the
      * reconnect timer is cancelled, and no automatic reconnection will occur.
+     * A `connect()` still in flight is rejected the same way, with
+     * `ConnectionError(CONNECTION_LOST, 'Client disconnected')`, and if its
+     * socket is still handshaking (not yet open) it is terminated rather than
+     * left to finish in the background as an orphan.
      */
     disconnect(): Promise<void>;
     /**
@@ -1181,6 +1185,8 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     private _householdId;
     private _initialConnectDone;
     private _lastTopologyKey;
+    /** Pending debounced topology re-read, armed by groups:1 events. */
+    private topologyRefreshTimer;
     /** Per-speaker WebSocket connections. Key is player ID. */
     private readonly speakerConnections;
     private readonly primaryHost;
@@ -1220,6 +1226,19 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
      * @internal
      */
     refreshTopology(): Promise<GroupsResponse>;
+    /**
+     * Re-reads topology once a burst of groups:1 events has gone quiet.
+     * Each new event restarts the wait, so a regroup costs one read, taken
+     * after it settles.
+     */
+    private scheduleTopologyRefresh;
+    /**
+     * Subscribes to household group changes, so topology follows every
+     * regroup — including ones made from the Sonos app — instead of only
+     * those this library performs. Best effort: a failure leaves the older
+     * refresh triggers (reconnect, coordinator change, grouping calls) intact.
+     */
+    private subscribeToTopology;
     /**
      * Groups the specified players. The first player in the array becomes the coordinator.
      *
