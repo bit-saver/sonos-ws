@@ -329,6 +329,6 @@ groups:1…` lines and one `Topology refreshed` ~250 ms after the last.
 Still open (follow-ups): a log line for the reconnect-branch setup abort;
 two `handleReconnected()` runs can interleave if the connection drops and
 recovers during setup; `connectTimeout` validation; `send()` in
-`'connecting'` (a UX decision); subscribe-then-read ordering (a regroup
-finishing inside the initial read's round trip is caught only if Sonos
-sends an event on subscribe).
+`'connecting'` (a UX decision). The subscribe-then-read ordering gap is
+closed in practice: Sonos sends a `groups` event on subscribe (seen at the
+19:37 deploy), which triggers the debounced re-read.
