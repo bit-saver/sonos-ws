@@ -350,6 +350,69 @@ describe('SonosHousehold first-connect-after-fail setup', () => {
   }, 5000);
 });
 
+describe('SonosHousehold connect() unhandled rejection safety', () => {
+  let household: SonosHousehold;
+  let mockConn: any;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const Constructor = SonosConnection as unknown as ReturnType<typeof vi.fn>;
+    Constructor.mockClear();
+
+    household = new SonosHousehold({ host: '192.168.68.96' });
+    mockConn = getMockConnection();
+
+    mockConn._listeners.clear();
+    mockConn.on.mockImplementation((event: string, handler: Function) => {
+      if (!mockConn._listeners.has(event)) mockConn._listeners.set(event, []);
+      mockConn._listeners.get(event)!.push(handler);
+      return mockConn;
+    });
+  });
+
+  it('does not produce an unhandled rejection when the background ladder fails setup after connect() already rejected', async () => {
+    // The initial connect() attempt fails outright — household.connect()
+    // throws right there, before it ever reaches `await initialSetupPromise`.
+    mockConn.connect.mockImplementationOnce(() => Promise.reject(new Error('ECONNREFUSED')));
+    // Later, the background reconnect ladder succeeds and fires 'connected'
+    // again, but first-connect setup (getGroups here) fails too. Nothing is
+    // still awaiting the original household.connect() promise by then, so
+    // rejectSetup(err) rejects a promise nobody listens to unless connect()
+    // attached its own no-op catch to it.
+    mockConn.send.mockImplementation((request: any) => {
+      const [headers] = request;
+      if (headers.namespace === 'groups:1' && headers.command === 'getGroups') {
+        return Promise.reject(new Error('getGroups failed'));
+      }
+      return Promise.resolve([{ success: true }, {}]);
+    });
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (err: unknown) => unhandled.push(err);
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      await expect(household.connect()).rejects.toThrow('ECONNREFUSED');
+
+      // Simulate the background ladder's later success by firing the same
+      // 'connected' listener household.connect() registered.
+      const connectedHandlers = mockConn._listeners.get('connected') || [];
+      expect(connectedHandlers.length).toBeGreaterThan(0);
+      await connectedHandlers[0]();
+
+      // Flush microtasks, then yield a real macrotask turn: Node only fires
+      // 'unhandledRejection' once the microtask queue has fully drained and
+      // control returns to the event loop, not mid-chain of awaits.
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+});
+
 describe('SonosHousehold per-speaker resilience', () => {
   let household: SonosHousehold;
   let mockConn: any;

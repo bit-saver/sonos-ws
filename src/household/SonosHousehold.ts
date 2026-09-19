@@ -163,6 +163,16 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       resolveSetup = res;
       rejectSetup = rej;
     });
+    // If this.connection.connect() below rejects, this method throws before
+    // ever reaching `await initialSetupPromise` — so nothing is listening to
+    // it yet. Should the background reconnect ladder later succeed and then
+    // fail first-connect setup, the 'connected' handler below calls
+    // rejectSetup(err) on this same promise, which — with no listener —
+    // would surface as an unhandled rejection and crash the host process.
+    // This no-op catch keeps that rejection from ever being "unhandled";
+    // the caller's own `await initialSetupPromise` above still observes it
+    // when connect() succeeds and setup fails synchronously with it.
+    initialSetupPromise.catch(() => {});
 
     this.connection.on('connected', async () => {
       try {
