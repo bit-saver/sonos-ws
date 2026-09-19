@@ -825,4 +825,42 @@ describe('connection lifecycle', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(conn.state).toBe('connected');
   });
+
+  it('teardown events from a socket terminated mid-handshake cannot reach a reconnect made right after', async () => {
+    // Real ws emits 'error' then 'close' asynchronously after terminate() on
+    // a CONNECTING socket. Without abandonSocket() before that terminate(),
+    // those late events land on the still-wired handlers and clobber the
+    // state/connectPromise a connect() made right after disconnect() set up:
+    // an unwanted 'reconnecting' fires and a second ladder starts.
+    const conn = new SonosConnection({ ...makeOptions({ pingInterval: 0 }), connectTimeout: 60_000 });
+    conn.on('error', () => {});
+    const disconnected: string[] = [];
+    conn.on('disconnected', (r: string) => disconnected.push(r));
+    const reconnecting: number[] = [];
+    conn.on('reconnecting', (a: number) => reconnecting.push(a));
+
+    conn.connect().catch(() => {});
+    const ws1 = getLastMockWs();
+    ws1.readyState = 0; // CONNECTING — the mock defaults to OPEN
+    await conn.disconnect();
+
+    const second = conn.connect();
+    const ws2 = getLastMockWs();
+    let settled = 'pending';
+    second.then(() => { settled = 'resolved'; }, () => { settled = 'rejected'; });
+
+    // ws emits these asynchronously after terminate() on a CONNECTING socket.
+    expect(() => ws1._emit('error', new Error('WebSocket was closed before the connection was established'))).not.toThrow();
+    ws1._emit('close', 1006, Buffer.from(''));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(settled).toBe('pending');
+    expect(reconnecting).toEqual([]);
+    expect(disconnected).toEqual(['client disconnect']);
+
+    // The new attempt still completes on its own socket.
+    ws2._emit('open');
+    await second;
+    expect(conn.state).toBe('connected');
+  });
 });
