@@ -612,6 +612,59 @@ describe('abandoned sockets never leave an unlistened error emitter', () => {
   });
 });
 
+describe('event logging', () => {
+  beforeEach(() => { vi.useFakeTimers(); vi.clearAllMocks(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('logs the event body, not just its namespace and type', async () => {
+    // An external controller (Spotify, the Sonos app) can move the volume with
+    // no command of ours. Logging only "Event: playerVolume:1.playerVolume"
+    // records that it happened and throws away what happened — the value, and
+    // the muted/fixed flags that say how.
+    const options = makeOptions({ pingInterval: 0 });
+    const conn = new SonosConnection(options);
+    conn.on('error', () => {});
+
+    const pending = conn.connect();
+    const ws = getLastMockWs();
+    ws._emit('open');
+    await pending;
+
+    ws._emit('message', JSON.stringify([
+      { namespace: 'playerVolume:1', type: 'playerVolume' },
+      { _objectType: 'playerVolume', volume: 100, muted: false, fixed: false },
+    ]));
+
+    const logged = options.logger.debug.mock.calls.map((c: any[]) => String(c[0]));
+    const line = logged.find((l: string) => l.startsWith('Event: playerVolume:1.playerVolume'));
+    expect(line).toBeDefined();
+    expect(line).toContain('"volume":100');
+    expect(line).toContain('"fixed":false');
+  });
+
+  it('truncates a large event body so a topology dump cannot flood the log', async () => {
+    const options = makeOptions({ pingInterval: 0 });
+    const conn = new SonosConnection(options);
+    conn.on('error', () => {});
+
+    const pending = conn.connect();
+    const ws = getLastMockWs();
+    ws._emit('open');
+    await pending;
+
+    ws._emit('message', JSON.stringify([
+      { namespace: 'groups:1', type: 'groups' },
+      { _objectType: 'groups', filler: 'x'.repeat(5000) },
+    ]));
+
+    const line = options.logger.debug.mock.calls
+      .map((c: any[]) => String(c[0]))
+      .find((l: string) => l.startsWith('Event: groups:1.groups'));
+    expect(line).toBeDefined();
+    expect(line!.length).toBeLessThan(400);
+  });
+});
+
 describe('handshake timeout', () => {
   beforeEach(() => {
     vi.useFakeTimers();

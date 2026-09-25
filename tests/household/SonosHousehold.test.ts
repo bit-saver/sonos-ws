@@ -681,3 +681,55 @@ describe('topology follows group changes', () => {
     expect(sent('groups:1', 'getGroups')).toBe(readsBefore);
   });
 });
+
+describe('diagnostic event subscriptions', () => {
+  let household: SonosHousehold;
+  let mockConn: any;
+
+  const sent = (namespace: string, command: string) =>
+    mockConn.send.mock.calls.filter(
+      ([req]: any) => req[0].namespace === namespace && req[0].command === command,
+    ).length;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    (SonosConnection as unknown as ReturnType<typeof vi.fn>).mockClear();
+    household = new SonosHousehold({ host: '192.168.68.96', autoConnect: false });
+    mockConn = getMockConnection();
+    mockConn._listeners.clear();
+    mockConn.on.mockImplementation((event: string, handler: Function) => {
+      if (!mockConn._listeners.has(event)) mockConn._listeners.set(event, []);
+      mockConn._listeners.get(event)!.push(handler);
+      return mockConn;
+    });
+    mockConn.send.mockImplementation((request: any) => {
+      const [headers] = request;
+      if (headers.namespace === 'groups:1' && headers.command === 'getGroups') {
+        return Promise.resolve([{ householdId: 'HH_1', success: true }, mockTopology]);
+      }
+      return Promise.resolve([{ success: true }, {}]);
+    });
+    await household.connect();
+  });
+
+  it('subscribes every player to groupVolume, playback and homeTheater', () => {
+    // Three players in the mock topology. Without these, an external volume
+    // change is indistinguishable from a group change, and a TV input switch
+    // is invisible.
+    expect(sent('groupVolume:1', 'subscribe')).toBe(3);
+    expect(sent('playback:1', 'subscribe')).toBe(3);
+    expect(sent('homeTheater:1', 'subscribe')).toBe(3);
+  });
+
+  it('re-subscribes them after a reconnect', async () => {
+    const onConnected = mockConn._listeners.get('connected')![0];
+    await onConnected();
+    expect(sent('groupVolume:1', 'subscribe')).toBe(6);
+    expect(sent('playback:1', 'subscribe')).toBe(6);
+    expect(sent('homeTheater:1', 'subscribe')).toBe(6);
+  });
+
+  it('a failing subscription does not stop the household connecting', async () => {
+    expect(household.players.size).toBe(3);
+  });
+});

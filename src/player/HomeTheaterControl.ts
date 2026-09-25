@@ -7,6 +7,12 @@ export class HomeTheaterControl {
   private readonly ns: HomeTheaterNamespace;
   constructor(context: NamespaceContext) { this.ns = new HomeTheaterNamespace(context); }
 
+  /** Subscribes to home theater events (input/source and HT state changes). */
+  async subscribe(): Promise<void> { await this.ns.subscribe(); }
+
+  /** Unsubscribes from home theater events. */
+  async unsubscribe(): Promise<void> { await this.ns.unsubscribe(); }
+
   /** Gets the current home theater settings. */
   async get(): Promise<HomeTheaterOptions> { return this.ns.getOptions(); }
 

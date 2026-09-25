@@ -300,6 +300,30 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
    * those this library performs. Best effort: a failure leaves the older
    * refresh triggers (reconnect, coordinator change, grouping calls) intact.
    */
+  /**
+   * Subscribes every player to the events that say what an external
+   * controller did: group volume (a group set is otherwise indistinguishable
+   * from a player set), playback, and home theater (a TV input switch).
+   * Best effort per player and per namespace — diagnostics must never stop a
+   * household connecting.
+   */
+  private async subscribeDiagnostics(): Promise<void> {
+    for (const handle of this._players.values()) {
+      const subscriptions: [string, () => Promise<void>][] = [
+        ['groupVolume', () => handle.volume.group.subscribe()],
+        ['playback', () => handle.playback.subscribe()],
+        ['homeTheater', () => handle.homeTheater.subscribe()],
+      ];
+      for (const [name, subscribe] of subscriptions) {
+        try {
+          await subscribe();
+        } catch (err) {
+          this.log.warn(`Failed to subscribe ${handle.name} to ${name} events`, err);
+        }
+      }
+    }
+  }
+
   private async subscribeToTopology(): Promise<void> {
     try {
       await this.householdGroups.subscribe();
@@ -557,6 +581,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
         if (this.autoConnectSpeakers) {
           await this.connectAllSpeakers();
         }
+        await this.subscribeDiagnostics();
         this._initialConnectDone = true;
       } catch (err) {
         this.log.warn('Failed initial setup on connect', err);
@@ -580,6 +605,8 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       for (const handle of this._players.values()) {
         try { await handle.volume.subscribe(); } catch { /* best effort */ }
       }
+
+      await this.subscribeDiagnostics();
     }
     this.emit('connected');
   }

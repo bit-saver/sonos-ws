@@ -78,6 +78,27 @@ export interface ConnectionOptions {
  */
 const DEFAULT_CONNECT_TIMEOUT = 10_000;
 
+/**
+ * One-line form of an event body for the log.
+ *
+ * An external controller — the Sonos app, a Spotify Connect client — can move
+ * a player with no command from us, and the event is the only record. Logging
+ * the namespace alone says that something happened and discards what: the
+ * value, and the `muted`/`fixed` flags that say how. Truncated because a
+ * topology or metadata event runs to kilobytes.
+ */
+function summarize(body: unknown): string {
+  try {
+    const json = JSON.stringify(body) ?? String(body);
+    return json.length > EVENT_BODY_LOG_LIMIT ? `${json.slice(0, EVENT_BODY_LOG_LIMIT)}…` : json;
+  } catch {
+    return '[unserializable]';
+  }
+}
+
+/** Characters of an event body kept in the log. */
+const EVENT_BODY_LOG_LIMIT = 300;
+
 const SUB_PROTOCOL = 'v1.api.smartspeaker.audio';
 const API_KEY = '123e4567-e89b-12d3-a456-426655440000';
 
@@ -369,7 +390,7 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
       return;
     }
 
-    const [headers] = parsed;
+    const [headers, body] = parsed;
     const cmdId = headers?.cmdId;
 
     if (cmdId && this.correlator.resolve(cmdId, parsed)) {
@@ -377,7 +398,9 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
       return;
     }
 
-    this.log.debug(`Event: ${headers?.namespace}.${headers?.type ?? headers?.command}`);
+    this.log.debug(
+      `Event: ${headers?.namespace}.${headers?.type ?? headers?.command} ${summarize(body)}`,
+    );
     this.emit('message', parsed);
   }
 
