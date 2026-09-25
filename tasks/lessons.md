@@ -43,3 +43,11 @@ Deploying to Neurotto, `bun update sonos-ws` reported success and installed the 
 The diagnosis was not the failure. The step after it was: "make the tool re-resolve" asks a tool to decide scope for you, and it is entitled to decide the scope is everything.
 
 **How to apply:** once you know *why* something no-ops, list the remedies and prefer the one that changes only the thing you diagnosed; reject any that hands scope back to the tool ("re-resolve", "regenerate", `--force`) unless the narrow one has failed. Before touching state another session owns — a lockfile, a `node_modules`, a config — snapshot it and name the exact command that restores it. The working deploy recipe lives in memory: `feedback_deploy_sonos_ws_to_neurotto`.
+
+## 2026-09-25 — A guard that only prints is not a guard
+
+Republishing a vault note, I checked whether the destination still matched my own last reflow before force-overwriting it. The scratchpad holding the comparison baseline had been wiped between sessions, so the check could not run — and it printed `VAULT DIFFERS — stop and ask` while the very next line in the same script force-published anyway. The message was an `echo`, not a `guard`. I overwrote a user-facing note with no idea whether it held hand edits.
+
+Two compounding causes: the verification depended on state in a scratch directory that does not survive a session, and the "stop" was a string rather than control flow.
+
+**How to apply:** when a script checks something before a destructive step, make the failure branch *exit* — `cmp -s a b || { echo …; exit 1; }` — never a bare echo followed by the step. And never let a safety check depend on a file in the session scratchpad: if a verification matters enough to write, its inputs and its tooling belong somewhere durable (`~/.local/bin/vault-reflow` now carries the vault reflow step and documents why the next publish always reports a conflict).
