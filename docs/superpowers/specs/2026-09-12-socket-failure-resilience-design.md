@@ -136,7 +136,7 @@ passed vacuously. This is the load-bearing part of the test setup.
   path. Still unhandled; carried over from
   `2026-08-19-terminate-recovery-design.md:73`.
 - Retrying in-flight commands after reconnection. Unchanged.
-- Neurotto's crash-loop hold behaviour, and whether it should self-heal.
+- Neurotto's crash-loop hold behavior, and whether it should self-heal.
   Consumer-side, and Tyler's call.
 ## Consumer follow-up (settled 2026-09-12)
 
@@ -176,7 +176,7 @@ working end to end, so the state is alarmed rather than silent.
 ## Addendum 2026-09-18 — handshake timeout (`7822ad9`, dist `2e098aa`)
 
 Neurotto reported three symptoms six days after the above shipped. Six days
-of rotated detail logs (09/13–09/18) were analysed programmatically.
+of rotated detail logs (09/13–09/18) were analyzed programmatically.
 
 ### 3. A handshake that never ends (fixed)
 
