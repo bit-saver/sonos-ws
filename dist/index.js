@@ -287,6 +287,15 @@ var CommandError = class extends SonosError {
 
 // src/client/SonosConnection.ts
 var DEFAULT_CONNECT_TIMEOUT = 1e4;
+function summarize(body) {
+  try {
+    const json = JSON.stringify(body) ?? String(body);
+    return json.length > EVENT_BODY_LOG_LIMIT ? `${json.slice(0, EVENT_BODY_LOG_LIMIT)}\u2026` : json;
+  } catch {
+    return "[unserializable]";
+  }
+}
+var EVENT_BODY_LOG_LIMIT = 300;
 var SUB_PROTOCOL = "v1.api.smartspeaker.audio";
 var API_KEY = "123e4567-e89b-12d3-a456-426655440000";
 var SonosConnection = class extends TypedEventEmitter {
@@ -498,13 +507,15 @@ var SonosConnection = class extends TypedEventEmitter {
       this.log.warn("Unexpected message format", data.toString().substring(0, 200));
       return;
     }
-    const [headers] = parsed;
+    const [headers, body] = parsed;
     const cmdId = headers?.cmdId;
     if (cmdId && this.correlator.resolve(cmdId, parsed)) {
       this.log.debug(`Response for ${headers.namespace}.${headers.command ?? headers.response} [${cmdId}]`);
       return;
     }
-    this.log.debug(`Event: ${headers?.namespace}.${headers?.type ?? headers?.command}`);
+    this.log.debug(
+      `Event: ${headers?.namespace}.${headers?.type ?? headers?.command} ${summarize(body)}`
+    );
     this.emit("message", parsed);
   }
   /**
@@ -1322,6 +1333,14 @@ var HomeTheaterControl = class {
   constructor(context) {
     this.ns = new HomeTheaterNamespace(context);
   }
+  /** Subscribes to home theater events (input/source and HT state changes). */
+  async subscribe() {
+    await this.ns.subscribe();
+  }
+  /** Unsubscribes from home theater events. */
+  async unsubscribe() {
+    await this.ns.unsubscribe();
+  }
   /** Gets the current home theater settings. */
   async get() {
     return this.ns.getOptions();
@@ -1969,6 +1988,29 @@ var SonosHousehold = class extends TypedEventEmitter {
    * those this library performs. Best effort: a failure leaves the older
    * refresh triggers (reconnect, coordinator change, grouping calls) intact.
    */
+  /**
+   * Subscribes every player to the events that say what an external
+   * controller did: group volume (a group set is otherwise indistinguishable
+   * from a player set), playback, and home theater (a TV input switch).
+   * Best effort per player and per namespace — diagnostics must never stop a
+   * household connecting.
+   */
+  async subscribeDiagnostics() {
+    for (const handle of this._players.values()) {
+      const subscriptions = [
+        ["groupVolume", () => handle.volume.group.subscribe()],
+        ["playback", () => handle.playback.subscribe()],
+        ["homeTheater", () => handle.homeTheater.subscribe()]
+      ];
+      for (const [name, subscribe] of subscriptions) {
+        try {
+          await subscribe();
+        } catch (err) {
+          this.log.warn(`Failed to subscribe ${handle.name} to ${name} events`, err);
+        }
+      }
+    }
+  }
   async subscribeToTopology() {
     try {
       await this.householdGroups.subscribe();
@@ -2168,6 +2210,7 @@ var SonosHousehold = class extends TypedEventEmitter {
         if (this.autoConnectSpeakers) {
           await this.connectAllSpeakers();
         }
+        await this.subscribeDiagnostics();
         this._initialConnectDone = true;
       } catch (err) {
         this.log.warn("Failed initial setup on connect", err);
@@ -2186,6 +2229,7 @@ var SonosHousehold = class extends TypedEventEmitter {
         } catch {
         }
       }
+      await this.subscribeDiagnostics();
     }
     this.emit("connected");
   }

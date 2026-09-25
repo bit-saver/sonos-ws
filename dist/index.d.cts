@@ -1043,6 +1043,10 @@ declare class AudioClipControl {
 declare class HomeTheaterControl {
     private readonly ns;
     constructor(context: NamespaceContext);
+    /** Subscribes to home theater events (input/source and HT state changes). */
+    subscribe(): Promise<void>;
+    /** Unsubscribes from home theater events. */
+    unsubscribe(): Promise<void>;
     /** Gets the current home theater settings. */
     get(): Promise<HomeTheaterOptions>;
     /**
@@ -1238,6 +1242,14 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
      * those this library performs. Best effort: a failure leaves the older
      * refresh triggers (reconnect, coordinator change, grouping calls) intact.
      */
+    /**
+     * Subscribes every player to the events that say what an external
+     * controller did: group volume (a group set is otherwise indistinguishable
+     * from a player set), playback, and home theater (a TV input switch).
+     * Best effort per player and per namespace — diagnostics must never stop a
+     * household connecting.
+     */
+    private subscribeDiagnostics;
     private subscribeToTopology;
     /**
      * Groups the specified players. The first player in the array becomes the coordinator.
