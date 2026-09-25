@@ -228,7 +228,7 @@ Neurotto's event traffic (the user chose the subscription): subscribe to `groups
 mutation until every known player is in a group (quieter, misses external
 changes).
 
-### Ignored setVolume (unexplained, n=1)
+### Ignored setVolume (resolved 2026-09-25 — external Spotify controller)
 
 09/18 06:24:08–13: five consecutive `playerVolume:1.setVolume` calls on the
 Arc resolved successfully and changed nothing — no `playerVolume` event, and
@@ -245,10 +245,27 @@ reproduces it: a set at 06:25:04 applied while topology was still stale,
 and the user confirms toggle-then-volume normally works. Sets were working
 again by 06:25:04 without intervention.
 
-Working hypothesis: a group-scoped command sent with a dead groupId briefly
-leaves the Arc ignoring volume. Unproven. Fixing stale topology removes the
-only precondition it has been seen under; if it recurs after that, it is
-something else and needs a deliberate reproduction.
+**RESOLVED 2026-09-25 — an external Spotify Connect controller, not this
+library.** On 2026-09-25 06:46 the Arc jumped 4 → 100 in one step with no
+command from Neurotto, while the House of Auto session was watching from the
+Home Assistant side. It traced to the Spotify TV app on the Google TV
+Streamer taking over the Arc's existing Spotify Connect session and asserting
+its own volume. HDMI/CEC was ruled out with evidence: the Streamer's CEC log
+shows only One Touch Play and System Audio Mode Request, no `Set Audio Volume
+Level`, and its own CEC volume control is off.
+
+The 09-18 episode has the same shape and the same setup — a Streamer wake
+with the Arc on Spotify Connect, moving to the TV input 16s later. So the sets
+were not ignored at all: they applied, and a second controller immediately set
+the volume back. The earlier working hypothesis on this page (a group-scoped
+command with a dead groupId) is superseded and was wrong.
+
+Nothing to fix in this library: the API has no way to reject or even observe a
+second controller, and `playerVolume` events carry state with no origin. Two
+optional instruments would make a recurrence self-evident in one log rather
+than needing Home Assistant cross-referencing: log the event body (value,
+muted, fixed) instead of only namespace and type, and subscribe to
+`homeTheater:1` / `playback:1` to catch the input switch.
 
 ### Reviewer findings deferred to a planned follow-up (first three fixed — see the evening addendum below)
 
