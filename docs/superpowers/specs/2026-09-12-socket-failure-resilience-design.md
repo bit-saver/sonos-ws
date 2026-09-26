@@ -294,9 +294,10 @@ change rather than bolted onto this one.
   today — `ConnectionOptions` is not exported and nothing forwards the
   option — so validate it when it becomes public.
 - **`send()` throws immediately in `'connecting'`** rather than waiting as it
-  does in `'reconnecting'`. Whether a volume press should wait out a
-  reconnect or fail fast is a UX question — a delayed burst of presses
-  landing at once is its own bug — so it needs a decision, not a patch.
+  does in `'reconnecting'`. *Resolved in
+  `2026-09-25-routing-and-subscription-upkeep-design.md`:* every ladder
+  attempt passes through `'connecting'`, so this was a bug, not a UX choice;
+  `send()` now waits for the in-flight attempt, bounded by `connectTimeout`.
 
 ## Addendum 2026-09-18 (evening) — lifecycle and topology freshness
 
