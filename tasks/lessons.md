@@ -51,3 +51,15 @@ Republishing a vault note, I checked whether the destination still matched my ow
 Two compounding causes: the verification depended on state in a scratch directory that does not survive a session, and the "stop" was a string rather than control flow.
 
 **How to apply:** when a script checks something before a destructive step, make the failure branch *exit* — `cmp -s a b || { echo …; exit 1; }` — never a bare echo followed by the step. And never let a safety check depend on a file in the session scratchpad: if a verification matters enough to write, its inputs and its tooling belong somewhere durable (`~/.local/bin/vault-reflow` now carries the vault reflow step and documents why the next publish always reports a conflict).
+
+## 2026-09-26 — A shared "settle the waiting caller" slot races; give each caller its own work
+
+The plan settled `connect()` through one deferred on the instance, resolved or rejected by whichever setup run finished. Review found a new race in every round: an overlapping caller that never settled, a stale reconnect run rejecting a newer caller, `connect()` after `disconnect()` handed the old doomed attempt, a run that straddled a drop marking a new socket set up. Each patch (a shared in-flight promise, a first-connect capture, a run counter) fixed its case and opened the next. What ended it was an ownership model: `connect()` queues and awaits the setup for the handshake it owns, the event listener sets up only handshakes nobody awaits, and an epoch per socket says whether setup is done *for this socket*. No caller state is shared, so there is nothing to race.
+
+**How to apply:** when concurrent callers must each learn the outcome of shared async work, do not route that outcome through a mutable slot. Let each caller await a promise it created itself. When a second patch to the same settling logic is needed, stop patching and redesign; the third round was the signal I acted on, and it was one round late.
+
+## 2026-09-26 — Probe the live system before designing the fix
+
+Four of this session's bugs were invisible to reading the code: that playback through a grouped non-coordinator fails, that a player leaving a group gets a new group ID, that duplicate subscribes are idempotent, that a `getVolume` right after `setRelativeVolume` is stale. Each was settled by a throwaway probe against idle speakers (grouping and volumes restored afterwards), and two of them decided the design outright: idempotent subscribes made "re-send everything" safe, and the stale read kept the event-wait. A design argued from the code alone would have chosen a subscription registry and a read-after-set.
+
+**How to apply:** when a fix depends on how the device behaves, write the smallest read-only probe first, then the design. Check the speakers are idle before any probe that regroups or changes volume, and restore state in a `finally`.

@@ -1,7 +1,7 @@
 # Command Routing, Subscription Upkeep and SonosClient — Design
 
 **Date:** 2026-09-25
-**Status:** COMPLETE — merged to main; deploy recorded below.
+**Status:** COMPLETE — merged to main at `a688ba7` (last source commit `d6b11f9`, dist rebuild `6fd41a9`); deployed to Neurotto 2026-09-26 10:49 CDT, pin `a688ba7` in `package.json` and `bun.lock` (Neurotto commit `f61e1bd`). Live-verified through the built library: a grouped non-coordinator's playback, metadata and group volume answer; events arrive tagged with their group or player; `SonosClient` runs end to end. The live regroup check was skipped because music was playing on all three speakers; unit tests cover it.
 **Branch:** `routing-and-subscription-upkeep`
 
 ## Problem

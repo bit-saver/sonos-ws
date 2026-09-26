@@ -7,7 +7,7 @@ Its one production consumer is **Neurotto** (`~/workspace/neurotto`), a home-aut
 ## Current state
 
 - Branch `main` after merge, clean, level with `origin` (`git@github.com:bit-saver/sonos-ws.git`).
-- Last code commit and deploy: see the routing spec's Status line.
+- Last source commit `d6b11f9`; `6fd41a9` is its `dist` rebuild. Deployed to Neurotto 2026-09-26 10:49 CDT, pin `a688ba7`.
 - 150 tests (`npx vitest run`), `npx tsc --noEmit` clean.
 
 ## Layout
