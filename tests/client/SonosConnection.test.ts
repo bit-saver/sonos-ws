@@ -262,6 +262,67 @@ describe('SonosConnection send-during-reconnect', () => {
 
     await sendPromise;
   });
+
+  it('waits for a ladder attempt that is still handshaking instead of throwing', async () => {
+    const conn = new SonosConnection(makeOptions());
+    const connecting = conn.connect();
+    getLastMockWs()._emit('open');
+    await connecting;
+
+    getLastMockWs()._emit('close', 1006, Buffer.from(''));
+    expect(conn.state).toBe('reconnecting');
+    await vi.advanceTimersByTimeAsync(100); // the ladder's first attempt starts
+
+    const ws2 = getLastMockWs();
+    ws2.readyState = 0; // CONNECTING: the handshake has not finished
+    expect(conn.state).toBe('connecting');
+
+    let settled = false;
+    const sending = conn.send([{ cmdId: 'c1', namespace: 'test:1', command: 'test' }, {}]);
+    sending.then(() => { settled = true; }, () => { settled = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(false);
+
+    ws2.readyState = 1;
+    ws2._emit('open');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(ws2.send).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(ws2.send.mock.calls[0][0])[0].cmdId).toBe('c1');
+  });
+
+  it('waits for the first connect too', async () => {
+    const conn = new SonosConnection(makeOptions());
+    const connecting = conn.connect();
+    const ws = getLastMockWs();
+    ws.readyState = 0;
+
+    const sending = conn.send([{ cmdId: 'c2', namespace: 'test:1', command: 'test' }, {}]);
+    sending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ws.send).not.toHaveBeenCalled();
+
+    ws.readyState = 1;
+    ws._emit('open');
+    await connecting;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(ws.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('still fails fast once a lone attempt fails with reconnect disabled', async () => {
+    const conn = new SonosConnection(makeOptions({ enabled: false }));
+    conn.on('error', () => {});
+    const connecting = conn.connect();
+    connecting.catch(() => {});
+    const ws = getLastMockWs();
+    ws.readyState = 0;
+
+    const sending = conn.send([{ cmdId: 'c3', namespace: 'test:1', command: 'test' }, {}]);
+    ws._emit('error', new Error('refused'));
+
+    await expect(sending).rejects.toThrow('Not connected');
+  });
 });
 
 describe('SonosConnection safety-net error listener', () => {
@@ -662,6 +723,29 @@ describe('event logging', () => {
       .find((l: string) => l.startsWith('Event: groups:1.groups'));
     expect(line).toBeDefined();
     expect(line!.length).toBeLessThan(400);
+  });
+
+  it("names the socket's host on event and send lines", async () => {
+    // A household holds a socket per speaker. Without the host, an event line
+    // cannot say which speaker reported it, and a send line cannot say which
+    // socket a command went through — the question every routing bug asks.
+    const options = makeOptions({ pingInterval: 0 });
+    const conn = new SonosConnection(options);
+    conn.on('error', () => {});
+    const pending = conn.connect();
+    const ws = getLastMockWs();
+    ws._emit('open');
+    await pending;
+
+    ws._emit('message', JSON.stringify([
+      { namespace: 'playerVolume:1', type: 'playerVolume' },
+      { _objectType: 'playerVolume', volume: 12, muted: false, fixed: false },
+    ]));
+    conn.send([{ cmdId: 'c4', namespace: 'test:1', command: 'test' }, {}]).catch(() => {});
+
+    const logged = options.logger.debug.mock.calls.map((c: any[]) => String(c[0]));
+    expect(logged).toContain('Sending test:1.test @192.168.68.96 [c4]');
+    expect(logged.some((l: string) => l.startsWith('Event: playerVolume:1.playerVolume @192.168.68.96 {'))).toBe(true);
   });
 });
 

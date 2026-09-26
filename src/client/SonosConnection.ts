@@ -341,6 +341,18 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
    * @throws {TimeoutError} If no response is received within the configured timeout.
    */
   async send(request: SonosRequest): Promise<SonosResponse> {
+    // Every ladder attempt passes through 'connecting' on its way back, so a
+    // command that lands in an attempt's handshake would fail where one sent
+    // a moment earlier, in 'reconnecting', waits. Wait for the attempt to
+    // settle instead. connect() always settles — connectTimeout bounds even a
+    // handshake that emits nothing — so this wait is bounded too.
+    if (this._state === 'connecting' && this.connectPromise) {
+      await this.connectPromise.catch(() => {
+        // Judged by the state checks below: a failed attempt leaves either
+        // 'reconnecting' (wait for the ladder) or 'disconnected' (throw).
+      });
+    }
+
     if (this._state === 'reconnecting') {
       await this.waitForReconnect();
     }
@@ -358,7 +370,7 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
 
     const promise = this.correlator.register(cmdId, namespace, command);
 
-    this.log.debug(`Sending ${namespace}.${command} [${cmdId}]`);
+    this.log.debug(`Sending ${namespace}.${command} @${this.options.host} [${cmdId}]`);
     this.ws.send(JSON.stringify(request));
 
     const response = await promise;
@@ -399,7 +411,7 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
     }
 
     this.log.debug(
-      `Event: ${headers?.namespace}.${headers?.type ?? headers?.command} ${summarize(body)}`,
+      `Event: ${headers?.namespace}.${headers?.type ?? headers?.command} @${this.options.host} ${summarize(body)}`,
     );
     this.emit('message', parsed);
   }
