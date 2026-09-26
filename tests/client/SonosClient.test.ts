@@ -18,11 +18,23 @@ vi.mock('../../src/client/SonosConnection.js', () => ({
       once: vi.fn().mockReturnThis(),
       removeAllListeners: vi.fn().mockReturnThis(),
       emit: vi.fn(),
-      connect: vi.fn(async () => {
-        inst.state = 'connected';
-        for (const h of listeners.get('connected') ?? []) h();
+      // Mirrors the real SonosConnection: already-connected returns at once with no
+      // 'connected' event, and an in-flight handshake is shared by concurrent callers.
+      connect: vi.fn(() => {
+        if (inst.state === 'connected') return Promise.resolve();
+        if (!inst._connecting) {
+          inst._connecting = (async () => {
+            for (const h of listeners.get('connected') ?? []) await h();
+            inst.state = 'connected';
+            inst._connecting = undefined;
+          })();
+        }
+        return inst._connecting;
       }),
-      disconnect: vi.fn(async () => { inst.state = 'disconnected'; }),
+      disconnect: vi.fn(async () => {
+        inst.state = 'disconnected';
+        inst._connecting = undefined;
+      }),
       send: vi.fn(),
       _listeners: listeners,
     };
@@ -142,5 +154,46 @@ describe('SonosClient against a speaker', () => {
     ]);
 
     expect(heard[0]?.[1]).toEqual({ playerId: 'RINCON_OFFICE' });
+  });
+
+  it('overlapping connect() calls set up once and emit connected once', async () => {
+    const { client, conn } = newClient();
+    const connected = vi.fn();
+    client.on('connected', connected);
+
+    await Promise.all([client.connect(), client.connect()]);
+
+    const scopedGetGroups = conn.send.mock.calls.filter(
+      ([r]: any) => r[0].namespace === 'groups:1' && r[0].command === 'getGroups' && r[0].householdId,
+    ).length;
+    expect(scopedGetGroups).toBe(1);
+    expect(connected).toHaveBeenCalledTimes(1);
+  });
+
+  it('connect() on a connected, set-up client does nothing', async () => {
+    const { client, conn } = newClient();
+    await client.connect();
+    const connected = vi.fn();
+    client.on('connected', connected);
+    const sendsBefore = conn.send.mock.calls.length;
+
+    await client.connect();
+
+    expect(conn.send.mock.calls.length).toBe(sendsBefore);
+    expect(conn.connect).toHaveBeenCalledTimes(1);
+    expect(connected).not.toHaveBeenCalled();
+  });
+
+  it('reconnect does not re-probe the household ID', async () => {
+    const { client, conn } = newClient();
+    await client.connect();
+    const unscopedGetGroups = () => conn.send.mock.calls.filter(
+      ([r]: any) => r[0].namespace === 'groups:1' && r[0].command === 'getGroups' && !r[0].householdId,
+    ).length;
+    const before = unscopedGetGroups();
+
+    await conn._listeners.get('connected')[0]();
+
+    expect(unscopedGetGroups()).toBe(before);
   });
 });

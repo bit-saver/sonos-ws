@@ -60,6 +60,15 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
   private setupChain: Promise<void> = Promise.resolve();
   /** Handshakes a connect() call is awaiting: their setup is that call's to run, not the 'connected' listener's. */
   private ownedHandshakes = 0;
+  /** Counts 'connected' events, so a completed setup can be matched to the socket it ran on. */
+  private connectedEpoch = 0;
+  /** The connectedEpoch the last completed setup started under. */
+  private setupEpoch = -1;
+
+  /** Set up on the socket that is up now, not merely set up once. */
+  private get setUpOnCurrentSocket(): boolean {
+    return this._handle !== undefined && this.setupEpoch === this.connectedEpoch;
+  }
 
   constructor(options: SonosClientOptions) {
     super();
@@ -110,13 +119,15 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
    * player controls are usable; rejects if the connection or the lookup fails.
    */
   async connect(): Promise<void> {
+    if (this.setUpOnCurrentSocket && this.connection.state === 'connected') return;
     this.ownedHandshakes++;
     try {
       await this.connection.connect();
     } finally {
       this.ownedHandshakes--;
     }
-    await this.enqueue(() => this.setUp());
+    // Overlapping calls each queue this; the first to run sets up, the rest find it done.
+    await this.enqueue(() => (this.setUpOnCurrentSocket ? Promise.resolve() : this.setUp()));
   }
 
   async disconnect(): Promise<void> {
@@ -132,6 +143,7 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
 
   /** Sets up after a handshake no connect() call awaits: the reconnect ladder's. Returns the run so tests can await it. */
   private onConnected(): Promise<void> {
+    this.connectedEpoch++;
     if (this.ownedHandshakes > 0) return Promise.resolve();
     // setUp() logs its own failure, and a background run has no caller to tell.
     return this.enqueue(() => this.setUp()).catch(() => {});
@@ -139,12 +151,15 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
 
   /** Finds this speaker, then emits `connected`. Logs and rethrows a failure. */
   private async setUp(): Promise<void> {
+    const epoch = this.connectedEpoch;
     try {
       await this.locatePlayer();
     } catch (err) {
       this.log.warn('Setup after connect failed', err);
       throw err;
     }
+    // Only a run that completed locatePlayer() above records the socket it set up.
+    this.setupEpoch = epoch;
     this.emit('connected');
   }
 
@@ -153,7 +168,7 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
    * restores its subscriptions, which died with the old socket.
    */
   private async locatePlayer(): Promise<void> {
-    const householdId = await discoverHouseholdId(this.connection);
+    const householdId = this._householdId ?? (await discoverHouseholdId(this.connection));
     if (!householdId) {
       throw new SonosError(ErrorCode.CONNECTION_FAILED, `Could not read the household ID from ${this.host}`);
     }
