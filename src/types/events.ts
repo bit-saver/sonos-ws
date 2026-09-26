@@ -8,6 +8,15 @@ import type { HomeTheaterOptions } from './homeTheater.js';
 import type { SonosResponse } from './messages.js';
 import type { SonosError } from '../errors/SonosError.js';
 
+/**
+ * What an event is about, from its headers: player-level namespaces name the player, group-level ones the group.
+ * Sonos never says who caused a change.
+ */
+export interface EventSource {
+  playerId?: string;
+  groupId?: string;
+}
+
 /** Event data emitted when a group's coordinator changes (speakers grouped or ungrouped). */
 export interface GroupCoordinatorChangedEvent {
   _objectType: 'groupCoordinatorChanged';
@@ -37,32 +46,60 @@ export interface SonosEvents {
   /** Emitted on connection or command errors. */
   error: (error: SonosError | Error) => void;
 
-  /** Emitted when the group volume or mute state changes. */
-  volumeChanged: (data: GroupVolumeStatus) => void;
-  /** Emitted when an individual player's volume or mute state changes. */
-  playerVolumeChanged: (data: PlayerVolumeStatus) => void;
-  /** Emitted when group membership or topology changes (players grouped/ungrouped). */
-  groupsChanged: (data: GroupsResponse) => void;
-  /** Emitted when the playback state, position, or play modes change. */
-  playbackChanged: (data: PlaybackStatus) => void;
-  /** Emitted when the currently playing track or next track metadata changes. */
-  metadataChanged: (data: MetadataStatus) => void;
-  /** Emitted when the user's favorites list is modified. */
-  favoritesChanged: (data: FavoritesResponse) => void;
-  /** Emitted when the user's playlists are modified. */
-  playlistsChanged: (data: PlaylistsResponse) => void;
-  /** Emitted when home theater settings (night mode, dialog enhancement) change. */
-  homeTheaterChanged: (data: HomeTheaterOptions) => void;
+  /**
+   * Emitted when the group volume or mute state changes.
+   * @param source - The player or group the event is about.
+   */
+  volumeChanged: (data: GroupVolumeStatus, source: EventSource) => void;
+  /**
+   * Emitted when an individual player's volume or mute state changes.
+   * @param source - The player or group the event is about.
+   */
+  playerVolumeChanged: (data: PlayerVolumeStatus, source: EventSource) => void;
+  /**
+   * Emitted when group membership or topology changes (players grouped/ungrouped).
+   * @param source - The player or group the event is about.
+   */
+  groupsChanged: (data: GroupsResponse, source: EventSource) => void;
+  /**
+   * Emitted when the playback state, position, or play modes change.
+   * @param source - The player or group the event is about.
+   */
+  playbackChanged: (data: PlaybackStatus, source: EventSource) => void;
+  /**
+   * Emitted when the currently playing track or next track metadata changes.
+   * @param source - The player or group the event is about.
+   */
+  metadataChanged: (data: MetadataStatus, source: EventSource) => void;
+  /**
+   * Emitted when the user's favorites list is modified.
+   * @param source - The player or group the event is about.
+   */
+  favoritesChanged: (data: FavoritesResponse, source: EventSource) => void;
+  /**
+   * Emitted when the user's playlists are modified.
+   * @param source - The player or group the event is about.
+   */
+  playlistsChanged: (data: PlaylistsResponse, source: EventSource) => void;
+  /**
+   * Emitted when home theater settings (night mode, dialog enhancement) change.
+   * @param source - The player or group the event is about.
+   */
+  homeTheaterChanged: (data: HomeTheaterOptions, source: EventSource) => void;
 
   /**
    * Emitted when the group coordinator changes (e.g. speakers grouped/ungrouped).
    * The client automatically calls {@link SonosClient.refreshGroups} to update
    * its internal groupId. Listen to this event to react to topology changes.
+   * @param source - The player or group the event is about.
    */
-  coordinatorChanged: (data: GroupCoordinatorChangedEvent) => void;
+  coordinatorChanged: (data: GroupCoordinatorChangedEvent, source: EventSource) => void;
 
-  /** Emitted for every raw WebSocket message received from the Sonos device. Useful for debugging. */
-  rawMessage: (message: SonosResponse) => void;
+  /**
+   * Emitted for every raw WebSocket message received from the Sonos device. Useful for debugging.
+   * @param source - The player or group the event is about.
+   */
+  rawMessage: (message: SonosResponse, source: EventSource) => void;
 }
 
 /**

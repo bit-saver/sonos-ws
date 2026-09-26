@@ -5,6 +5,7 @@ import { TypedEventEmitter } from '../util/TypedEventEmitter.js';
 import type { SonosEvents } from '../types/events.js';
 import { NAMESPACE_EVENT_MAP } from '../types/events.js';
 import type { GroupCoordinatorChangedEvent } from '../types/events.js';
+import { sourceOf } from '../util/eventSource.js';
 import type { SonosRequest, SonosResponse } from '../types/messages.js';
 import type { GroupsResponse } from '../types/groups.js';
 import type { Logger } from '../util/logger.js';
@@ -139,8 +140,9 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
   }
 
   private handleMessage(message: SonosResponse): void {
-    this.emit('rawMessage', message);
     const [headers, body] = message;
+    const source = sourceOf(headers);
+    this.emit('rawMessage', message, source);
     const namespace = headers?.namespace;
     if (!namespace) return;
 
@@ -151,7 +153,7 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
     const objectType = body?._objectType as string | undefined;
 
     if (objectType === 'groupCoordinatorChanged') {
-      this.emit('coordinatorChanged', body as unknown as GroupCoordinatorChangedEvent);
+      this.emit('coordinatorChanged', body as unknown as GroupCoordinatorChangedEvent, source);
       this.discoverAndCreateHandle().catch((err) =>
         this.log.warn('Failed to refresh after coordinator change', err));
       return;
@@ -161,7 +163,7 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
 
     const eventName = NAMESPACE_EVENT_MAP[namespace];
     if (eventName) {
-      (this.emit as any)(eventName, body);
+      (this.emit as any)(eventName, body, source);
     }
   }
 }

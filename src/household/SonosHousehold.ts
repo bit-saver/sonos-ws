@@ -4,6 +4,7 @@ import type { ReconnectOptions } from '../client/SonosConnection.js';
 import { TypedEventEmitter } from '../util/TypedEventEmitter.js';
 import type { SonosHouseholdEvents, GroupCoordinatorChangedEvent } from '../types/events.js';
 import { NAMESPACE_EVENT_MAP } from '../types/events.js';
+import { sourceOf } from '../util/eventSource.js';
 import type { Group, Player, GroupsResponse, GroupOptions } from '../types/groups.js';
 import type { SonosRequest, SonosResponse } from '../types/messages.js';
 import type { Logger } from '../util/logger.js';
@@ -423,13 +424,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     }
 
     const url = new URL(player.websocketUrl);
-    const conn = existing ?? new SonosConnection({
-      host: url.hostname,
-      port: parseInt(url.port) || 1443,
-      reconnect: this.reconnectOptions,
-      requestTimeout: this.requestTimeoutMs,
-      logger: this.log,
-    });
+    const conn = existing ?? this.createSpeakerConnection(url);
 
     // Store BEFORE awaiting connect so a failure still leaves the
     // reconnect loop running in the background. The connection's own
@@ -444,6 +439,19 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       // Do not rethrow — connection is in the map with reconnect scheduled.
     }
 
+    return conn;
+  }
+
+  /** Builds and wires a speaker's connection; its events reach listeners like the primary's. */
+  private createSpeakerConnection(url: URL): SonosConnection {
+    const conn = new SonosConnection({
+      host: url.hostname,
+      port: parseInt(url.port) || 1443,
+      reconnect: this.reconnectOptions,
+      requestTimeout: this.requestTimeoutMs,
+      logger: this.log,
+    });
+    conn.on('message', (msg) => this.handleMessage(msg));
     return conn;
   }
 
@@ -483,12 +491,13 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   }
 
   /**
-   * Routes incoming unsolicited messages to typed events.
+   * Routes unsolicited messages from every socket to typed events, tagged with their source.
    * Filters by `_objectType` to avoid double-firing and Volume: undefined.
    */
   private handleMessage(message: SonosResponse): void {
-    this.emit('rawMessage', message);
     const [headers, body] = message;
+    const source = sourceOf(headers);
+    this.emit('rawMessage', message, source);
     const namespace = headers?.namespace;
     if (!namespace) return;
 
@@ -499,10 +508,10 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
 
     const objectType = body?._objectType as string | undefined;
 
-    // Coordinator changes — refresh topology, don't route as volume event
+    // A regroup reports this on several sockets at once; one debounced read covers them.
     if (objectType === 'groupCoordinatorChanged') {
-      this.emit('coordinatorChanged', body as unknown as GroupCoordinatorChangedEvent);
-      this.refreshTopology().catch((err) => this.log.warn('Failed to refresh topology', err));
+      this.emit('coordinatorChanged', body as unknown as GroupCoordinatorChangedEvent, source);
+      this.scheduleTopologyRefresh();
       return;
     }
 
@@ -517,7 +526,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     // Route to typed event
     const eventName = NAMESPACE_EVENT_MAP[namespace];
     if (eventName) {
-      (this.emit as any)(eventName, body);
+      (this.emit as any)(eventName, body, source);
     }
   }
 

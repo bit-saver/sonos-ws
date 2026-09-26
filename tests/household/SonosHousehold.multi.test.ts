@@ -118,3 +118,56 @@ describe('routing group-level commands', () => {
     ]);
   });
 });
+
+describe('events from every socket', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("delivers an event from a speaker's own socket, tagged with its group", async () => {
+    const household = await connectedHousehold(officeUnderBedroom);
+    const heard: unknown[][] = [];
+    household.on('volumeChanged', (...args) => heard.push(args));
+
+    socket(BED_IP)._emit('message', [
+      { namespace: 'groupVolume:1', type: 'groupVolume', groupId: 'G_BED' },
+      { _objectType: 'groupVolume', volume: 30, muted: false, fixed: false },
+    ]);
+
+    expect(heard).toEqual([[
+      { _objectType: 'groupVolume', volume: 30, muted: false, fixed: false },
+      { groupId: 'G_BED' },
+    ]]);
+  });
+
+  it('tags a player-level event from the primary with its player', async () => {
+    const household = await connectedHousehold(solo);
+    const heard: unknown[][] = [];
+    household.on('playerVolumeChanged', (...args) => heard.push(args));
+
+    socket(PRIMARY)._emit('message', [
+      { namespace: 'playerVolume:1', type: 'playerVolume', playerId: 'RINCON_ARC' },
+      { _objectType: 'playerVolume', volume: 12, muted: false, fixed: false },
+    ]);
+
+    expect(heard[0]?.[1]).toEqual({ playerId: 'RINCON_ARC' });
+  });
+
+  it('turns coordinator changes reported by several sockets into one topology read', async () => {
+    const household = await connectedHousehold(solo);
+    vi.useFakeTimers();
+    const reads = () => sentVia(PRIMARY, 'groups:1', 'getGroups').filter((h: any) => h.householdId).length;
+    const before = reads();
+    const changed = [
+      { namespace: 'global', type: 'groupCoordinatorChanged', groupId: 'G_OFF' },
+      { _objectType: 'groupCoordinatorChanged', groupStatus: 'GROUP_STATUS_GONE' },
+    ];
+
+    socket(OFFICE_IP)._emit('message', changed);
+    socket(BED_IP)._emit('message', changed);
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(reads()).toBe(before + 1);
+    void household;
+  });
+});
