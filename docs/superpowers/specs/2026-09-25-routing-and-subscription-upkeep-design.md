@@ -1,7 +1,7 @@
 # Command Routing, Subscription Upkeep and SonosClient — Design
 
 **Date:** 2026-09-25
-**Status:** DRAFT — awaiting approval.
+**Status:** APPROVED 2026-09-26 — implementation plan `docs/superpowers/plans/2026-09-26-routing-and-subscription-upkeep.md`.
 **Branch:** `routing-and-subscription-upkeep`
 
 ## Problem
@@ -67,7 +67,7 @@ Neurotto's diagnostic logging from `692c95d` depends on exactly these subscripti
 
 - `PlayerHandle` passes the coordinator context to `PlaybackControl` (both `playback:1` and `playbackMetadata:1`), and to `FavoritesAccess` and `PlaylistsAccess` for `load` only; their `get` calls stay on the speaker socket.
 - `PlayerHandle` gains a public `coordinatorId` getter, next to `isCoordinator`.
-- `SonosHousehold` gets one private `connectionForPlayer(playerId)`: the speaker's own connection, or the primary for the primary speaker (identified by `websocketUrl` host, as `connectToSpeaker` already does), else the primary as the fallback it is today. The coordinator resolver is `() => connectionForPlayer(handle.coordinatorId)`, set once when `refreshTopology` creates the handle. Both copies of the resolver go.
+- `SonosHousehold` gets one private `connectionForPlayer(playerId)`: the speaker's own connection, else the primary. That fallback is correct for the primary speaker, which reuses the primary connection and so has no entry of its own, and is today's best effort under `autoConnect: false`. The coordinator resolver is `() => connectionForPlayer(handle.coordinatorId)`, set once when `refreshTopology` creates the handle. Both copies of the resolver go.
 
 ### Subscription upkeep
 
