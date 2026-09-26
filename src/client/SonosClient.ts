@@ -1,16 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { SonosConnection } from './SonosConnection.js';
-import type { ReconnectOptions, ConnectionOptions } from './SonosConnection.js';
+import type { ReconnectOptions } from './SonosConnection.js';
+import { discoverHouseholdId } from './discoverHouseholdId.js';
 import { TypedEventEmitter } from '../util/TypedEventEmitter.js';
-import type { SonosEvents } from '../types/events.js';
-import { NAMESPACE_EVENT_MAP } from '../types/events.js';
-import type { GroupCoordinatorChangedEvent } from '../types/events.js';
 import { sourceOf } from '../util/eventSource.js';
-import type { SonosRequest, SonosResponse } from '../types/messages.js';
+import type { SonosEvents, GroupCoordinatorChangedEvent } from '../types/events.js';
+import { NAMESPACE_EVENT_MAP } from '../types/events.js';
+import type { SonosResponse } from '../types/messages.js';
 import type { GroupsResponse } from '../types/groups.js';
 import type { Logger } from '../util/logger.js';
 import { noopLogger } from '../util/logger.js';
-import { GroupsNamespace } from '../namespaces/GroupsNamespace.js';
+import { SonosError } from '../errors/SonosError.js';
+import { ErrorCode } from '../types/errors.js';
 import { PlayerHandle } from '../player/PlayerHandle.js';
 import type { VolumeControl } from '../player/VolumeControl.js';
 import type { PlaybackControl } from '../player/PlaybackControl.js';
@@ -21,6 +22,7 @@ import type { HomeTheaterControl } from '../player/HomeTheaterControl.js';
 import type { SettingsControl } from '../player/SettingsControl.js';
 
 export interface SonosClientOptions {
+  /** The speaker's IP address, as Sonos reports it. Host names are not matched. */
   host: string;
   port?: number;
   reconnect?: Partial<ReconnectOptions> | boolean;
@@ -36,7 +38,9 @@ const DEFAULT_RECONNECT: ReconnectOptions = {
 /**
  * Simple single-speaker API for controlling one Sonos player.
  *
- * For multi-speaker control and grouping, use {@link SonosHousehold} instead.
+ * Everything goes through this speaker's socket, so while it is grouped under another speaker, group-level commands
+ * (group volume, playback, loading a favorite or playlist) fail with `groupCoordinatorChanged`. Use
+ * {@link SonosHousehold} for grouped speakers.
  *
  * @example
  * ```typescript
@@ -49,12 +53,18 @@ const DEFAULT_RECONNECT: ReconnectOptions = {
 export class SonosClient extends TypedEventEmitter<SonosEvents> {
   private readonly connection: SonosConnection;
   private readonly log: Logger;
+  private readonly host: string;
   private _handle: PlayerHandle | undefined;
   private _householdId: string | undefined;
+  /** Setup runs, chained so each starts after the previous one settles. */
+  private setupChain: Promise<void> = Promise.resolve();
+  /** Handshakes a connect() call is awaiting: their setup is that call's to run, not the 'connected' listener's. */
+  private ownedHandshakes = 0;
 
   constructor(options: SonosClientOptions) {
     super();
     this.log = options.logger ?? noopLogger;
+    this.host = options.host;
     this.connection = new SonosConnection({
       host: options.host,
       port: options.port ?? 1443,
@@ -69,6 +79,13 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
     this.on('error', (err) => {
       this.log.error(`Unhandled client error: ${err.message}`);
     });
+
+    // Attached once: attaching in connect() stacked another copy on every call.
+    this.connection.on('connected', () => this.onConnected());
+    this.connection.on('disconnected', (r) => this.emit('disconnected', r));
+    this.connection.on('reconnecting', (a, d) => this.emit('reconnecting', a, d));
+    this.connection.on('error', (e) => this.emit('error', e));
+    this.connection.on('message', (msg) => this.handleMessage(msg));
   }
 
   get connected(): boolean { return this.connection.state === 'connected'; }
@@ -88,55 +105,82 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
     return this._handle;
   }
 
+  /**
+   * Connects and finds this speaker in its household. Resolves once the
+   * player controls are usable; rejects if the connection or the lookup fails.
+   */
   async connect(): Promise<void> {
-    this.connection.on('connected', () => this.handleConnected());
-    this.connection.on('disconnected', (r) => this.emit('disconnected', r));
-    this.connection.on('reconnecting', (a, d) => this.emit('reconnecting', a, d));
-    this.connection.on('error', (e) => this.emit('error', e));
-    this.connection.on('message', (msg) => this.handleMessage(msg));
-
-    await this.connection.connect();
-    await this.discoverAndCreateHandle();
-    this.emit('connected');
+    this.ownedHandshakes++;
+    try {
+      await this.connection.connect();
+    } finally {
+      this.ownedHandshakes--;
+    }
+    await this.enqueue(() => this.setUp());
   }
 
   async disconnect(): Promise<void> {
     await this.connection.disconnect();
   }
 
-  private async discoverAndCreateHandle(): Promise<void> {
-    // Discover householdId
-    const request: SonosRequest = [
-      { namespace: 'groups:1', command: 'getGroups', cmdId: randomUUID() },
-      {},
-    ];
-
-    try {
-      const [headers, body] = await this.connection.send(request);
-      if (headers.householdId) this._householdId = headers.householdId;
-
-      const result = body as unknown as GroupsResponse;
-      const group = result.groups?.[0];
-      const player = result.players?.find((p) => p.id === group?.coordinatorId) ?? result.players?.[0];
-
-      if (group && player) {
-        this._handle = new PlayerHandle(player, group, this._householdId ?? '', this.connection, this.connection);
-      }
-    } catch {
-      this.log.warn('Could not discover player — provide host of a specific speaker');
-    }
+  /** Runs work after any setup in flight. A failure rejects this call, never the chain. */
+  private enqueue(task: () => Promise<void>): Promise<void> {
+    const run = this.setupChain.then(task);
+    this.setupChain = run.catch(() => {});
+    return run;
   }
 
-  private async handleConnected(): Promise<void> {
-    // On reconnect, re-discover group topology
-    if (this._handle) {
-      try {
-        await this.discoverAndCreateHandle();
-      } catch (err) {
-        this.log.warn('Failed to re-discover on reconnect', err);
-      }
+  /** Sets up after a handshake no connect() call awaits: the reconnect ladder's. Returns the run so tests can await it. */
+  private onConnected(): Promise<void> {
+    if (this.ownedHandshakes > 0) return Promise.resolve();
+    // setUp() logs its own failure, and a background run has no caller to tell.
+    return this.enqueue(() => this.setUp()).catch(() => {});
+  }
+
+  /** Finds this speaker, then emits `connected`. Logs and rethrows a failure. */
+  private async setUp(): Promise<void> {
+    try {
+      await this.locatePlayer();
+    } catch (err) {
+      this.log.warn('Setup after connect failed', err);
+      throw err;
     }
     this.emit('connected');
+  }
+
+  /**
+   * Finds this speaker by host and builds its handle. On a reconnect, moves the existing handle to its current group and
+   * restores its subscriptions, which died with the old socket.
+   */
+  private async locatePlayer(): Promise<void> {
+    const householdId = await discoverHouseholdId(this.connection);
+    if (!householdId) {
+      throw new SonosError(ErrorCode.CONNECTION_FAILED, `Could not read the household ID from ${this.host}`);
+    }
+    this._householdId = householdId;
+
+    const [, body] = await this.connection.send([
+      { namespace: 'groups:1', command: 'getGroups', cmdId: randomUUID(), householdId },
+      {},
+    ]);
+    const { groups = [], players = [] } = body as unknown as Partial<GroupsResponse>;
+    const player = players.find((p) => hostOf(p.websocketUrl) === this.host);
+    const group = player && groups.find((g) => g.playerIds.includes(player.id));
+    if (!player || !group) {
+      const known = players.map((p) => `${p.name} at ${hostOf(p.websocketUrl) ?? 'no address'}`).join(', ');
+      throw new SonosError(
+        ErrorCode.PLAYER_NOT_FOUND,
+        `No player at ${this.host}. Sonos reports: ${known}. Use the speaker's IP address; host names are not matched.`,
+      );
+    }
+
+    if (this._handle?.id === player.id) {
+      this._handle.updateGroup(group);
+      await this._handle.resubscribe().catch((err: unknown) =>
+        this.log.warn('Failed to restore event subscriptions', err));
+    } else {
+      this._handle = new PlayerHandle(player, group, householdId, this.connection, this.connection);
+    }
   }
 
   private handleMessage(message: SonosResponse): void {
@@ -154,7 +198,7 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
 
     if (objectType === 'groupCoordinatorChanged') {
       this.emit('coordinatorChanged', body as unknown as GroupCoordinatorChangedEvent, source);
-      this.discoverAndCreateHandle().catch((err) =>
+      this.enqueue(() => this.locatePlayer()).catch((err: unknown) =>
         this.log.warn('Failed to refresh after coordinator change', err));
       return;
     }
@@ -165,6 +209,16 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
     if (eventName) {
       (this.emit as any)(eventName, body, source);
     }
+  }
+}
+
+/** The hostname in a player's websocketUrl, or undefined if it has none. */
+function hostOf(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return undefined;
   }
 }
 

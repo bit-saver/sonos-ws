@@ -1,12 +1,12 @@
-import { randomUUID } from 'node:crypto';
 import { SonosConnection } from '../client/SonosConnection.js';
 import type { ReconnectOptions } from '../client/SonosConnection.js';
+import { discoverHouseholdId } from '../client/discoverHouseholdId.js';
 import { TypedEventEmitter } from '../util/TypedEventEmitter.js';
 import type { SonosHouseholdEvents, GroupCoordinatorChangedEvent } from '../types/events.js';
 import { NAMESPACE_EVENT_MAP } from '../types/events.js';
 import { sourceOf } from '../util/eventSource.js';
 import type { Group, Player, GroupsResponse, GroupOptions } from '../types/groups.js';
-import type { SonosRequest, SonosResponse } from '../types/messages.js';
+import type { SonosResponse } from '../types/messages.js';
 import type { Logger } from '../util/logger.js';
 import { noopLogger } from '../util/logger.js';
 import { SonosError } from '../errors/SonosError.js';
@@ -499,20 +499,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
    */
   private async discoverHouseholdId(): Promise<void> {
     this.log.debug('Discovering householdId...');
-    try {
-      const [headers] = await this.connection.send([
-        { namespace: 'groups:1', command: 'getGroups', cmdId: randomUUID() },
-        {},
-      ]);
-      if (headers.householdId) this._householdId = headers.householdId;
-    } catch (err: unknown) {
-      // Command fails without householdId — extract it from the error response.
-      // The response is attached as the error's cause.
-      if (err instanceof Error && err.cause && Array.isArray(err.cause)) {
-        const [headers] = err.cause as SonosResponse;
-        if (headers?.householdId) this._householdId = headers.householdId;
-      }
-    }
+    this._householdId = (await discoverHouseholdId(this.connection)) ?? this._householdId;
 
     if (this._householdId) {
       this.log.debug(`Discovered householdId: ${this._householdId}`);
