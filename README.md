@@ -13,102 +13,87 @@ npm install sonos-ws
 ## Quick Start
 
 ```typescript
-import { SonosClient, SonosDiscovery } from 'sonos-ws';
+import { SonosHousehold } from 'sonos-ws';
 
-// Discover speakers on the network
-const devices = await SonosDiscovery.discover();
-console.log(devices);
+const household = new SonosHousehold({ host: '192.168.1.100' });
+await household.connect();
 
-// Connect to a speaker
-const client = new SonosClient({ host: '192.168.1.100' });
-await client.connect();
+const arc = household.player('Arc');
+await arc.volume.group.relative(5);
+await arc.playback.pause();
 
-// Volume control
-const vol = await client.groupVolume.getVolume();
-console.log(`Volume: ${vol.volume}, Muted: ${vol.muted}`);
+const office = household.player('Office');
+await household.group([arc, office], { transfer: true });
 
-await client.groupVolume.setRelativeVolume(5);
-await client.groupVolume.setMute(false);
-
-// Playback
-await client.playback.play();
-await client.playback.skipToNextTrack();
-
-// Group management
-const groups = await client.groups.getGroups();
-await client.groups.modifyGroupMembers(['RINCON_xxx'], []);
-
-// Subscribe to real-time events
-await client.groupVolume.subscribe();
-client.on('groupVolumeChanged', (data) => {
-  console.log(`Volume: ${data.volume}`);
+household.on('volumeChanged', (data, source) => {
+  console.log(`Group ${source.groupId}: ${data.volume}, muted: ${data.muted}`);
 });
 
-// Disconnect
-await client.disconnect();
+await household.disconnect();
 ```
+
+`SonosHousehold` is the recommended API. It opens one WebSocket connection per speaker in the household, tracks group topology as it changes, and hands out a `PlayerHandle` per speaker (via `household.player(nameOrId)`) that routes every command through the right socket automatically.
 
 ## API
 
 ### `SonosClient`
 
-The main entry point. Connects to a Sonos speaker and exposes namespace objects for control.
+A lighter alternative for controlling a single speaker directly, without discovering or connecting to the rest of the household. `host` must be that speaker's own IP address — Sonos reports it per player, and host names are not matched. Because it opens only one socket, group-level commands fail with `groupCoordinatorChanged` while this speaker is grouped under another speaker; use `SonosHousehold` once speakers are grouped.
 
 ```typescript
-const client = new SonosClient({
-  host: '192.168.1.100',     // Speaker IP address
-  port: 1443,                // Default: 1443
-  householdId: '...',        // Auto-discovered if omitted
-  groupId: '...',            // Auto-discovered if omitted
-  playerId: '...',           // Auto-discovered if omitted
-  reconnect: {               // Or true/false
-    enabled: true,
-    initialDelay: 1000,
-    maxDelay: 30000,
-    factor: 2,
-    maxAttempts: Infinity,
-  },
-  logger: consoleLogger,     // Or any { error, warn, info, debug } object
-  requestTimeout: 5000,      // Default: 5000ms
-});
+import { SonosClient } from 'sonos-ws';
+
+const client = new SonosClient({ host: '192.168.1.100' });
+await client.connect();
+
+await client.volume.get();
+await client.volume.group.set(30);
+await client.playback.play();
+
+await client.disconnect();
 ```
 
-### Namespaces
+### Player controls
 
-| Namespace | Methods |
-|-----------|---------|
-| `client.groupVolume` | `getVolume`, `setVolume`, `setRelativeVolume`, `setMute`, `subscribe` |
-| `client.playerVolume` | `getVolume`, `setVolume`, `setRelativeVolume`, `setMute`, `subscribe` |
-| `client.groups` | `getGroups`, `createGroup`, `modifyGroupMembers`, `setGroupMembers`, `subscribe` |
-| `client.playback` | `play`, `pause`, `togglePlayPause`, `stop`, `skipToNextTrack`, `skipToPreviousTrack`, `seek`, `seekRelative`, `getPlaybackStatus`, `setPlayModes`, `loadLineIn`, `subscribe` |
-| `client.playbackMetadata` | `getMetadataStatus`, `subscribe` |
-| `client.favorites` | `getFavorites`, `loadFavorite`, `subscribe` |
-| `client.playlists` | `getPlaylists`, `getPlaylist`, `loadPlaylist`, `subscribe` |
-| `client.audioClip` | `loadAudioClip`, `cancelAudioClip` |
-| `client.homeTheater` | `getOptions`, `setOptions`, `subscribe` |
-| `client.settings` | `getPlayerSettings`, `setPlayerSettings` |
+`SonosHousehold.player(nameOrId)` and `SonosClient` both expose the same `PlayerHandle` controls. Group-level commands — `volume.group.*`, everything under `playback`, and loading a favorite or a playlist — go through the group's current coordinator automatically, whichever speaker that is.
+
+| Control | Methods |
+|---|---|
+| `volume` | `get`, `set`, `relative`, `mute`, `subscribe`, and `volume.group.{get,set,relative,mute,subscribe}` |
+| `playback` | `play`, `pause`, `togglePlayPause`, `stop`, `skipToNextTrack`, `skipToPreviousTrack`, `seek`, `seekRelative`, `getStatus`, `setPlayModes`, `loadLineIn`, `getMetadata`, `subscribe`, `subscribeMetadata` |
+| `favorites` | `get`, `load` |
+| `playlists` | `get`, `getPlaylist`, `load` |
+| `audioClip` | `load`, `cancel` |
+| `homeTheater` | `get`, `set`, `subscribe` |
+| `settings` | `get`, `set` |
 
 ### Events
 
 ```typescript
-client.on('connected', () => {});
-client.on('disconnected', (reason: string) => {});
-client.on('reconnecting', (attempt: number, delay: number) => {});
-client.on('error', (error: Error) => {});
+household.on('connected', () => {});
+household.on('disconnected', (reason: string) => {});
+household.on('reconnecting', (attempt: number, delay: number) => {});
+household.on('error', (error: Error) => {});
 
-// Subscription events (call namespace.subscribe() first)
-client.on('groupVolumeChanged', (data: GroupVolumeStatus) => {});
-client.on('playerVolumeChanged', (data: PlayerVolumeStatus) => {});
-client.on('groupsChanged', (data: GroupsResponse) => {});
-client.on('playbackStatusChanged', (data: PlaybackStatus) => {});
-client.on('metadataStatusChanged', (data: MetadataStatus) => {});
-client.on('favoritesChanged', (data: FavoritesResponse) => {});
-client.on('playlistsChanged', (data: PlaylistsResponse) => {});
-client.on('homeTheaterChanged', (data: HomeTheaterOptions) => {});
+// Subscription events (call the control's subscribe() first)
+household.on('volumeChanged', (data: GroupVolumeStatus, source: SonosEventSource) => {});
+household.on('playerVolumeChanged', (data: PlayerVolumeStatus, source: SonosEventSource) => {});
+household.on('groupsChanged', (data: GroupsResponse, source: SonosEventSource) => {});
+household.on('playbackChanged', (data: PlaybackStatus, source: SonosEventSource) => {});
+household.on('metadataChanged', (data: MetadataStatus, source: SonosEventSource) => {});
+household.on('favoritesChanged', (data: FavoritesResponse, source: SonosEventSource) => {});
+household.on('playlistsChanged', (data: PlaylistsResponse, source: SonosEventSource) => {});
+household.on('homeTheaterChanged', (data: HomeTheaterOptions, source: SonosEventSource) => {});
+household.on('coordinatorChanged', (data: GroupCoordinatorChangedEvent, source: SonosEventSource) => {});
 
 // Raw messages (for debugging)
-client.on('rawMessage', (message: SonosResponse) => {});
+household.on('rawMessage', (message: SonosResponse, source: SonosEventSource) => {});
+
+// SonosHousehold only, no per-event source since it is already about the whole household
+household.on('topologyChanged', (groups: Group[], players: Player[]) => {});
 ```
+
+`source` (a `SonosEventSource`) holds the `playerId` or `groupId` the event is about — Sonos reports state, never who caused it, so an external Spotify or Sonos-app controller looks like any other change. Subscriptions are kept alive across reconnects and regroups automatically, once `subscribe()` has been called once.
 
 ### Discovery
 
@@ -127,7 +112,7 @@ const device = await SonosDiscovery.discoverOne();
 import { SonosError, ConnectionError, CommandError, TimeoutError } from 'sonos-ws';
 
 try {
-  await client.groupVolume.setVolume(50);
+  await player.volume.group.set(50);
 } catch (err) {
   if (err instanceof TimeoutError) {
     // Request timed out

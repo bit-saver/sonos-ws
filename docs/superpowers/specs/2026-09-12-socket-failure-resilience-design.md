@@ -343,9 +343,10 @@ boot, no `Failed to subscribe to group changes`, three sockets up. The
 regroup path itself is verified at the next regroup: expect `Event:
 groups:1…` lines and one `Topology refreshed` ~250 ms after the last.
 
-Still open (follow-ups): a log line for the reconnect-branch setup abort;
-two `handleReconnected()` runs can interleave if the connection drops and
-recovers during setup; `connectTimeout` validation; `send()` in
-`'connecting'` (a UX decision). The subscribe-then-read ordering gap is
-closed in practice: Sonos sends a `groups` event on subscribe (seen at the
-19:37 deploy), which triggers the debounced re-read.
+Still open (follow-ups): `connectTimeout` validation. The reconnect-branch
+setup abort log line, the interleaving `handleReconnected()` runs, and
+`send()` in `'connecting'` are resolved by
+`2026-09-25-routing-and-subscription-upkeep-design.md`. The
+subscribe-then-read ordering gap is closed in practice: Sonos sends a
+`groups` event on subscribe (seen at the 19:37 deploy), which triggers the
+debounced re-read.

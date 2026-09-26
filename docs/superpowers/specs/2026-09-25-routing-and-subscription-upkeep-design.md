@@ -1,7 +1,7 @@
 # Command Routing, Subscription Upkeep and SonosClient — Design
 
 **Date:** 2026-09-25
-**Status:** APPROVED 2026-09-26 — implementation plan `docs/superpowers/plans/2026-09-26-routing-and-subscription-upkeep.md`.
+**Status:** COMPLETE — merged to main; deploy recorded below.
 **Branch:** `routing-and-subscription-upkeep`
 
 ## Problem
@@ -85,16 +85,23 @@ Not handled, documented instead: an `unsubscribe()` on a group-level namespace r
 ### Event forwarding
 
 - The household listens for `message` on every connection it owns, not only the primary.
-- Every typed event and `rawMessage` gets a second argument, `source: EventSource = { playerId?: string; groupId?: string }`, copied from the event headers — player-level events carry `playerId`, group-level events carry `groupId` (both verified live). Additive: a one-argument listener still type-checks and still runs. `SonosClient` passes the same.
+- Every typed event and `rawMessage` gets a second argument, `source: SonosEventSource = { playerId?: string; groupId?: string }`, copied from the event headers — player-level events carry `playerId`, group-level events carry `groupId` (both verified live). Additive: a one-argument listener still type-checks and still runs. `SonosClient` passes the same.
 - `groupCoordinatorChanged` now arrives from several sockets at once during a regroup, so it schedules the debounced topology refresh instead of refreshing immediately.
 - `SonosConnection` log lines name the socket's host after the namespace, so existing greps keep working: `Event: playerVolume:1.playerVolume @192.168.68.90 {…}` and `Sending playback:1.pause @192.168.68.90 [cmdId]`.
 
 ### Lifecycle
 
-- `SonosHousehold` attaches its connection listeners once, in the constructor. `connect()` creates a fresh pending-setup promise on the instance; the `connected` handler settles it.
-- `handleReconnected()` runs are serialized on a promise chain, so a flap during setup queues the next run behind the current one instead of interleaving with it.
-- The reconnect branch logs its setup abort before rethrowing.
+- `SonosHousehold` attaches its connection listeners once, in the constructor.
+- `connect()` counts the handshake it awaits in an `ownedHandshakes` counter; that handshake's setup is `connect()`'s to run, not the `'connected'` listener's.
+- The `'connected'` listener sets up only handshakes no `connect()` call is awaiting — the reconnect ladder's own successes — and swallows a background failure rather than throwing it at no one.
+- Setup runs are chained through `enqueueSetup()`, so a flap during setup queues the next run behind the current one instead of interleaving with it.
+- `primaryEpoch` counts primary `'connected'` events; `setupEpoch` records which epoch the last completed setup ran under. A run counts as done only when `setupEpoch === primaryEpoch`, so a setup straddling a drop cannot mark the new socket set up.
+- The reconnect branch logs its setup abort (`Failed reconnect setup`) before rethrowing.
+- `SonosClient` mirrors the same three-part design — its own `ownedHandshakes`, a setup chain, and a `connectedEpoch`/`setupEpoch` pair — for its single connection.
+- Diagnostics (`subscribeDiagnostics()`) and re-sent subscriptions (`resubscribeAll()`) are fire-and-forget, so neither holds up a setup run waiting on a speaker whose socket is laddering.
 - `SonosConnection.send()` in `'connecting'` awaits the in-flight connect promise (which always settles — an invariant this repo already enforces), then falls into the existing `'reconnecting'` wait or the open-socket check.
+
+The plan's original design — one shared "pending setup" promise per instance, created by `connect()` and settled by the `connected` handler — was replaced during review. It raced: overlapping `connect()` calls could each build their own promise and lose track of the others', a background reconnect success and a foreground `connect()` could both believe they owned the same pending setup, and a `connect()` issued after a `disconnect()` had no way to tell a stale run's promise from a fresh one. The `ownedHandshakes`/`enqueueSetup()`/epoch design above replaced it.
 
 ### SonosClient
 

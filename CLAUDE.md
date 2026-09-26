@@ -6,24 +6,24 @@ Its one production consumer is **Neurotto** (`~/workspace/neurotto`), a home-aut
 
 ## Current state
 
-- Branch `main`, clean, level with `origin` (`git@github.com:bit-saver/sonos-ws.git`).
-- Last code commit: `692c95d` (event-body logging + diagnostic subscriptions); `f5ec591` is its `dist` rebuild.
-- 86 tests (`npx vitest run`), `npx tsc --noEmit` clean.
-- Deployed to Neurotto 2026-09-25 07:22 CDT, pin `f5ec591`.
+- Branch `main` after merge, clean, level with `origin` (`git@github.com:bit-saver/sonos-ws.git`).
+- Last code commit and deploy: see the routing spec's Status line.
+- 150 tests (`npx vitest run`), `npx tsc --noEmit` clean.
 
 ## Layout
 
 | Path | Holds |
 |---|---|
-| `src/client/` | `SonosConnection` (one WebSocket per speaker: lifecycle, reconnect, keepalive, send), `MessageCorrelator` (cmdId → pending promise), `SonosClient` (single-speaker facade) |
+| `src/client/` | `SonosConnection` (one WebSocket per speaker: lifecycle, reconnect, keepalive, send), `MessageCorrelator` (cmdId → pending promise), `discoverHouseholdId` (shared household-ID lookup used by both `SonosClient` and `SonosHousehold`), `SonosClient` (single-speaker facade) |
 | `src/household/` | `SonosHousehold` (the recommended API: primary connection + per-speaker connections, topology, events), `GroupingEngine` (audio-preserving regrouping), `TopologySnapshot` |
 | `src/player/` | `PlayerHandle` and its controls (volume, playback, homeTheater, favorites, playlists, audioClip, settings) |
 | `src/namespaces/` | One wrapper per Sonos API namespace, all extending `BaseNamespace` (which owns `subscribe`/`send` and stamps `householdId`/`groupId`/`playerId` headers) |
+| `src/util/` | `settleAll` (runs every task, then rejects with one `AggregateError` of the failures), `eventSource` (`sourceOf` — tags an event with the `playerId`/`groupId` its headers name), `logger` (the pluggable `Logger` interface, `noopLogger`, `consoleLogger`), `TypedEventEmitter` (the type-safe emitter `SonosClient` and `SonosHousehold` extend) |
 | `docs/superpowers/specs/` | Design specs, date-stamped, the durable record. Start with `2026-09-12-socket-failure-resilience-design.md` — it carries the whole connection-resilience arc and its 09-18 and 09-25 addenda |
 | `docs/superpowers/plans/` | Implementation plans (agent-facing; not published to the vault) |
 | `tasks/lessons.md` | Process lessons from past sessions — read before a wrap or a deploy |
 
-`PlayerHandle` builds three namespace contexts: **speaker** (per-player commands, retargetable via `setSpeakerConnection`), **groups** (always the primary connection), and **coordinator** (resolved live — group volume and playback must route through the group coordinator's socket).
+`PlayerHandle` builds three namespace contexts: **speaker** (per-player commands, retargetable via `setSpeakerConnection`), **groups** (always the primary connection), and **coordinator** (resolved live via `setCoordinatorConnectionResolver` — carries group volume, playback, playback metadata, and loading a favorite or a playlist, since Sonos accepts all of those only on the group coordinator's socket; verified live — sending one of these through a non-coordinator's own socket gets back `groupCoordinatorChanged`).
 
 ## Bun gotchas — the source of most bugs here
 
@@ -41,6 +41,10 @@ Bun replaces the `ws` package with its own WebSocket and **ignores `ws` construc
 - At most one reconnect ladder. `scheduleReconnect()` clears any pending timer first; two ladders emit `RECONNECT_EXHAUSTED` twice, which the consumer surfaces as a duplicate notification.
 - Every handler inside `connect()` acts on its own captured `socket`, never `this.ws` — by the time a late event arrives, `this.ws` may be the next attempt's socket.
 - Sonos events carry **state, never origin**. Nothing in the API says who set a volume; an external Spotify or Sonos-app controller is indistinguishable from any other.
+- Group-level commands and subscriptions go through the coordinator's socket; player-level ones through the player's own.
+- Subscriptions are intents: `subscribe()` records one, and the household re-sends every wanted subscription after any reconnect or membership change. Re-sending is idempotent on the wire (verified live), so nothing tracks which ones died.
+- Every socket's events reach listeners, tagged `{ playerId?, groupId? }`.
+- `connect()` sets up the handshake it awaits; the `'connected'` listener sets up only handshakes no `connect()` awaits; setup counts as done only for the socket it ran on (epochs).
 
 ## Testing
 
@@ -60,4 +64,4 @@ Two traps recorded there: `bun update sonos-ws` does **not** advance a git pin o
 
 ## Known-open follow-ups
 
-Listed with evidence at the end of `docs/superpowers/specs/2026-09-12-socket-failure-resilience-design.md`: a log line for the reconnect-branch setup abort; two `handleReconnected()` runs can interleave if the connection flaps during setup; `connectTimeout` value validation; and whether `send()` should wait rather than throw while the state is `'connecting'`.
+Documented in `docs/superpowers/specs/2026-09-25-routing-and-subscription-upkeep-design.md`'s Out of scope and Design sections, plus three found during review: `connectTimeout` validation (not reachable until the option is exposed); `unsubscribe()` on a group-level namespace stops that group's events for every handle until the next re-send; `autoConnect: false` cannot route group commands; the `ownedHandshakes`/`setupChain`/epoch block is duplicated in `SonosClient` and `SonosHousehold` (a fix to one must be mirrored); a speaker added to the household mid-session never gets diagnostic subscriptions (they are declared only at first connect); and `connect()` while the socket is down reruns first-connect setup, which re-declares diagnostics and undoes an `unsubscribe()` of them.
