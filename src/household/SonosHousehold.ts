@@ -461,6 +461,8 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     // reconnect loop running in the background. The connection's own
     // scheduleReconnect will keep trying until it succeeds or exhausts.
     this.speakerConnections.set(player.id, conn);
+    // Before connecting: the socket's first 'connected' re-sends the handle's subscriptions, and they belong on it.
+    this._players.get(player.id)?.setSpeakerConnection(conn);
 
     try {
       await conn.connect();

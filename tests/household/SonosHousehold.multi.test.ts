@@ -229,4 +229,22 @@ describe('subscription upkeep', () => {
     expect(sentVia(OFFICE_IP, 'playerVolume:1', 'subscribe')).toHaveLength(0);
     expect(sentVia(BED_IP, 'playerVolume:1', 'subscribe')).toHaveLength(0);
   });
+
+  it("re-sends a new speaker's player-level subscriptions only on its own socket once that connects", async () => {
+    const household = await connectedHousehold(solo);
+    topology = {
+      groups: [...solo.groups, { id: 'G_KIT', name: 'Kitchen', coordinatorId: 'RINCON_KITCHEN', playerIds: ['RINCON_KITCHEN'] }],
+      players: [ARC, OFFICE, BED, KITCHEN],
+    } as GroupsResponse;
+    await household.refreshTopology();
+    // Kitchen has no socket of its own yet, so this goes out on the primary.
+    await household.player('Kitchen').volume.subscribe();
+    expect(wantedOn(PRIMARY, 'playerVolume:1', { playerId: 'RINCON_KITCHEN' })).toBe(1);
+
+    // A primary reconnect opens Kitchen's own socket.
+    await socket(PRIMARY)._listeners.get('connected')[0]();
+
+    expect(wantedOn(PRIMARY, 'playerVolume:1', { playerId: 'RINCON_KITCHEN' })).toBe(1);
+    expect(wantedOn(KITCHEN_IP, 'playerVolume:1', { playerId: 'RINCON_KITCHEN' })).toBeGreaterThan(0);
+  });
 });
