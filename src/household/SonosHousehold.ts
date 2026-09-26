@@ -85,6 +85,8 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   private _householdId: string | undefined;
   private _initialConnectDone = false;
   private _lastTopologyKey = '';
+  /** Group IDs, coordinators and members, without playback state. */
+  private _lastMembershipKey = '';
   /** Pending debounced topology re-read, armed by groups:1 events. */
   private topologyRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   /** Setup runs, chained so each starts after the previous one settles: a flap mid-setup must not run two at once. */
@@ -284,6 +286,17 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       }
     }
 
+    // Membership, not playback state (which flips on every play/pause), decides whether subscriptions moved.
+    // The first read has nothing to compare against; setup restores subscriptions itself.
+    const membershipKey = result.groups
+      .map((g) => `${g.id}:${g.coordinatorId}:${[...g.playerIds].sort().join(',')}`)
+      .sort()
+      .join('|');
+    if (this._lastMembershipKey && membershipKey !== this._lastMembershipKey) {
+      void this.resubscribeAll();
+    }
+    this._lastMembershipKey = membershipKey;
+
     // Only emit topologyChanged if the topology actually differs from last time.
     // Multiple refreshTopology() calls during a single group operation would
     // otherwise flood listeners with duplicate events.
@@ -319,6 +332,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
    * from a player set), playback, and home theater (a TV input switch).
    * Best effort per player and per namespace — diagnostics must never stop a
    * household connecting.
+   * Runs once, at first connect; resubscribeAll() keeps them alive after.
    */
   private async subscribeDiagnostics(): Promise<void> {
     for (const handle of this._players.values()) {
@@ -335,6 +349,21 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
         }
       }
     }
+  }
+
+  /**
+   * Re-sends every subscription the handles want. Runs wherever one may have died:
+   * - the end of setup and of each primary reconnect
+   * - a speaker's own socket reconnecting
+   * - a membership change (a player that leaves a group gets a new group ID)
+   * Re-sending a live subscription is harmless, so nothing tracks which ones died.
+   */
+  private async resubscribeAll(): Promise<void> {
+    await Promise.all(
+      [...this._players.values()].map((handle) =>
+        handle.resubscribe().catch((err: unknown) =>
+          this.log.warn(`Failed to restore event subscriptions for ${handle.name}`, err))),
+    );
   }
 
   /**
@@ -452,6 +481,8 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       logger: this.log,
     });
     conn.on('message', (msg) => this.handleMessage(msg));
+    // A reconnected socket holds no subscriptions.
+    conn.on('connected', () => { void this.resubscribeAll(); });
     return conn;
   }
 
@@ -594,6 +625,8 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
         if (this.autoConnectSpeakers) {
           await this.connectAllSpeakers();
         }
+        // Restores intents on handles that outlived a disconnect(); fresh handles have none.
+        await this.resubscribeAll();
         await this.subscribeDiagnostics();
         this._initialConnectDone = true;
       } catch (err) {
@@ -616,11 +649,8 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
 
         await this.reconnectSpeakers();
 
-        for (const handle of this._players.values()) {
-          try { await handle.volume.subscribe(); } catch { /* best effort */ }
-        }
-
-        await this.subscribeDiagnostics();
+        // The reconnected socket holds no subscriptions; re-send the wanted ones.
+        await this.resubscribeAll();
       } catch (err) {
         this.log.warn('Failed reconnect setup', err);
         throw err;

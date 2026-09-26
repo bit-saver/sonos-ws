@@ -171,3 +171,62 @@ describe('events from every socket', () => {
     void household;
   });
 });
+
+describe('subscription upkeep', () => {
+  const wantedOn = (host: string, namespace: string, extra: Record<string, string>) =>
+    sentVia(host, namespace, 'subscribe').filter((h: any) => Object.entries(extra).every(([k, v]) => h[k] === v)).length;
+
+  it("re-subscribes a moved player's group events on its new coordinator's socket", async () => {
+    const household = await connectedHousehold(solo);
+
+    topology = officeUnderBedroom;
+    await household.refreshTopology();
+    await vi.waitFor(() =>
+      expect(wantedOn(BED_IP, 'playback:1', { groupId: 'G_BED', playerId: 'RINCON_OFFICE' })).toBe(1));
+
+    // Office leaves and comes back under a new group ID, as it does live.
+    topology = {
+      ...solo,
+      groups: solo.groups.map((g) => (g.id === 'G_OFF' ? { ...g, id: 'G_OFF_2' } : g)),
+    } as GroupsResponse;
+    await household.refreshTopology();
+    await vi.waitFor(() =>
+      expect(wantedOn(OFFICE_IP, 'playback:1', { groupId: 'G_OFF_2', playerId: 'RINCON_OFFICE' })).toBe(1));
+  });
+
+  it('does not re-send when only playback state changed', async () => {
+    const household = await connectedHousehold(solo);
+    const subscribes = () => instances.reduce((n, i) => n + i.send.mock.calls.filter(([r]: any) => r[0].command === 'subscribe').length, 0);
+    const before = subscribes();
+
+    topology = {
+      ...solo,
+      groups: solo.groups.map((g) => ({ ...g, playbackState: 'PLAYBACK_STATE_PLAYING' })),
+    } as GroupsResponse;
+    await household.refreshTopology();
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+
+    expect(subscribes()).toBe(before);
+  });
+
+  it("restores a speaker's subscriptions when its own socket reconnects", async () => {
+    await connectedHousehold(solo);
+    const before = wantedOn(OFFICE_IP, 'homeTheater:1', { playerId: 'RINCON_OFFICE' });
+
+    socket(OFFICE_IP)._emit('connected');
+
+    await vi.waitFor(() =>
+      expect(wantedOn(OFFICE_IP, 'homeTheater:1', { playerId: 'RINCON_OFFICE' })).toBe(before + 1));
+  });
+
+  it('a primary reconnect re-sends what is wanted, and only that', async () => {
+    const household = await connectedHousehold(solo);
+    await household.player('Arc').volume.subscribe();
+
+    await socket(PRIMARY)._listeners.get('connected')[0]();
+
+    expect(wantedOn(PRIMARY, 'playerVolume:1', { playerId: 'RINCON_ARC' })).toBe(2);
+    expect(sentVia(OFFICE_IP, 'playerVolume:1', 'subscribe')).toHaveLength(0);
+    expect(sentVia(BED_IP, 'playerVolume:1', 'subscribe')).toHaveLength(0);
+  });
+});
