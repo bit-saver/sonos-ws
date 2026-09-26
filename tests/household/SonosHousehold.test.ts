@@ -45,10 +45,6 @@ const mockTopology: GroupsResponse = {
   ] as Player[],
 };
 
-function getMockConnection(): any {
-  return (SonosConnection as unknown as ReturnType<typeof vi.fn>).mock.results[0].value;
-}
-
 /**
  * The factory hands back one shared object on every call, so calling it
  * directly returns that object without constructing a household.
@@ -736,5 +732,12 @@ describe('household setup lifecycle', () => {
     await mockConn._listeners.get('connected')[0]();
 
     expect(logger.warn).toHaveBeenCalledWith('Failed reconnect setup', expect.objectContaining({ message: 'Disconnected during setup' }));
+
+    // The chain must still be usable after a failed run: a later reconnect runs normally.
+    const readsBefore = mockConn.send.mock.calls.filter(([r]: any) => r[0].command === 'getGroups' && r[0].householdId).length;
+    mockConn.state = 'connected';
+    await mockConn._listeners.get('connected')[0]();
+    const readsAfter = mockConn.send.mock.calls.filter(([r]: any) => r[0].command === 'getGroups' && r[0].householdId).length;
+    expect(readsAfter).toBe(readsBefore + 1);
   });
 });
