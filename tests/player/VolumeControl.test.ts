@@ -183,4 +183,35 @@ describe('VolumeControl.group.relative edge cases', () => {
     await vi.advanceTimersByTimeAsync(5000);
     expect(send.mock.calls.map(([req]: any) => req[0].command)).toEqual(['setRelativeVolume']);
   });
+
+  it('reads only after a slow setRelativeVolume is answered, and leaves no rejection unhandled', async () => {
+    // setImmediate stays real so the test can yield a real macrotask, which is when Node reports unhandled rejections.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const realMacrotask = () => new Promise<void>((resolve) => setImmediate(resolve));
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const { ctx, send } = scriptedContext({
+        setRelative: () => new Promise((resolve) => setTimeout(() => resolve([{}, {}]), 3000)),
+        getVolume: () => Promise.reject(new Error('read failed')),
+      });
+      const commands = () => send.mock.calls.map(([req]: any) => req[0].command);
+      const pending = new VolumeControl(ctx).group.relative(5);
+      const outcome = expect(pending).rejects.toThrow('read failed');
+
+      await vi.advanceTimersByTimeAsync(2500);
+      await realMacrotask();
+      expect(commands()).toEqual(['setRelativeVolume']);
+
+      await vi.advanceTimersByTimeAsync(500 + 2000);
+      await outcome;
+      expect(commands()).toEqual(['setRelativeVolume', 'getVolume']);
+
+      await realMacrotask();
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
 });

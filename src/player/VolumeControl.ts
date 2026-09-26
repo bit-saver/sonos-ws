@@ -112,38 +112,47 @@ export class VolumeControl {
       // new volume from the groupVolume event — the one naming this group, since the socket carries every group's.
       const conn = this.coordinatorContext.connection;
       const groupId = this.coordinatorContext.getGroupId();
+      let resolve!: (status: GroupVolumeStatus) => void;
+      let reject!: (err: unknown) => void;
+      const result = new Promise<GroupVolumeStatus>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      let settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
-      let handler: (msg: SonosResponse) => void = () => {};
+      const handler = (msg: SonosResponse) => {
+        const [headers, body] = msg;
+        if (headers?.namespace === 'groupVolume:1' && headers.groupId === groupId && body?._objectType === 'groupVolume') {
+          settled = true;
+          stopWaiting();
+          resolve(body as unknown as GroupVolumeStatus);
+        }
+      };
       const stopWaiting = () => {
         clearTimeout(timer);
         conn.off('message', handler);
       };
 
-      const volumeEvent = new Promise<GroupVolumeStatus>((resolve, reject) => {
-        handler = (msg: SonosResponse) => {
-          const [headers, body] = msg;
-          if (headers?.namespace === 'groupVolume:1' && headers.groupId === groupId && body?._objectType === 'groupVolume') {
-            stopWaiting();
-            resolve(body as unknown as GroupVolumeStatus);
-          }
-        };
+      // Listen before sending: the event can arrive ahead of the reply.
+      conn.on('message', handler);
+      try {
+        await this._group.setRelativeVolume(delta);
+      } catch (err) {
+        // Refused: leave nothing behind to fire later. result never settles, so it cannot reject unhandled.
+        stopWaiting();
+        throw err;
+      }
+      // The wait starts only once the set is answered: a read before that returns the old volume, and a failed read
+      // must reject a promise the caller already holds.
+      if (!settled) {
         timer = setTimeout(() => {
           stopWaiting();
           // No event (likely nothing subscribed this group here), so read instead. A failed read rejects: an invented
           // volume would pass for a real one.
           this._group.getVolume().then(resolve, reject);
         }, RELATIVE_EVENT_WAIT_MS);
-        conn.on('message', handler);
-      });
-
-      try {
-        await this._group.setRelativeVolume(delta);
-      } catch (err) {
-        // Refused: leave nothing behind to fire later. volumeEvent never settles, so it cannot reject unhandled.
-        stopWaiting();
-        throw err;
       }
-      return volumeEvent;
+      return result;
     },
 
     /**
