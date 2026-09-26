@@ -83,12 +83,8 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   private topologyRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   /** Setup runs, chained so each starts after the previous one settles: a flap mid-setup must not run two at once. */
   private setupChain: Promise<void> = Promise.resolve();
-  /** Settles the promise that the current connect() call is waiting on. */
-  private pendingSetup: { resolve: () => void; reject: (err: unknown) => void } | null = null;
-  /** The connect() attempt in flight, so overlapping callers share it instead of racing separate setups. */
-  private connecting: Promise<void> | null = null;
-  /** Bumped by onPrimaryConnected(), so runConnect() can tell whether its own connect() call already triggered a run. */
-  private setupRunsStarted = 0;
+  /** Handshakes a connect() call is awaiting: their setup is that call's to run, not the 'connected' listener's. */
+  private ownedHandshakes = 0;
 
   /** Per-speaker WebSocket connections. Key is player ID. */
   private readonly speakerConnections = new Map<string, SonosConnection>();
@@ -170,51 +166,31 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
    * Connects to the Sonos speaker and discovers the household topology.
    * Populates {@link players} and {@link groups}.
    */
-  connect(): Promise<void> {
-    // Overlapping callers share this one attempt instead of racing separate setups.
-    if (this.connecting) return this.connecting;
-    const attempt = this.runConnect();
-    this.connecting = attempt;
-    attempt.finally(() => { if (this.connecting === attempt) this.connecting = null; }).catch(() => {});
-    return attempt;
-  }
-
-  private async runConnect(): Promise<void> {
+  async connect(): Promise<void> {
     // Already set up and the socket never dropped — nothing to do.
     if (this._initialConnectDone && this.connection.state === 'connected') return;
-
     this._initialConnectDone = false;
-
-    const setup = new Promise<void>((resolve, reject) => {
-      this.pendingSetup = { resolve, reject };
-    });
-    // If the connect below throws, nothing awaits `setup`, yet the background ladder can still fail first-connect setup
-    // and reject it. Unhandled, that rejection would crash the host.
-    setup.catch(() => {});
-
-    const runsBefore = this.setupRunsStarted;
-    await this.connection.connect();
-    // A socket that was already open resolves connect() without emitting 'connected', so no run started above.
-    if (this.setupRunsStarted === runsBefore) void this.onPrimaryConnected();
-
-    await setup;
+    this.ownedHandshakes++;
+    try {
+      await this.connection.connect();
+    } finally {
+      this.ownedHandshakes--;
+    }
+    // Overlapping calls each queue this; the first to run sets up, the rest find it done.
+    await this.enqueueSetup(() => (this._initialConnectDone ? Promise.resolve() : this.handleReconnected()));
   }
 
-  /** Queues a setup run behind any in flight and settles the pending connect(). Returns the run so tests can await it. */
+  /** Sets up after a handshake no connect() call awaits: the reconnect ladder's. Returns the run so tests can await it. */
   private onPrimaryConnected(): Promise<void> {
-    this.setupRunsStarted++;
-    const run = this.setupChain.then(async () => {
-      // Only a run that started as the first connect may settle a caller — a stale
-      // reconnect run queued behind a newer connect() must not resolve or reject it.
-      const firstConnect = !this._initialConnectDone;
-      try {
-        await this.handleReconnected();
-        if (firstConnect) this.pendingSetup?.resolve();
-      } catch (err) {
-        if (firstConnect) this.pendingSetup?.reject(err);
-      }
-    });
-    this.setupChain = run;
+    if (this.ownedHandshakes > 0) return Promise.resolve();
+    // handleReconnected() logs its own failures, and a background run has no caller to tell.
+    return this.enqueueSetup(() => this.handleReconnected()).catch(() => {});
+  }
+
+  /** Runs setup work after any run in flight. A failure rejects this call, never the chain. */
+  private enqueueSetup(task: () => Promise<void>): Promise<void> {
+    const run = this.setupChain.then(task);
+    this.setupChain = run.catch(() => {});
     return run;
   }
 
