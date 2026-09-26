@@ -651,6 +651,14 @@ declare class SonosError extends Error {
     });
 }
 
+/**
+ * What an event is about, from its headers: player-level namespaces name the player, group-level ones the group.
+ * Sonos never says who caused a change.
+ */
+interface SonosEventSource {
+    playerId?: string;
+    groupId?: string;
+}
 /** Event data emitted when a group's coordinator changes (speakers grouped or ungrouped). */
 interface GroupCoordinatorChangedEvent {
     _objectType: 'groupCoordinatorChanged';
@@ -678,30 +686,57 @@ interface SonosEvents {
     reconnecting: (attempt: number, delay: number) => void;
     /** Emitted on connection or command errors. */
     error: (error: SonosError | Error) => void;
-    /** Emitted when the group volume or mute state changes. */
-    volumeChanged: (data: GroupVolumeStatus) => void;
-    /** Emitted when an individual player's volume or mute state changes. */
-    playerVolumeChanged: (data: PlayerVolumeStatus) => void;
-    /** Emitted when group membership or topology changes (players grouped/ungrouped). */
-    groupsChanged: (data: GroupsResponse) => void;
-    /** Emitted when the playback state, position, or play modes change. */
-    playbackChanged: (data: PlaybackStatus) => void;
-    /** Emitted when the currently playing track or next track metadata changes. */
-    metadataChanged: (data: MetadataStatus) => void;
-    /** Emitted when the user's favorites list is modified. */
-    favoritesChanged: (data: FavoritesResponse) => void;
-    /** Emitted when the user's playlists are modified. */
-    playlistsChanged: (data: PlaylistsResponse) => void;
-    /** Emitted when home theater settings (night mode, dialog enhancement) change. */
-    homeTheaterChanged: (data: HomeTheaterOptions) => void;
+    /**
+     * Emitted when the group volume or mute state changes.
+     * @param source - The player or group the event is about.
+     */
+    volumeChanged: (data: GroupVolumeStatus, source: SonosEventSource) => void;
+    /**
+     * Emitted when an individual player's volume or mute state changes.
+     * @param source - The player or group the event is about.
+     */
+    playerVolumeChanged: (data: PlayerVolumeStatus, source: SonosEventSource) => void;
+    /**
+     * Emitted when group membership or topology changes (players grouped/ungrouped).
+     * @param source - The player or group the event is about.
+     */
+    groupsChanged: (data: GroupsResponse, source: SonosEventSource) => void;
+    /**
+     * Emitted when the playback state, position, or play modes change.
+     * @param source - The player or group the event is about.
+     */
+    playbackChanged: (data: PlaybackStatus, source: SonosEventSource) => void;
+    /**
+     * Emitted when the currently playing track or next track metadata changes.
+     * @param source - The player or group the event is about.
+     */
+    metadataChanged: (data: MetadataStatus, source: SonosEventSource) => void;
+    /**
+     * Emitted when the user's favorites list is modified.
+     * @param source - The player or group the event is about.
+     */
+    favoritesChanged: (data: FavoritesResponse, source: SonosEventSource) => void;
+    /**
+     * Emitted when the user's playlists are modified.
+     * @param source - The player or group the event is about.
+     */
+    playlistsChanged: (data: PlaylistsResponse, source: SonosEventSource) => void;
+    /**
+     * Emitted when home theater settings (night mode, dialog enhancement) change.
+     * @param source - The player or group the event is about.
+     */
+    homeTheaterChanged: (data: HomeTheaterOptions, source: SonosEventSource) => void;
     /**
      * Emitted when the group coordinator changes (e.g. speakers grouped/ungrouped).
-     * The client automatically calls {@link SonosClient.refreshGroups} to update
-     * its internal groupId. Listen to this event to react to topology changes.
+     * The client and the household re-read the topology themselves, so their player handles follow the change.
+     * @param source - The player or group the event is about.
      */
-    coordinatorChanged: (data: GroupCoordinatorChangedEvent) => void;
-    /** Emitted for every raw WebSocket message received from the Sonos device. Useful for debugging. */
-    rawMessage: (message: SonosResponse) => void;
+    coordinatorChanged: (data: GroupCoordinatorChangedEvent, source: SonosEventSource) => void;
+    /**
+     * Emitted for every raw WebSocket message received from the Sonos device. Useful for debugging.
+     * @param source - The player or group the event is about.
+     */
+    rawMessage: (message: SonosResponse, source: SonosEventSource) => void;
 }
 /**
  * Events emitted by {@link SonosHousehold}.
@@ -748,28 +783,27 @@ declare abstract class BaseNamespace {
     abstract readonly namespace: string;
     private subscribed;
     constructor(context: NamespaceContext);
-    /** Whether this namespace is currently subscribed to real-time events. */
+    /**
+     * Whether events for this namespace are wanted. An intent, not proof a subscription is live: a reconnect or a regroup
+     * can drop it, and {@link resubscribe} puts it back.
+     */
     get isSubscribed(): boolean;
     /**
      * Subscribes to real-time events for this namespace.
      *
-     * Once subscribed, the Sonos device will push event notifications
-     * whenever the state managed by this namespace changes.
+     * The intent is recorded before sending, so a failed attempt is retried by the next {@link resubscribe}; the promise still rejects.
      */
     subscribe(): Promise<void>;
     /**
-     * Unsubscribes from real-time events for this namespace.
+     * Unsubscribes from real-time events for this namespace. The intent is dropped before sending.
      *
-     * After calling this method, no further event notifications will be
-     * received for this namespace until {@link subscribe} is called again.
+     * Sonos keeps one subscription per socket and target, so for a group-level namespace this also stops the events other
+     * handles in the group asked for, until their next {@link resubscribe}.
      */
     unsubscribe(): Promise<void>;
     /**
-     * Re-subscribes to events after a WebSocket reconnection.
-     *
-     * This is a no-op if the namespace was not previously subscribed.
-     * Called internally by the client during reconnection to restore
-     * event subscriptions transparently.
+     * Sends the subscribe again if events are wanted. Safe on a live subscription (Sonos keeps one per socket and target),
+     * so owners call it after any change that may have dropped one.
      */
     resubscribe(): Promise<void>;
     /**
@@ -864,6 +898,11 @@ declare class VolumeControl {
     /** Unsubscribes from per-speaker volume events. */
     unsubscribe(): Promise<void>;
     /**
+     * Re-sends the player and group volume subscriptions that are wanted.
+     * @internal
+     */
+    resubscribe(): Promise<void>;
+    /**
      * Group volume control.
      * Controls all speakers in this player's group proportionally.
      * Automatically routes through the group coordinator's connection.
@@ -895,7 +934,7 @@ declare class VolumeControl {
 }
 
 /**
- * Playback and metadata control for a Sonos player's group.
+ * Playback and metadata control for a Sonos player's group. Every command goes through the group coordinator's socket.
  *
  * Combines the `playback:1` and `playbackMetadata:1` namespaces into
  * a single interface — playback state and track metadata are always
@@ -945,12 +984,27 @@ declare class PlaybackControl {
     subscribe(): Promise<void>;
     /** Unsubscribes from playback state events. */
     unsubscribe(): Promise<void>;
+    /** Subscribes to track metadata events — separate from {@link subscribe} because they are large and frequent. */
+    subscribeMetadata(): Promise<void>;
+    /** Unsubscribes from track metadata events. */
+    unsubscribeMetadata(): Promise<void>;
+    /**
+     * Re-sends the playback and metadata subscriptions that are wanted.
+     * @internal
+     */
+    resubscribe(): Promise<void>;
 }
 
 /** Access and load Sonos favorites. */
 declare class FavoritesAccess {
     private readonly ns;
-    constructor(context: NamespaceContext);
+    private readonly groupNs;
+    /**
+     * @param context — for reading favorites, which any speaker answers
+     * @param coordinatorContext — for loading one, a group command that Sonos
+     *   accepts only on the group coordinator's socket
+     */
+    constructor(context: NamespaceContext, coordinatorContext?: NamespaceContext);
     /** Retrieves the list of Sonos favorites. */
     get(): Promise<FavoritesResponse>;
     /**
@@ -964,7 +1018,13 @@ declare class FavoritesAccess {
 /** Access and load Sonos playlists. */
 declare class PlaylistsAccess {
     private readonly ns;
-    constructor(context: NamespaceContext);
+    private readonly groupNs;
+    /**
+     * @param context — for reading playlists, which any speaker answers
+     * @param coordinatorContext — for loading one, a group command that Sonos
+     *   accepts only on the group coordinator's socket
+     */
+    constructor(context: NamespaceContext, coordinatorContext?: NamespaceContext);
     /** Retrieves all Sonos playlists. */
     get(): Promise<PlaylistsResponse>;
     /**
@@ -1047,6 +1107,11 @@ declare class HomeTheaterControl {
     subscribe(): Promise<void>;
     /** Unsubscribes from home theater events. */
     unsubscribe(): Promise<void>;
+    /**
+     * Re-sends the home theater subscription if it is wanted.
+     * @internal
+     */
+    resubscribe(): Promise<void>;
     /** Gets the current home theater settings. */
     get(): Promise<HomeTheaterOptions>;
     /**
@@ -1128,7 +1193,7 @@ declare class PlayerHandle {
     setSpeakerConnection(connection: SonosConnection): void;
     /**
      * Sets a resolver that returns the coordinator's connection for this player's group.
-     * Used for group volume commands which must go through the coordinator's WebSocket.
+     * Used for group-level commands, which must go through the coordinator's WebSocket.
      * @internal
      */
     setCoordinatorConnectionResolver(resolver: () => SonosConnection): void;
@@ -1136,12 +1201,20 @@ declare class PlayerHandle {
     get groupId(): string;
     /** Whether this player is the coordinator of its current group. */
     get isCoordinator(): boolean;
+    /** RINCON ID of the coordinator of this player's current group. */
+    get coordinatorId(): string;
     /**
      * Updates the group this player belongs to.
      * Called internally by SonosHousehold when topology changes.
      * @internal
      */
     updateGroup(group: Group): void;
+    /**
+     * Re-sends every subscription this handle wants, each through the socket it now belongs on.
+     * Tries them all, then rejects with an AggregateError of the failures.
+     * @internal
+     */
+    resubscribe(): Promise<void>;
 }
 
 /**
@@ -1156,17 +1229,22 @@ interface SonosHouseholdOptions {
     reconnect?: Partial<ReconnectOptions> | boolean;
     /** Custom logger. */
     logger?: Logger;
-    /** Command timeout in ms. @defaultValue 5000 */
+    /** Command timeout in ms. @defaultValue 120000 */
     requestTimeout?: number;
-    /** Connect to all speakers at startup. @defaultValue true */
+    /**
+     * Connect to all speakers at startup. @defaultValue true
+     *
+     * With `false` every command goes through the primary, so group-level commands for a group led by another speaker fail
+     * with `groupCoordinatorChanged`.
+     */
     autoConnect?: boolean;
 }
 /**
  * Top-level API for controlling an entire Sonos household.
  *
- * Owns a single {@link SonosConnection} and exposes {@link PlayerHandle}
- * objects for targeting individual speakers. Automatically tracks group
- * topology changes and provides high-level grouping operations.
+ * Owns a {@link SonosConnection} to the primary speaker and, unless `autoConnect` is false, one to each other speaker.
+ * Exposes {@link PlayerHandle} objects for targeting individual speakers, tracks group topology changes, and provides
+ * high-level grouping operations.
  *
  * @example
  * ```typescript
@@ -1189,8 +1267,20 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     private _householdId;
     private _initialConnectDone;
     private _lastTopologyKey;
+    /** Group IDs, coordinators and members, without playback state. */
+    private _lastMembershipKey;
     /** Pending debounced topology re-read, armed by groups:1 events. */
     private topologyRefreshTimer;
+    /** Setup runs, chained so each starts after the previous one settles: a flap mid-setup must not run two at once. */
+    private setupChain;
+    /** Handshakes a connect() call is awaiting: their setup is that call's to run, not the 'connected' listener's. */
+    private ownedHandshakes;
+    /** Counts primary 'connected' events, so a completed setup can be matched to the socket it ran on. */
+    private primaryEpoch;
+    /** The primaryEpoch the last completed setup started under. */
+    private setupEpoch;
+    /** Set up on the socket that is up now, not merely set up once. */
+    private get setUpOnCurrentSocket();
     /** Per-speaker WebSocket connections. Key is player ID. */
     private readonly speakerConnections;
     private readonly primaryHost;
@@ -1214,6 +1304,10 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
      * Populates {@link players} and {@link groups}.
      */
     connect(): Promise<void>;
+    /** Sets up after a handshake no connect() call awaits: the reconnect ladder's. Returns the run so tests can await it. */
+    private onPrimaryConnected;
+    /** Runs setup work after any run in flight. A failure rejects this call, never the chain. */
+    private enqueueSetup;
     /** Gracefully closes all WebSocket connections. */
     disconnect(): Promise<void>;
     /**
@@ -1237,19 +1331,30 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
      */
     private scheduleTopologyRefresh;
     /**
+     * Subscribes every player to the events that say what an external controller did: group volume (a group set is
+     * otherwise indistinguishable from a player set), playback, and home theater (a TV input switch).
+     * Best effort and not awaited: a send to an offline speaker can wait out the whole request timeout, and diagnostics
+     * must never stop or stall a household connecting. Each intent is recorded before its send, so an offline speaker's
+     * are re-sent when its socket connects.
+     * Runs once, at first connect; resubscribeAll() keeps them alive after. Re-running first-connect setup — connect()
+     * while the socket is down, whether after disconnect() or mid-ladder — re-declares these intents, undoing an
+     * earlier unsubscribe() of them.
+     */
+    private subscribeDiagnostics;
+    /**
+     * Re-sends every subscription the handles want. Runs wherever one may have died:
+     * - the end of setup and of each primary reconnect
+     * - a speaker's own socket reconnecting
+     * - a membership change (a player that leaves a group gets a new group ID)
+     * Re-sending a live subscription is harmless, so nothing tracks which ones died.
+     */
+    private resubscribeAll;
+    /**
      * Subscribes to household group changes, so topology follows every
      * regroup — including ones made from the Sonos app — instead of only
      * those this library performs. Best effort: a failure leaves the older
      * refresh triggers (reconnect, coordinator change, grouping calls) intact.
      */
-    /**
-     * Subscribes every player to the events that say what an external
-     * controller did: group volume (a group set is otherwise indistinguishable
-     * from a player set), playback, and home theater (a TV input switch).
-     * Best effort per player and per namespace — diagnostics must never stop a
-     * household connecting.
-     */
-    private subscribeDiagnostics;
     private subscribeToTopology;
     /**
      * Groups the specified players. The first player in the array becomes the coordinator.
@@ -1279,12 +1384,19 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
      * Returns the primary connection if the speaker is the primary host.
      */
     private connectToSpeaker;
+    /** Builds and wires a speaker's connection; its events reach listeners like the primary's. */
+    private createSpeakerConnection;
+    /**
+     * A player's own socket, else the primary. Right for the primary speaker, which has no entry of its own; under
+     * `autoConnect: false` group commands for a group led elsewhere then fail, as documented on that option.
+     */
+    private connectionForPlayer;
     /**
      * Discovers the householdId by sending a raw getGroups request.
      */
     private discoverHouseholdId;
     /**
-     * Routes incoming unsolicited messages to typed events.
+     * Routes unsolicited messages from every socket to typed events, tagged with their source.
      * Filters by `_objectType` to avoid double-firing and Volume: undefined.
      */
     private handleMessage;
@@ -1304,6 +1416,7 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
 }
 
 interface SonosClientOptions {
+    /** The speaker's IP address, as Sonos reports it. Host names are not matched. */
     host: string;
     port?: number;
     reconnect?: Partial<ReconnectOptions> | boolean;
@@ -1313,7 +1426,9 @@ interface SonosClientOptions {
 /**
  * Simple single-speaker API for controlling one Sonos player.
  *
- * For multi-speaker control and grouping, use {@link SonosHousehold} instead.
+ * Everything goes through this speaker's socket, so while it is grouped under another speaker, group-level commands
+ * (group volume, playback, loading a favorite or playlist) fail with `groupCoordinatorChanged`. Use
+ * {@link SonosHousehold} for grouped speakers.
  *
  * @example
  * ```typescript
@@ -1326,8 +1441,19 @@ interface SonosClientOptions {
 declare class SonosClient extends TypedEventEmitter<SonosEvents> {
     private readonly connection;
     private readonly log;
+    private readonly host;
     private _handle;
     private _householdId;
+    /** Setup runs, chained so each starts after the previous one settles. */
+    private setupChain;
+    /** Handshakes a connect() call is awaiting: their setup is that call's to run, not the 'connected' listener's. */
+    private ownedHandshakes;
+    /** Counts 'connected' events, so a completed setup can be matched to the socket it ran on. */
+    private connectedEpoch;
+    /** The connectedEpoch the last completed setup started under. */
+    private setupEpoch;
+    /** Set up on the socket that is up now, not merely set up once. */
+    private get setUpOnCurrentSocket();
     constructor(options: SonosClientOptions);
     get connected(): boolean;
     get connectionState(): ConnectionState;
@@ -1340,10 +1466,23 @@ declare class SonosClient extends TypedEventEmitter<SonosEvents> {
     get homeTheater(): HomeTheaterControl;
     get settings(): SettingsControl;
     private get handle();
+    /**
+     * Connects and finds this speaker in its household. Resolves once the
+     * player controls are usable; rejects if the connection or the lookup fails.
+     */
     connect(): Promise<void>;
     disconnect(): Promise<void>;
-    private discoverAndCreateHandle;
-    private handleConnected;
+    /** Runs work after any setup in flight. A failure rejects this call, never the chain. */
+    private enqueue;
+    /** Sets up after a handshake no connect() call awaits: the reconnect ladder's. Returns the run so tests can await it. */
+    private onConnected;
+    /** Finds this speaker, then emits `connected`. Logs and rethrows a failure. */
+    private setUp;
+    /**
+     * Finds this speaker by host and builds its handle. On a reconnect, moves the existing handle to its current group and
+     * restores its subscriptions, which died with the old socket.
+     */
+    private locatePlayer;
     private handleMessage;
 }
 
@@ -1462,4 +1601,4 @@ declare class TimeoutError extends SonosError {
     });
 }
 
-export { AudioClipControl, type AudioClipResponse, ClipPriority, ClipType, CommandError, ConnectionError, type ConnectionState, type Container, type CreateGroupResponse, type DiscoveredDevice, type DiscoveryOptions, ErrorCode, type Favorite, FavoritesAccess, type FavoritesResponse, type Group, type GroupCoordinatorChangedEvent, type GroupOptions, type GroupVolumeStatus, type GroupsResponse, HomeTheaterControl, type HomeTheaterOptions, type LoadAudioClipOptions, type LoadFavoriteOptions, type LoadLineInOptions, type LoadPlaylistOptions, type LogLevel, type Logger, type MessageHeaders, type MetadataStatus, type ModifyGroupResponse, NAMESPACE_EVENT_MAP, type PlayModes, type PlaybackActions, PlaybackControl, PlaybackState, type PlaybackStatus, type Player, type PlayerCapability, PlayerHandle, type PlayerSettings, type PlayerVolumeStatus, type Playlist, type PlaylistResponse, type PlaylistTrack, PlaylistsAccess, type PlaylistsResponse, QueueAction, type ReconnectOptions, type ServiceInfo, SettingsControl, SonosClient, type SonosClientOptions, SonosDiscovery, SonosError, type SonosEvents, SonosHousehold, type SonosHouseholdEvents, type SonosHouseholdOptions, type SonosRequest, type SonosResponse, TimeoutError, type Track, type TrackInfo, VolumeControl, type VolumeResponse, consoleLogger, noopLogger };
+export { AudioClipControl, type AudioClipResponse, ClipPriority, ClipType, CommandError, ConnectionError, type ConnectionState, type Container, type CreateGroupResponse, type DiscoveredDevice, type DiscoveryOptions, ErrorCode, type Favorite, FavoritesAccess, type FavoritesResponse, type Group, type GroupCoordinatorChangedEvent, type GroupOptions, type GroupVolumeStatus, type GroupsResponse, HomeTheaterControl, type HomeTheaterOptions, type LoadAudioClipOptions, type LoadFavoriteOptions, type LoadLineInOptions, type LoadPlaylistOptions, type LogLevel, type Logger, type MessageHeaders, type MetadataStatus, type ModifyGroupResponse, NAMESPACE_EVENT_MAP, type PlayModes, type PlaybackActions, PlaybackControl, PlaybackState, type PlaybackStatus, type Player, type PlayerCapability, PlayerHandle, type PlayerSettings, type PlayerVolumeStatus, type Playlist, type PlaylistResponse, type PlaylistTrack, PlaylistsAccess, type PlaylistsResponse, QueueAction, type ReconnectOptions, type ServiceInfo, SettingsControl, SonosClient, type SonosClientOptions, SonosDiscovery, SonosError, type SonosEventSource, type SonosEvents, SonosHousehold, type SonosHouseholdEvents, type SonosHouseholdOptions, type SonosRequest, type SonosResponse, TimeoutError, type Track, type TrackInfo, VolumeControl, type VolumeResponse, consoleLogger, noopLogger };
