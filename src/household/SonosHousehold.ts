@@ -81,6 +81,10 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   private _lastTopologyKey = '';
   /** Pending debounced topology re-read, armed by groups:1 events. */
   private topologyRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Setup runs, chained so each starts after the previous one settles: a flap mid-setup must not run two at once. */
+  private setupChain: Promise<void> = Promise.resolve();
+  /** Settles the promise that the current connect() call is waiting on. */
+  private pendingSetup: { resolve: () => void; reject: (err: unknown) => void } | null = null;
 
   /** Per-speaker WebSocket connections. Key is player ID. */
   private readonly speakerConnections = new Map<string, SonosConnection>();
@@ -129,6 +133,13 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     this.on('error', (err) => {
       this.log.error(`Unhandled household error: ${err.message}`);
     });
+
+    // Attached once: attaching in connect() stacked another copy on every call.
+    this.connection.on('connected', () => this.onPrimaryConnected());
+    this.connection.on('disconnected', (r) => this.emit('disconnected', r));
+    this.connection.on('reconnecting', (a, d) => this.emit('reconnecting', a, d));
+    this.connection.on('error', (e) => this.emit('error', e));
+    this.connection.on('message', (msg) => this.handleMessage(msg));
   }
 
   /** All discovered players in the household, keyed by RINCON player ID. */
@@ -158,38 +169,29 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   async connect(): Promise<void> {
     this._initialConnectDone = false;
 
-    let resolveSetup!: () => void;
-    let rejectSetup!: (err: unknown) => void;
-    const initialSetupPromise = new Promise<void>((res, rej) => {
-      resolveSetup = res;
-      rejectSetup = rej;
+    const setup = new Promise<void>((resolve, reject) => {
+      this.pendingSetup = { resolve, reject };
     });
-    // If this.connection.connect() below rejects, this method throws before
-    // ever reaching `await initialSetupPromise` — so nothing is listening to
-    // it yet. Should the background reconnect ladder later succeed and then
-    // fail first-connect setup, the 'connected' handler below calls
-    // rejectSetup(err) on this same promise, which — with no listener —
-    // would surface as an unhandled rejection and crash the host process.
-    // This no-op catch keeps that rejection from ever being "unhandled";
-    // the caller's own `await initialSetupPromise` above still observes it
-    // when connect() succeeds and setup fails synchronously with it.
-    initialSetupPromise.catch(() => {});
-
-    this.connection.on('connected', async () => {
-      try {
-        await this.handleReconnected();
-        if (this._initialConnectDone) resolveSetup();
-      } catch (err) {
-        rejectSetup(err);
-      }
-    });
-    this.connection.on('disconnected', (r) => this.emit('disconnected', r));
-    this.connection.on('reconnecting', (a, d) => this.emit('reconnecting', a, d));
-    this.connection.on('error', (e) => this.emit('error', e));
-    this.connection.on('message', (msg) => this.handleMessage(msg));
+    // If the connect below throws, nothing awaits `setup`, yet the background ladder can still fail first-connect setup
+    // and reject it. Unhandled, that rejection would crash the host.
+    setup.catch(() => {});
 
     await this.connection.connect();
-    await initialSetupPromise;
+    await setup;
+  }
+
+  /** Queues a setup run behind any in flight and settles the pending connect(). Returns the run so tests can await it. */
+  private onPrimaryConnected(): Promise<void> {
+    const run = this.setupChain.then(async () => {
+      try {
+        await this.handleReconnected();
+        if (this._initialConnectDone) this.pendingSetup?.resolve();
+      } catch (err) {
+        this.pendingSetup?.reject(err);
+      }
+    });
+    this.setupChain = run;
+    return run;
   }
 
   /** Gracefully closes all WebSocket connections. */
@@ -590,24 +592,29 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       }
     } else {
       // Reconnect after prior success — reconnect-specific work.
-      await this.refreshTopology().catch((err) =>
-        this.log.warn('Failed to refresh topology on reconnect', err));
-      await this.subscribeToTopology();
+      try {
+        await this.refreshTopology().catch((err) =>
+          this.log.warn('Failed to refresh topology on reconnect', err));
+        await this.subscribeToTopology();
 
-      // Same reasoning as the first-connect branch above: a disconnect that
-      // lands while subscribeToTopology() is in flight must not let this
-      // fall through into reconnecting per-speaker connections.
-      if (this.connection.state !== 'connected') {
-        throw new ConnectionError(ErrorCode.CONNECTION_LOST, 'Disconnected during setup');
+        // Same reasoning as the first-connect branch above: a disconnect that
+        // lands while subscribeToTopology() is in flight must not let this
+        // fall through into reconnecting per-speaker connections.
+        if (this.connection.state !== 'connected') {
+          throw new ConnectionError(ErrorCode.CONNECTION_LOST, 'Disconnected during setup');
+        }
+
+        await this.reconnectSpeakers();
+
+        for (const handle of this._players.values()) {
+          try { await handle.volume.subscribe(); } catch { /* best effort */ }
+        }
+
+        await this.subscribeDiagnostics();
+      } catch (err) {
+        this.log.warn('Failed reconnect setup', err);
+        throw err;
       }
-
-      await this.reconnectSpeakers();
-
-      for (const handle of this._players.values()) {
-        try { await handle.volume.subscribe(); } catch { /* best effort */ }
-      }
-
-      await this.subscribeDiagnostics();
     }
     this.emit('connected');
   }

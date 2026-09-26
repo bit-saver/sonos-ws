@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SonosHousehold } from '../../src/household/SonosHousehold.js';
+import type { SonosHouseholdOptions } from '../../src/household/SonosHousehold.js';
 import { SonosConnection } from '../../src/client/SonosConnection.js';
 import type { GroupsResponse, Group, Player } from '../../src/types/groups.js';
 
@@ -48,27 +49,39 @@ function getMockConnection(): any {
   return (SonosConnection as unknown as ReturnType<typeof vi.fn>).mock.results[0].value;
 }
 
+/**
+ * The factory hands back one shared object on every call, so calling it
+ * directly returns that object without constructing a household.
+ */
+function sharedMockConnection(): any {
+  return (SonosConnection as unknown as () => any)();
+}
+
+/**
+ * Clears the shared mock connection, then constructs the household. The order
+ * matters: the household attaches its connection listeners in its
+ * constructor, so clearing afterwards would strip them.
+ */
+function freshHousehold(options: SonosHouseholdOptions): { household: SonosHousehold; mockConn: any } {
+  vi.clearAllMocks();
+  const mockConn = sharedMockConnection();
+  mockConn._listeners.clear();
+  mockConn.state = 'connected';
+  mockConn.on.mockImplementation((event: string, handler: Function) => {
+    if (!mockConn._listeners.has(event)) mockConn._listeners.set(event, []);
+    mockConn._listeners.get(event)!.push(handler);
+    return mockConn;
+  });
+  (SonosConnection as unknown as ReturnType<typeof vi.fn>).mockClear();
+  return { household: new SonosHousehold(options), mockConn };
+}
+
 describe('SonosHousehold', () => {
   let household: SonosHousehold;
   let mockConn: any;
 
   beforeEach(() => {
-    vi.clearAllMocks();
-    // Reset the listeners map
-    const Constructor = SonosConnection as unknown as ReturnType<typeof vi.fn>;
-    Constructor.mockClear();
-
-    household = new SonosHousehold({ host: '192.168.68.96' });
-    mockConn = getMockConnection();
-
-    // Reset listeners
-    mockConn._listeners.clear();
-    // Re-wire the on mock to track listeners
-    mockConn.on.mockImplementation((event: string, handler: Function) => {
-      if (!mockConn._listeners.has(event)) mockConn._listeners.set(event, []);
-      mockConn._listeners.get(event)!.push(handler);
-      return mockConn;
-    });
+    ({ household, mockConn } = freshHousehold({ host: '192.168.68.96' }));
 
     // Mock send to return householdId for discoverHouseholdId, and topology for getGroups
     mockConn.send.mockImplementation((request: any) => {
@@ -128,19 +141,7 @@ describe('SonosHousehold grouping', () => {
   let mockConn: any;
 
   beforeEach(async () => {
-    vi.clearAllMocks();
-    const Constructor = SonosConnection as unknown as ReturnType<typeof vi.fn>;
-    Constructor.mockClear();
-
-    household = new SonosHousehold({ host: '192.168.68.96' });
-    mockConn = getMockConnection();
-
-    mockConn._listeners.clear();
-    mockConn.on.mockImplementation((event: string, handler: Function) => {
-      if (!mockConn._listeners.has(event)) mockConn._listeners.set(event, []);
-      mockConn._listeners.get(event)!.push(handler);
-      return mockConn;
-    });
+    ({ household, mockConn } = freshHousehold({ host: '192.168.68.96' }));
 
     mockConn.send.mockImplementation((request: any) => {
       const [headers] = request;
@@ -182,19 +183,7 @@ describe('SonosHousehold speaker reconnection', () => {
   let mockConn: any;
 
   beforeEach(async () => {
-    vi.clearAllMocks();
-    const Constructor = SonosConnection as unknown as ReturnType<typeof vi.fn>;
-    Constructor.mockClear();
-
-    household = new SonosHousehold({ host: '192.168.68.96' });
-    mockConn = getMockConnection();
-
-    mockConn._listeners.clear();
-    mockConn.on.mockImplementation((event: string, handler: Function) => {
-      if (!mockConn._listeners.has(event)) mockConn._listeners.set(event, []);
-      mockConn._listeners.get(event)!.push(handler);
-      return mockConn;
-    });
+    ({ household, mockConn } = freshHousehold({ host: '192.168.68.96' }));
 
     mockConn.send.mockImplementation((request: any) => {
       const [headers] = request;
@@ -287,19 +276,7 @@ describe('SonosHousehold first-connect-after-fail setup', () => {
   let mockConn: any;
 
   beforeEach(() => {
-    vi.clearAllMocks();
-    const Constructor = SonosConnection as unknown as ReturnType<typeof vi.fn>;
-    Constructor.mockClear();
-
-    household = new SonosHousehold({ host: '192.168.68.96' });
-    mockConn = getMockConnection();
-
-    mockConn._listeners.clear();
-    mockConn.on.mockImplementation((event: string, handler: Function) => {
-      if (!mockConn._listeners.has(event)) mockConn._listeners.set(event, []);
-      mockConn._listeners.get(event)!.push(handler);
-      return mockConn;
-    });
+    ({ household, mockConn } = freshHousehold({ host: '192.168.68.96' }));
 
     mockConn.send.mockImplementation((request: any) => {
       const [headers] = request;
@@ -355,19 +332,7 @@ describe('SonosHousehold connect() unhandled rejection safety', () => {
   let mockConn: any;
 
   beforeEach(() => {
-    vi.clearAllMocks();
-    const Constructor = SonosConnection as unknown as ReturnType<typeof vi.fn>;
-    Constructor.mockClear();
-
-    household = new SonosHousehold({ host: '192.168.68.96' });
-    mockConn = getMockConnection();
-
-    mockConn._listeners.clear();
-    mockConn.on.mockImplementation((event: string, handler: Function) => {
-      if (!mockConn._listeners.has(event)) mockConn._listeners.set(event, []);
-      mockConn._listeners.get(event)!.push(handler);
-      return mockConn;
-    });
+    ({ household, mockConn } = freshHousehold({ host: '192.168.68.96' }));
   });
 
   it('does not produce an unhandled rejection when the background ladder fails setup after connect() already rejected', async () => {
@@ -418,19 +383,7 @@ describe('SonosHousehold per-speaker resilience', () => {
   let mockConn: any;
 
   beforeEach(async () => {
-    vi.clearAllMocks();
-    const Constructor = SonosConnection as unknown as ReturnType<typeof vi.fn>;
-    Constructor.mockClear();
-
-    household = new SonosHousehold({ host: '192.168.68.96' });
-    mockConn = getMockConnection();
-
-    mockConn._listeners.clear();
-    mockConn.on.mockImplementation((event: string, handler: Function) => {
-      if (!mockConn._listeners.has(event)) mockConn._listeners.set(event, []);
-      mockConn._listeners.get(event)!.push(handler);
-      return mockConn;
-    });
+    ({ household, mockConn } = freshHousehold({ host: '192.168.68.96' }));
 
     mockConn.send.mockImplementation((request: any) => {
       const [headers] = request;
@@ -618,18 +571,9 @@ describe('topology follows group changes', () => {
 
   beforeEach(async () => {
     vi.useFakeTimers();
-    vi.clearAllMocks();
-    (SonosConnection as unknown as ReturnType<typeof vi.fn>).mockClear();
-
     topology = mockTopology;
-    household = new SonosHousehold({ host: '192.168.68.96', autoConnect: false });
-    mockConn = getMockConnection();
-    mockConn._listeners.clear();
-    mockConn.on.mockImplementation((event: string, handler: Function) => {
-      if (!mockConn._listeners.has(event)) mockConn._listeners.set(event, []);
-      mockConn._listeners.get(event)!.push(handler);
-      return mockConn;
-    });
+    ({ household, mockConn } = freshHousehold({ host: '192.168.68.96', autoConnect: false }));
+
     mockConn.send.mockImplementation((request: any) => {
       const [headers] = request;
       if (headers.namespace === 'groups:1' && headers.command === 'getGroups') {
@@ -692,16 +636,8 @@ describe('diagnostic event subscriptions', () => {
     ).length;
 
   beforeEach(async () => {
-    vi.clearAllMocks();
-    (SonosConnection as unknown as ReturnType<typeof vi.fn>).mockClear();
-    household = new SonosHousehold({ host: '192.168.68.96', autoConnect: false });
-    mockConn = getMockConnection();
-    mockConn._listeners.clear();
-    mockConn.on.mockImplementation((event: string, handler: Function) => {
-      if (!mockConn._listeners.has(event)) mockConn._listeners.set(event, []);
-      mockConn._listeners.get(event)!.push(handler);
-      return mockConn;
-    });
+    ({ household, mockConn } = freshHousehold({ host: '192.168.68.96', autoConnect: false }));
+
     mockConn.send.mockImplementation((request: any) => {
       const [headers] = request;
       if (headers.namespace === 'groups:1' && headers.command === 'getGroups') {
@@ -731,5 +667,74 @@ describe('diagnostic event subscriptions', () => {
 
   it('a failing subscription does not stop the household connecting', async () => {
     expect(household.players.size).toBe(3);
+  });
+});
+
+describe('household setup lifecycle', () => {
+  const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
+
+  it('attaches its connection listeners once, however many times connect() is called', async () => {
+    const { household, mockConn } = freshHousehold({ host: '192.168.68.96', autoConnect: false });
+    mockConn.send.mockImplementation((request: any) => {
+      const [headers] = request;
+      if (headers.command === 'getGroups') return Promise.resolve([{ householdId: 'HH_1', success: true }, mockTopology]);
+      return Promise.resolve([{ success: true }, {}]);
+    });
+
+    await household.connect();
+    await household.disconnect();
+    await household.connect();
+
+    for (const event of ['connected', 'disconnected', 'reconnecting', 'error', 'message']) {
+      expect(mockConn._listeners.get(event)).toHaveLength(1);
+    }
+  });
+
+  it('queues a second setup run behind the first instead of interleaving them', async () => {
+    const { household, mockConn } = freshHousehold({ host: '192.168.68.96', autoConnect: false });
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+    mockConn.send.mockImplementation(async (request: any) => {
+      const [headers] = request;
+      if (headers.command === 'getGroups' && headers.householdId) {
+        await readGate;
+        return [{ householdId: 'HH_1', success: true }, mockTopology];
+      }
+      if (headers.command === 'getGroups') return [{ householdId: 'HH_1', success: true }, mockTopology];
+      return [{ success: true }, {}];
+    });
+    const topologyReads = () =>
+      mockConn.send.mock.calls.filter(([r]: any) => r[0].command === 'getGroups' && r[0].householdId).length;
+
+    const connecting = household.connect();
+    await flush();
+    expect(topologyReads()).toBe(1);
+
+    // The connection flaps while the first run waits on its topology read.
+    const secondRun = mockConn._listeners.get('connected')[0]();
+    await flush();
+    expect(topologyReads()).toBe(1);
+
+    releaseRead();
+    await connecting;
+    await secondRun;
+    expect(topologyReads()).toBe(2);
+  });
+
+  it('logs a reconnect setup that fails', async () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const { household, mockConn } = freshHousehold({ host: '192.168.68.96', autoConnect: false, logger });
+    mockConn.send.mockImplementation((request: any) => {
+      const [headers] = request;
+      if (headers.command === 'getGroups') return Promise.resolve([{ householdId: 'HH_1', success: true }, mockTopology]);
+      return Promise.resolve([{ success: true }, {}]);
+    });
+    await household.connect();
+
+    // The socket drops again while the reconnect's setup is running.
+    mockConn.state = 'disconnected';
+    await mockConn._listeners.get('connected')[0]();
+
+    expect(logger.warn).toHaveBeenCalledWith('Failed reconnect setup', expect.objectContaining({ message: 'Disconnected during setup' }));
   });
 });
