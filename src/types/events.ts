@@ -89,8 +89,7 @@ export interface SonosEvents {
 
   /**
    * Emitted when the group coordinator changes (e.g. speakers grouped/ungrouped).
-   * The client automatically calls {@link SonosClient.refreshGroups} to update
-   * its internal groupId. Listen to this event to react to topology changes.
+   * The client and the household re-read the topology themselves, so their player handles follow the change.
    * @param source - The player or group the event is about.
    */
   coordinatorChanged: (data: GroupCoordinatorChangedEvent, source: SonosEventSource) => void;

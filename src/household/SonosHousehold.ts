@@ -46,7 +46,7 @@ export interface SonosHouseholdOptions {
   reconnect?: Partial<ReconnectOptions> | boolean;
   /** Custom logger. */
   logger?: Logger;
-  /** Command timeout in ms. @defaultValue 5000 */
+  /** Command timeout in ms. @defaultValue 120000 */
   requestTimeout?: number;
   /**
    * Connect to all speakers at startup. @defaultValue true
@@ -60,9 +60,9 @@ export interface SonosHouseholdOptions {
 /**
  * Top-level API for controlling an entire Sonos household.
  *
- * Owns a single {@link SonosConnection} and exposes {@link PlayerHandle}
- * objects for targeting individual speakers. Automatically tracks group
- * topology changes and provides high-level grouping operations.
+ * Owns a {@link SonosConnection} to the primary speaker and, unless `autoConnect` is false, one to each other speaker.
+ * Exposes {@link PlayerHandle} objects for targeting individual speakers, tracks group topology changes, and provides
+ * high-level grouping operations.
  *
  * @example
  * ```typescript
@@ -334,7 +334,8 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
    * Best effort and not awaited: a send to an offline speaker can wait out the whole request timeout, and diagnostics
    * must never stop or stall a household connecting. Each intent is recorded before its send, so an offline speaker's
    * are re-sent when its socket connects.
-   * Runs once, at first connect; resubscribeAll() keeps them alive after.
+   * Runs once, at first connect; resubscribeAll() keeps them alive after. Re-running first-connect setup (connect() after
+   * disconnect()) re-declares these intents, undoing an earlier unsubscribe() of them.
    */
   private subscribeDiagnostics(): void {
     for (const handle of this._players.values()) {

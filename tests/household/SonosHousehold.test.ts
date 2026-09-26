@@ -291,7 +291,7 @@ describe('SonosHousehold first-connect-after-fail setup', () => {
     const connectPromise = household.connect();
 
     // Simulate the connection successfully opening
-    // (this fires the 'connected' handler that was registered in connect())
+    // (this fires the 'connected' handler the constructor registered)
     const connectedHandlers = mockConn._listeners.get('connected') || [];
     expect(connectedHandlers.length).toBeGreaterThan(0);
 
@@ -353,8 +353,8 @@ describe('SonosHousehold connect() unhandled rejection safety', () => {
     try {
       await expect(household.connect()).rejects.toThrow('ECONNREFUSED');
 
-      // Simulate the background ladder's later success by firing the same
-      // 'connected' listener household.connect() registered.
+      // Simulate the background ladder's later success by firing the
+      // 'connected' listener the household's constructor registered.
       const connectedHandlers = mockConn._listeners.get('connected') || [];
       expect(connectedHandlers.length).toBeGreaterThan(0);
       await connectedHandlers[0]();
