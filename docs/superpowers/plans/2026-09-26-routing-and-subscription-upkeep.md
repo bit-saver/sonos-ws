@@ -19,7 +19,7 @@
 - The `ws` mock in `tests/client/SonosConnection.test.ts` throws on an unlistened `'error'` on purpose. Do not weaken it.
 - **Mutation-verify every test that guards an invariant:** break the guarded line, run the test, confirm exactly that test fails, restore. Each task names which tests need it. Report the result in your summary.
 - `connect()` must always settle, exactly once. Every handler inside `SonosConnection.connect()` acts on its captured `socket`, never `this.ws`.
-- American spelling in comments and docs. Match the surrounding comment density: explain *why*, not *what*.
+- American spelling in comments and docs. Comments follow the owner's rule (`~/.claude/rules/code-comments.md`): brief, *why* not *what*, no dates or incident history (those go in commit messages); no linter sets a line limit here, so wrap comments only past ~160 characters. Copy the plan's comments as written — they already comply.
 - `tests/` is not type-checked by `tsc` (tsconfig includes only `src/`), but keep test code type-plausible.
 
 ---
@@ -616,11 +616,8 @@ Expected: FAIL — the first and third `subscription intent` tests (intent set o
 
 ```typescript
 /**
- * Runs every task to completion, then rejects with one AggregateError that
- * holds every failure — nested AggregateErrors flattened — if any failed.
- *
- * Unlike Promise.all, one failure does not abandon the rest: restoring
- * subscriptions must still try the second socket when the first is down.
+ * Runs every task to completion, then rejects with one AggregateError of all failures (nested ones flattened).
+ * Unlike Promise.all, one failure does not abandon the rest.
  */
 export async function settleAll(tasks: Promise<unknown>[], message: string): Promise<void> {
   const results = await Promise.allSettled(tasks);
@@ -638,11 +635,8 @@ In `src/namespaces/BaseNamespace.ts`, replace everything from the `isSubscribed`
 
 ```typescript
   /**
-   * Whether events for this namespace are wanted: set by {@link subscribe},
-   * cleared by {@link unsubscribe}. This is the intent, not proof that the
-   * speaker holds a subscription right now — a reconnect drops every
-   * subscription on the socket, and a regroup drops a group-level one — and
-   * {@link resubscribe} is how the owner puts one back.
+   * Whether events for this namespace are wanted. An intent, not proof a subscription is live: a reconnect or a regroup
+   * can drop it, and {@link resubscribe} puts it back.
    */
   get isSubscribed(): boolean {
     return this.subscribed;
@@ -651,10 +645,7 @@ In `src/namespaces/BaseNamespace.ts`, replace everything from the `isSubscribed`
   /**
    * Subscribes to real-time events for this namespace.
    *
-   * The intent is recorded before the command is sent, so it outlives a
-   * failed send: a subscribe attempted while the socket is down is retried
-   * by the next {@link resubscribe}. The promise still rejects, so the
-   * caller learns this attempt failed.
+   * The intent is recorded before sending, so a failed attempt is retried by the next {@link resubscribe}; the promise still rejects.
    */
   async subscribe(): Promise<void> {
     this.subscribed = true;
@@ -662,13 +653,10 @@ In `src/namespaces/BaseNamespace.ts`, replace everything from the `isSubscribed`
   }
 
   /**
-   * Unsubscribes from real-time events for this namespace.
+   * Unsubscribes from real-time events for this namespace. The intent is dropped before sending.
    *
-   * The intent is dropped before the command is sent, so a failed send does
-   * not leave the subscription to be restored later. Sonos keeps one
-   * subscription per socket and target, so for a group-level namespace this
-   * also stops the events other handles in the same group asked for, until
-   * the owner's next {@link resubscribe} restores theirs.
+   * Sonos keeps one subscription per socket and target, so for a group-level namespace this also stops the events other
+   * handles in the group asked for, until their next {@link resubscribe}.
    */
   async unsubscribe(): Promise<void> {
     this.subscribed = false;
@@ -676,11 +664,8 @@ In `src/namespaces/BaseNamespace.ts`, replace everything from the `isSubscribed`
   }
 
   /**
-   * Sends the subscribe again if events are wanted; does nothing otherwise.
-   *
-   * Re-sending a live subscription is harmless — Sonos keeps one per socket
-   * and target, verified live — so the owner can call this after any change
-   * that may have dropped it, without tracking which ones actually died.
+   * Sends the subscribe again if events are wanted. Safe on a live subscription (Sonos keeps one per socket and target),
+   * so owners call it after any change that may have dropped one.
    */
   async resubscribe(): Promise<void> {
     if (this.subscribed) await this.send('subscribe');
@@ -710,10 +695,7 @@ In `src/namespaces/BaseNamespace.ts`, replace everything from the `isSubscribed`
   /** Unsubscribes from playback state events. */
   async unsubscribe(): Promise<void> { await this.pb.unsubscribe(); }
 
-  /**
-   * Subscribes to track metadata events. Separate from {@link subscribe}
-   * because these events are large and arrive on every track change.
-   */
+  /** Subscribes to track metadata events — separate from {@link subscribe} because they are large and frequent. */
   async subscribeMetadata(): Promise<void> { await this.meta.subscribe(); }
 
   /** Unsubscribes from track metadata events. */
@@ -744,10 +726,8 @@ In `src/player/PlayerHandle.ts`, add `import { settleAll } from '../util/settleA
 
 ```typescript
   /**
-   * Re-sends every subscription this handle wants, each through the socket
-   * it belongs on now — a group-level one follows the current coordinator
-   * and group ID. Attempts all of them, then rejects with an AggregateError
-   * of every failure.
+   * Re-sends every subscription this handle wants, each through the socket it now belongs on.
+   * Tries them all, then rejects with an AggregateError of the failures.
    * @internal
    */
   async resubscribe(): Promise<void> {
@@ -756,6 +736,15 @@ In `src/player/PlayerHandle.ts`, add `import { settleAll } from '../util/settleA
       `Failed to restore event subscriptions for ${this.name}`,
     );
   }
+```
+
+- [ ] **Step 6b: Tighten the coordinator-context comment from Task 3a**
+
+In `src/player/PlayerHandle.ts`, replace the six-line comment above `const coordinatorContext` (it begins `// Coordinator context — for group-level commands`) with:
+
+```typescript
+    // Coordinator context — group-level commands (group volume, playback, metadata, loading a favorite or playlist):
+    // Sonos accepts them only on the coordinator's socket. Falls back to the speaker connection without a resolver.
 ```
 
 - [ ] **Step 7: Verify**
@@ -893,11 +882,7 @@ Expected: FAIL — `ignores a groupVolume event for another group` (gets 99), `r
 In `src/player/VolumeControl.ts`, add near the top of the module (after the imports):
 
 ```typescript
-/**
- * How long group.relative waits for the groupVolume event before reading the
- * volume instead. The event normally arrives within a second; it never does
- * if nothing subscribed this group on the coordinator's socket.
- */
+/** How long group.relative waits for the groupVolume event before reading the volume instead. */
 const RELATIVE_EVENT_WAIT_MS = 2000;
 ```
 
@@ -905,11 +890,8 @@ Replace the whole `relative:` entry of the `group` object with:
 
 ```typescript
     relative: async (delta: number): Promise<GroupVolumeStatus> => {
-      // setRelativeVolume answers with an empty body, and a getVolume sent
-      // right after it still reads the old value (checked live 2026-09-25),
-      // so the new volume is taken from the groupVolume event that follows.
-      // The event must name this group: the coordinator's socket carries
-      // events for every group subscribed on it.
+      // setRelativeVolume replies with an empty body and an immediate getVolume still reads the old value, so take the
+      // new volume from the groupVolume event — the one naming this group, since the socket carries every group's.
       const conn = this.coordinatorContext.connection;
       const groupId = this.coordinatorContext.getGroupId();
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -929,9 +911,8 @@ Replace the whole `relative:` entry of the `group` object with:
         };
         timer = setTimeout(() => {
           stopWaiting();
-          // No event: most likely nothing subscribed this group on this
-          // socket. By now a read is current. If it fails too, say so —
-          // a made-up volume would be indistinguishable from a real one.
+          // No event (likely nothing subscribed this group here), so read instead. A failed read rejects: an invented
+          // volume would pass for a real one.
           this._group.getVolume().then(resolve, reject);
         }, RELATIVE_EVENT_WAIT_MS);
         conn.on('message', handler);
@@ -940,9 +921,7 @@ Replace the whole `relative:` entry of the `group` object with:
       try {
         await this._group.setRelativeVolume(delta);
       } catch (err) {
-        // The change was refused; leave nothing behind to fire later. The
-        // abandoned volumeEvent never settles, so it cannot surface as an
-        // unhandled rejection.
+        // Refused: leave nothing behind to fire later. volumeEvent never settles, so it cannot reject unhandled.
         stopWaiting();
         throw err;
       }
@@ -1108,12 +1087,7 @@ Expected: FAIL — `attaches its connection listeners once` (lengths 2), `queues
 In `src/household/SonosHousehold.ts`, add these fields after `private _lastTopologyKey = '';`:
 
 ```typescript
-  /**
-   * Setup runs, chained so each starts only after the previous one settles.
-   * A connection that flaps mid-setup fires 'connected' again; a second run
-   * alongside the first would interleave two topology reads, two rounds of
-   * speaker connections and two rounds of subscriptions.
-   */
+  /** Setup runs, chained so each starts after the previous one settles: a flap mid-setup must not run two at once. */
   private setupChain: Promise<void> = Promise.resolve();
   /** Settles the promise that the current connect() call is waiting on. */
   private pendingSetup: { resolve: () => void; reject: (err: unknown) => void } | null = null;
@@ -1122,8 +1096,7 @@ In `src/household/SonosHousehold.ts`, add these fields after `private _lastTopol
 In the constructor, after the safety-net `this.on('error', …)` block, add:
 
 ```typescript
-    // Attached once, here. connect() can be called again after disconnect(),
-    // and attaching there stacked another copy of every listener each time.
+    // Attached once: attaching in connect() stacked another copy on every call.
     this.connection.on('connected', () => this.onPrimaryConnected());
     this.connection.on('disconnected', (r) => this.emit('disconnected', r));
     this.connection.on('reconnecting', (a, d) => this.emit('reconnecting', a, d));
@@ -1140,14 +1113,8 @@ Replace the body of `connect()` with:
     const setup = new Promise<void>((resolve, reject) => {
       this.pendingSetup = { resolve, reject };
     });
-    // If this.connection.connect() below rejects, this method throws before
-    // ever reaching `await setup` — so nothing is listening to it yet. Should
-    // the background reconnect ladder later succeed and then fail
-    // first-connect setup, onPrimaryConnected() rejects this same promise,
-    // which — with no listener — would surface as an unhandled rejection and
-    // crash the host process. This no-op catch keeps that rejection from
-    // ever being "unhandled"; the `await setup` below still observes it when
-    // connect() succeeds and setup then fails.
+    // If the connect below throws, nothing awaits `setup`, yet the background ladder can still fail first-connect setup
+    // and reject it. Unhandled, that rejection would crash the host.
     setup.catch(() => {});
 
     await this.connection.connect();
@@ -1158,12 +1125,7 @@ Replace the body of `connect()` with:
 Add this method directly after `connect()`:
 
 ```typescript
-  /**
-   * Queues a setup run for a primary 'connected' event behind any run still
-   * in flight, and settles the pending connect() once first-connect setup
-   * finishes or fails. Returns the queued run so tests can await it; the
-   * emitter ignores it.
-   */
+  /** Queues a setup run behind any in flight and settles the pending connect(). Returns the run so tests can await it. */
   private onPrimaryConnected(): Promise<void> {
     const run = this.setupChain.then(async () => {
       try {
@@ -1363,11 +1325,8 @@ In `src/household/SonosHousehold.ts`, add this method after `connectToSpeaker()`
 
 ```typescript
   /**
-   * The socket to reach a player through: its own connection, or the primary.
-   * The primary speaker has no entry in speakerConnections (it reuses the
-   * primary), and with `autoConnect: false` no speaker does — in that case
-   * group-level commands for a group led by another speaker go through the
-   * primary and fail, which is the documented cost of that option.
+   * A player's own socket, else the primary. Right for the primary speaker, which has no entry of its own; under
+   * `autoConnect: false` group commands for a group led elsewhere then fail, as documented on that option.
    */
   private connectionForPlayer(playerId: string): SonosConnection {
     return this.speakerConnections.get(playerId) ?? this.connection;
@@ -1387,9 +1346,7 @@ with
 
 ```typescript
         const handle = new PlayerHandle(player, group, householdId, this.connection, this.connection);
-        // Group-level commands follow the group's current coordinator. Set at
-        // creation so a handle made after setup (a new speaker) routes
-        // correctly without waiting for a reconnect to wire it.
+        // Set at creation, so a handle made after setup (a new speaker) routes group commands correctly too.
         handle.setCoordinatorConnectionResolver(() => this.connectionForPlayer(handle.coordinatorId));
         this._players.set(player.id, handle);
 ```
@@ -1406,9 +1363,8 @@ Update the `autoConnect` option's doc comment in `SonosHouseholdOptions` to:
   /**
    * Connect to all speakers at startup. @defaultValue true
    *
-   * With `false`, no per-speaker sockets are opened, so every command goes
-   * through the primary — and group-level commands for a group led by another
-   * speaker fail with `groupCoordinatorChanged`.
+   * With `false` every command goes through the primary, so group-level commands for a group led by another speaker fail
+   * with `groupCoordinatorChanged`.
    */
 ```
 
@@ -1516,10 +1472,8 @@ In `src/types/events.ts`, add after the imports:
 
 ```typescript
 /**
- * Where an event came from, copied from its headers. Player-level namespaces
- * (playerVolume, homeTheater) name the player; group-level ones (groupVolume,
- * playback, playbackMetadata) name the group. Nothing says who caused the
- * change: Sonos events carry state, never origin.
+ * What an event is about, from its headers: player-level namespaces name the player, group-level ones the group.
+ * Sonos never says who caused a change.
  */
 export interface EventSource {
   playerId?: string;
@@ -1552,10 +1506,7 @@ Create `src/util/eventSource.ts`:
 import type { MessageHeaders } from '../types/messages.js';
 import type { EventSource } from '../types/events.js';
 
-/**
- * The source tag for an event: the player or group its headers name. A key
- * the headers lack is left out rather than set to undefined.
- */
+/** The source tag for an event's headers; keys the headers lack are omitted, not set to undefined. */
 export function sourceOf(headers: MessageHeaders | undefined): EventSource {
   const source: EventSource = {};
   if (headers?.playerId) source.playerId = headers.playerId;
@@ -1572,8 +1523,7 @@ Replace the start of `handleMessage()` and its coordinator branch and final emit
 
 ```typescript
   /**
-   * Routes incoming unsolicited messages — from the primary and from every
-   * speaker socket — to typed events, each tagged with its source.
+   * Routes unsolicited messages from every socket to typed events, tagged with their source.
    * Filters by `_objectType` to avoid double-firing and Volume: undefined.
    */
   private handleMessage(message: SonosResponse): void {
@@ -1590,8 +1540,7 @@ Replace the start of `handleMessage()` and its coordinator branch and final emit
 
     const objectType = body?._objectType as string | undefined;
 
-    // A regroup reports this on every socket whose subscriptions it touched,
-    // so several can arrive together; one debounced read covers them all.
+    // A regroup reports this on several sockets at once; one debounced read covers them.
     if (objectType === 'groupCoordinatorChanged') {
       this.emit('coordinatorChanged', body as unknown as GroupCoordinatorChangedEvent, source);
       this.scheduleTopologyRefresh();
@@ -1635,11 +1584,7 @@ with
 and add after `connectToSpeaker()`:
 
 ```typescript
-  /**
-   * Builds a speaker's connection and wires it once. Its events reach
-   * listeners exactly as the primary's do: after a regroup, a group's
-   * subscriptions live on its coordinator's socket, whichever speaker that is.
-   */
+  /** Builds and wires a speaker's connection; its events reach listeners like the primary's. */
   private createSpeakerConnection(url: URL): SonosConnection {
     const conn = new SonosConnection({
       host: url.hostname,
@@ -1774,12 +1719,11 @@ Add the method after `subscribeDiagnostics()`:
 
 ```typescript
   /**
-   * Re-sends every subscription a player handle wants. Called wherever one
-   * may have died: at the end of setup and of every primary reconnect, when a
-   * speaker's own socket reconnects, and when group membership changes — a
-   * group-level subscription names a group ID, and a player that leaves a
-   * group comes back under a new one. Re-sending a live subscription is
-   * harmless, so nothing tracks which ones actually died.
+   * Re-sends every subscription the handles want. Runs wherever one may have died:
+   * - the end of setup and of each primary reconnect
+   * - a speaker's own socket reconnecting
+   * - a membership change (a player that leaves a group gets a new group ID)
+   * Re-sending a live subscription is harmless, so nothing tracks which ones died.
    */
   private async resubscribeAll(): Promise<void> {
     await Promise.all(
@@ -1793,9 +1737,8 @@ Add the method after `subscribeDiagnostics()`:
 In `refreshTopology()`, directly before the existing `// Only emit topologyChanged if …` comment, add:
 
 ```typescript
-    // Membership, not playback state, decides whether subscriptions moved:
-    // playbackState changes on every play/pause. The first read has nothing
-    // to compare against, and setup restores subscriptions itself.
+    // Membership, not playback state (which flips on every play/pause), decides whether subscriptions moved.
+    // The first read has nothing to compare against; setup restores subscriptions itself.
     const membershipKey = result.groups
       .map((g) => `${g.id}:${g.coordinatorId}:${[...g.playerIds].sort().join(',')}`)
       .sort()
@@ -1825,8 +1768,7 @@ In `handleReconnected()`'s first-connect branch, replace
 with
 
 ```typescript
-        // Handles that outlived a disconnect() keep their intents; restore
-        // those first. Fresh handles have none, so this sends nothing for them.
+        // Restores intents on handles that outlived a disconnect(); fresh handles have none.
         await this.resubscribeAll();
         await this.subscribeDiagnostics();
         this._initialConnectDone = true;
@@ -1845,12 +1787,11 @@ In the reconnect branch, replace
 with
 
 ```typescript
-      // The reconnected socket holds no subscriptions; re-send the ones
-      // wanted (the diagnostic ones were declared at first connect).
+      // The reconnected socket holds no subscriptions; re-send the wanted ones.
       await this.resubscribeAll();
 ```
 
-Update `subscribeDiagnostics()`'s docstring by appending: `Runs once, at first connect: it declares these subscriptions as wanted, and resubscribeAll() keeps them alive from then on.`
+Update `subscribeDiagnostics()`'s docstring by appending: `Runs once, at first connect; resubscribeAll() keeps them alive after.`
 
 - [ ] **Step 5: Verify**
 
@@ -2048,10 +1989,8 @@ import type { SonosConnection } from './SonosConnection.js';
 import type { SonosResponse } from '../types/messages.js';
 
 /**
- * Reads the household ID from a speaker. Sonos refuses `getGroups` without
- * one (`success:false`, `type:globalError`) but names the household in the
- * refusal's headers, so the refusal is the answer. Returns undefined when
- * neither a reply nor a refusal carries one (a timeout, a lost connection).
+ * Reads the household ID from a speaker. Sonos refuses `getGroups` without one but names the household in the refusal's
+ * headers. Undefined when neither a reply nor a refusal carries it (a timeout, a lost connection).
  */
 export async function discoverHouseholdId(connection: SonosConnection): Promise<string | undefined> {
   try {
@@ -2131,11 +2070,9 @@ const DEFAULT_RECONNECT: ReconnectOptions = {
 /**
  * Simple single-speaker API for controlling one Sonos player.
  *
- * Everything goes through this one speaker's socket. Sonos accepts group-level
- * commands (group volume, playback, loading a favorite or playlist) only from
- * the group's coordinator, so while this speaker is grouped under another one
- * those commands fail with `groupCoordinatorChanged`. For grouped speakers use
- * {@link SonosHousehold}, which routes them.
+ * Everything goes through this speaker's socket, so while it is grouped under another speaker, group-level commands
+ * (group volume, playback, loading a favorite or playlist) fail with `groupCoordinatorChanged`. Use
+ * {@link SonosHousehold} for grouped speakers.
  *
  * @example
  * ```typescript
@@ -2151,7 +2088,7 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
   private readonly host: string;
   private _handle: PlayerHandle | undefined;
   private _householdId: string | undefined;
-  /** Setup runs, chained so each starts only after the previous one settles. */
+  /** Setup runs, chained so each starts after the previous one settles. */
   private setupChain: Promise<void> = Promise.resolve();
   /** Settles the promise that the current connect() call is waiting on. */
   private pendingSetup: { resolve: () => void; reject: (err: unknown) => void } | null = null;
@@ -2175,8 +2112,7 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
       this.log.error(`Unhandled client error: ${err.message}`);
     });
 
-    // Attached once, here. connect() can be called again after disconnect(),
-    // and attaching there stacked another copy of every listener each time.
+    // Attached once: attaching in connect() stacked another copy on every call.
     this.connection.on('connected', () => this.onConnected());
     this.connection.on('disconnected', (r) => this.emit('disconnected', r));
     this.connection.on('reconnecting', (a, d) => this.emit('reconnecting', a, d));
@@ -2209,9 +2145,7 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
     const setup = new Promise<void>((resolve, reject) => {
       this.pendingSetup = { resolve, reject };
     });
-    // If connection.connect() rejects, nothing awaits `setup` — yet a later
-    // background reconnect can still run setup and reject it. Without this
-    // no-op catch that rejection would be unhandled and crash the host.
+    // If the connect below throws, nothing awaits `setup`, yet a later reconnect can still reject it; unhandled, that crashes the host.
     setup.catch(() => {});
 
     await this.connection.connect();
@@ -2229,10 +2163,7 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
     return run;
   }
 
-  /**
-   * Runs setup for each connect and reconnect, then emits `connected` once.
-   * Returns the queued run so tests can await it; the emitter ignores it.
-   */
+  /** Runs setup on each connect and reconnect, then emits `connected` once. Returns the run so tests can await it. */
   private onConnected(): Promise<void> {
     return this.enqueue(async () => {
       try {
@@ -2248,9 +2179,8 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
   }
 
   /**
-   * Finds the speaker at the configured host in its household and builds its
-   * handle — or, when the handle already exists, moves it to its current group
-   * and restores its event subscriptions, which died with the old socket.
+   * Finds this speaker by host and builds its handle. On a reconnect, moves the existing handle to its current group and
+   * restores its subscriptions, which died with the old socket.
    */
   private async locatePlayer(): Promise<void> {
     const householdId = await discoverHouseholdId(this.connection);
