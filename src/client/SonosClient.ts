@@ -145,8 +145,9 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
   private onConnected(): Promise<void> {
     this.connectedEpoch++;
     if (this.ownedHandshakes > 0) return Promise.resolve();
-    // setUp() logs its own failure, and a background run has no caller to tell.
-    return this.enqueue(() => this.setUp()).catch(() => {});
+    // setUp() logs its own failure, and a background run has no caller to tell. A run queued ahead of this one may
+    // already have set this socket up.
+    return this.enqueue(() => (this.setUpOnCurrentSocket ? Promise.resolve() : this.setUp())).catch(() => {});
   }
 
   /** Finds this speaker, then emits `connected`. Logs and rethrows a failure. */

@@ -186,7 +186,8 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   async connect(): Promise<void> {
     // Already set up on the socket that is up now — nothing to do.
     if (this.setUpOnCurrentSocket && this.connection.state === 'connected') return;
-    this._initialConnectDone = false;
+    // A new socket gets first-connect setup; a live one may have a ladder run in flight, which this call just waits for.
+    if (this.connection.state !== 'connected') this._initialConnectDone = false;
     this.ownedHandshakes++;
     try {
       await this.connection.connect();
@@ -201,8 +202,9 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   private onPrimaryConnected(): Promise<void> {
     this.primaryEpoch++;
     if (this.ownedHandshakes > 0) return Promise.resolve();
-    // handleReconnected() logs its own failures, and a background run has no caller to tell.
-    return this.enqueueSetup(() => this.handleReconnected()).catch(() => {});
+    // handleReconnected() logs its own failures, and a background run has no caller to tell. A run queued ahead of this
+    // one may already have set this socket up.
+    return this.enqueueSetup(() => (this.setUpOnCurrentSocket ? Promise.resolve() : this.handleReconnected())).catch(() => {});
   }
 
   /** Runs setup work after any run in flight. A failure rejects this call, never the chain. */

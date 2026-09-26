@@ -327,3 +327,67 @@ describe('connect() settles every caller exactly once', () => {
     }
   });
 });
+
+describe('setup runs once per socket', () => {
+  it('connect() during a ladder reconnect run waits for it instead of redoing first-connect setup', async () => {
+    const household = new SonosHousehold({ host: '10.0.0.12', autoConnect: false });
+    const primary = instances[instances.length - 1];
+    await household.connect();
+    let connectedEmits = 0;
+    household.on('connected', () => { connectedEmits++; });
+    const mark = primary.sent.length;
+
+    // The ladder reconnects on its own (handshake 2, unowned); its setup run parks in the topology read.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    primary.gate = (h: any) => (h.command === 'getGroups' && h.householdId ? gate : null);
+    primary.drop();
+    void primary.connect().catch(() => {});
+    await sleep(10);
+
+    const second = outcomeOf(household.connect());
+    await flush();
+    expect(second.v).toBe('pending');
+    primary.gate = null;
+    release();
+    await sleep(50);
+
+    const after = primary.sent.slice(mark);
+    expect(second.v).toBe('ok');
+    expect(after.filter((s: any) => s.cmd === 'getGroups' && !s.hh)).toHaveLength(0); // no household rediscovery
+    expect(after.filter((s: any) => s.cmd === 'getGroups' && s.hh)).toHaveLength(1);
+    expect(groupsSubsOn(primary, 2)).toBe(1);
+    expect(connectedEmits).toBe(1);
+  });
+
+  it('a ladder reconnect queued behind overlapping connect() calls finds its socket already set up', async () => {
+    twoPlayers = true;
+    manualHosts.add('10.0.0.9');
+    try {
+      const household = new SonosHousehold({ host: '10.0.0.13' });
+      const primary = instances[instances.length - 1];
+      let connectedEmits = 0;
+      household.on('connected', () => { connectedEmits++; });
+      const a = outcomeOf(household.connect());
+      const b = outcomeOf(household.connect());
+      await sleep(20);
+      const sub = [...instances].reverse().find((i) => i.host === '10.0.0.9' && i.state === 'connecting');
+
+      // While a's setup waits on the sub speaker, the primary drops and the ladder reconnects (handshake 2, unowned).
+      primary.drop();
+      void primary.connect().catch(() => {});
+      await sleep(20);
+      sub.finishHandshake();
+      await sleep(50);
+
+      expect([a.v, b.v]).toEqual(['ok', 'ok']);
+      // b's queued run sets socket 2 up; the ladder's run, queued behind it, has nothing left to do.
+      expect(primary.sent.filter((s: any) => s.cmd === 'getGroups' && s.hh && s.hs === 2)).toHaveLength(1);
+      expect(groupsSubsOn(primary, 2)).toBe(1);
+      expect(connectedEmits).toBe(2); // one per socket
+    } finally {
+      twoPlayers = false;
+      manualHosts.delete('10.0.0.9');
+    }
+  });
+});

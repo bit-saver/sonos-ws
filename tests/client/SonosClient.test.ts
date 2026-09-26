@@ -196,4 +196,32 @@ describe('SonosClient against a speaker', () => {
 
     expect(unscopedGetGroups()).toBe(before);
   });
+
+  it('reconnects queued behind a parked setup run set up the current socket once', async () => {
+    const { client, conn } = newClient();
+    await client.connect();
+    const connected = vi.fn();
+    client.on('connected', connected);
+    const scopedGetGroups = () => conn.send.mock.calls.filter(
+      ([r]: any) => r[0].namespace === 'groups:1' && r[0].command === 'getGroups' && r[0].householdId,
+    ).length;
+    const before = scopedGetGroups();
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    conn.send.mockImplementation(async (request: any) => {
+      if (request[0].command === 'getGroups' && request[0].householdId) await gate;
+      return speakerSend(request);
+    });
+    const onConnected = conn._listeners.get('connected')[0];
+    const first = onConnected(); // socket 2: its setup run parks in getGroups
+    await new Promise((r) => setTimeout(r, 0));
+    const queued = [onConnected(), onConnected()]; // sockets 3 and 4 come up while it is parked
+    release();
+    await Promise.all([first, ...queued]);
+
+    // The parked run, then one for socket 4; the last queued run finds socket 4 already set up.
+    expect(scopedGetGroups() - before).toBe(2);
+    expect(connected).toHaveBeenCalledTimes(2);
+  });
 });
