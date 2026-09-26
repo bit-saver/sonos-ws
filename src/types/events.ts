@@ -12,7 +12,7 @@ import type { SonosError } from '../errors/SonosError.js';
  * What an event is about, from its headers: player-level namespaces name the player, group-level ones the group.
  * Sonos never says who caused a change.
  */
-export interface EventSource {
+export interface SonosEventSource {
   playerId?: string;
   groupId?: string;
 }
@@ -50,42 +50,42 @@ export interface SonosEvents {
    * Emitted when the group volume or mute state changes.
    * @param source - The player or group the event is about.
    */
-  volumeChanged: (data: GroupVolumeStatus, source: EventSource) => void;
+  volumeChanged: (data: GroupVolumeStatus, source: SonosEventSource) => void;
   /**
    * Emitted when an individual player's volume or mute state changes.
    * @param source - The player or group the event is about.
    */
-  playerVolumeChanged: (data: PlayerVolumeStatus, source: EventSource) => void;
+  playerVolumeChanged: (data: PlayerVolumeStatus, source: SonosEventSource) => void;
   /**
    * Emitted when group membership or topology changes (players grouped/ungrouped).
    * @param source - The player or group the event is about.
    */
-  groupsChanged: (data: GroupsResponse, source: EventSource) => void;
+  groupsChanged: (data: GroupsResponse, source: SonosEventSource) => void;
   /**
    * Emitted when the playback state, position, or play modes change.
    * @param source - The player or group the event is about.
    */
-  playbackChanged: (data: PlaybackStatus, source: EventSource) => void;
+  playbackChanged: (data: PlaybackStatus, source: SonosEventSource) => void;
   /**
    * Emitted when the currently playing track or next track metadata changes.
    * @param source - The player or group the event is about.
    */
-  metadataChanged: (data: MetadataStatus, source: EventSource) => void;
+  metadataChanged: (data: MetadataStatus, source: SonosEventSource) => void;
   /**
    * Emitted when the user's favorites list is modified.
    * @param source - The player or group the event is about.
    */
-  favoritesChanged: (data: FavoritesResponse, source: EventSource) => void;
+  favoritesChanged: (data: FavoritesResponse, source: SonosEventSource) => void;
   /**
    * Emitted when the user's playlists are modified.
    * @param source - The player or group the event is about.
    */
-  playlistsChanged: (data: PlaylistsResponse, source: EventSource) => void;
+  playlistsChanged: (data: PlaylistsResponse, source: SonosEventSource) => void;
   /**
    * Emitted when home theater settings (night mode, dialog enhancement) change.
    * @param source - The player or group the event is about.
    */
-  homeTheaterChanged: (data: HomeTheaterOptions, source: EventSource) => void;
+  homeTheaterChanged: (data: HomeTheaterOptions, source: SonosEventSource) => void;
 
   /**
    * Emitted when the group coordinator changes (e.g. speakers grouped/ungrouped).
@@ -93,13 +93,13 @@ export interface SonosEvents {
    * its internal groupId. Listen to this event to react to topology changes.
    * @param source - The player or group the event is about.
    */
-  coordinatorChanged: (data: GroupCoordinatorChangedEvent, source: EventSource) => void;
+  coordinatorChanged: (data: GroupCoordinatorChangedEvent, source: SonosEventSource) => void;
 
   /**
    * Emitted for every raw WebSocket message received from the Sonos device. Useful for debugging.
    * @param source - The player or group the event is about.
    */
-  rawMessage: (message: SonosResponse, source: EventSource) => void;
+  rawMessage: (message: SonosResponse, source: SonosEventSource) => void;
 }
 
 /**
