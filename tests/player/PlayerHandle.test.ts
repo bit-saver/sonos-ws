@@ -164,4 +164,43 @@ describe('PlayerHandle routing for a grouped non-coordinator', () => {
     expect(sentOn(coordinator)).toHaveLength(0);
     expect(sentOn(speaker)).toEqual([expect.objectContaining({ namespace, command })]);
   });
+
+  it('subscribeMetadata subscribes playbackMetadata:1 through the coordinator', async () => {
+    const { handle, coordinator } = office();
+    await handle.playback.subscribeMetadata();
+    expect(sentOn(coordinator)).toEqual([
+      expect.objectContaining({ namespace: 'playbackMetadata:1', command: 'subscribe', groupId: 'RINCON_BED:1' }),
+    ]);
+  });
+
+  it('resubscribe re-sends every wanted subscription, each on its own socket, and nothing else', async () => {
+    const { handle, speaker, coordinator } = office();
+    await handle.volume.subscribe();
+    await handle.volume.group.subscribe();
+    await handle.playback.subscribe();
+    await handle.homeTheater.subscribe();
+    (speaker.send as ReturnType<typeof vi.fn>).mockClear();
+    (coordinator.send as ReturnType<typeof vi.fn>).mockClear();
+
+    await handle.resubscribe();
+
+    const names = (conn: SonosConnection) => sentOn(conn).map((h: any) => `${h.namespace} ${h.command}`).sort();
+    expect(names(speaker)).toEqual(['homeTheater:1 subscribe', 'playerVolume:1 subscribe']);
+    expect(names(coordinator)).toEqual(['groupVolume:1 subscribe', 'playback:1 subscribe']);
+  });
+
+  it('resubscribe attempts them all and reports every failure', async () => {
+    const { handle, speaker, coordinator } = office();
+    await handle.volume.subscribe();
+    await handle.homeTheater.subscribe();
+    await handle.playback.subscribe();
+    (speaker.send as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('speaker down'));
+    (coordinator.send as ReturnType<typeof vi.fn>).mockClear();
+
+    const failure = await handle.resubscribe().catch((err: unknown) => err);
+
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors).toHaveLength(2);
+    expect(sentOn(coordinator)).toEqual([expect.objectContaining({ namespace: 'playback:1', command: 'subscribe' })]);
+  });
 });

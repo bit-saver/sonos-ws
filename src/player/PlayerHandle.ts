@@ -10,6 +10,7 @@ import { PlaylistsAccess } from './PlaylistsAccess.js';
 import { AudioClipControl } from './AudioClipControl.js';
 import { HomeTheaterControl } from './HomeTheaterControl.js';
 import { SettingsControl } from './SettingsControl.js';
+import { settleAll } from '../util/settleAll.js';
 
 /**
  * A lightweight handle for controlling a single Sonos player.
@@ -83,12 +84,8 @@ export class PlayerHandle {
       getPlayerId: () => this.id,
     };
 
-    // Coordinator context — for group-level commands: group volume,
-    // playback, playback metadata, and loading a favorite or playlist. Sonos
-    // accepts these only on the group coordinator's socket; a grouped
-    // non-coordinator's own socket answers groupCoordinatorChanged (verified
-    // live 2026-09-25). Falls back to the speaker connection when no
-    // resolver is set (SonosClient's single connection).
+    // Coordinator context — group-level commands (group volume, playback, metadata, loading a favorite or playlist):
+    // Sonos accepts them only on the coordinator's socket. Falls back to the speaker connection without a resolver.
     const coordinatorContext: NamespaceContext = {
       get connection() {
         if (self._coordinatorConnectionResolver) {
@@ -151,5 +148,17 @@ export class PlayerHandle {
    */
   updateGroup(group: Group): void {
     this._group = group;
+  }
+
+  /**
+   * Re-sends every subscription this handle wants, each through the socket it now belongs on.
+   * Tries them all, then rejects with an AggregateError of the failures.
+   * @internal
+   */
+  async resubscribe(): Promise<void> {
+    await settleAll(
+      [this.volume.resubscribe(), this.playback.resubscribe(), this.homeTheater.resubscribe(), this.groups.resubscribe()],
+      `Failed to restore event subscriptions for ${this.name}`,
+    );
   }
 }

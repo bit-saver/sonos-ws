@@ -3,6 +3,7 @@ import { GroupVolumeNamespace } from '../namespaces/GroupVolumeNamespace.js';
 import { PlayerVolumeNamespace } from '../namespaces/PlayerVolumeNamespace.js';
 import type { GroupVolumeStatus, PlayerVolumeStatus, VolumeResponse } from '../types/volume.js';
 import type { SonosResponse } from '../types/messages.js';
+import { settleAll } from '../util/settleAll.js';
 
 /**
  * Volume control for a Sonos player.
@@ -67,6 +68,14 @@ export class VolumeControl {
   /** Unsubscribes from per-speaker volume events. */
   async unsubscribe(): Promise<void> {
     return this._player.unsubscribe();
+  }
+
+  /**
+   * Re-sends the player and group volume subscriptions that are wanted.
+   * @internal
+   */
+  async resubscribe(): Promise<void> {
+    await settleAll([this._player.resubscribe(), this._group.resubscribe()], 'Failed to restore volume subscriptions');
   }
 
   // ── Group volume ────────────────────────────────────────────────────

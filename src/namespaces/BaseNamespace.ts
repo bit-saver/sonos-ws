@@ -38,7 +38,10 @@ export abstract class BaseNamespace {
     this.context = context;
   }
 
-  /** Whether this namespace is currently subscribed to real-time events. */
+  /**
+   * Whether events for this namespace are wanted. An intent, not proof a subscription is live: a reconnect or a regroup
+   * can drop it, and {@link resubscribe} puts it back.
+   */
   get isSubscribed(): boolean {
     return this.subscribed;
   }
@@ -46,36 +49,30 @@ export abstract class BaseNamespace {
   /**
    * Subscribes to real-time events for this namespace.
    *
-   * Once subscribed, the Sonos device will push event notifications
-   * whenever the state managed by this namespace changes.
+   * The intent is recorded before sending, so a failed attempt is retried by the next {@link resubscribe}; the promise still rejects.
    */
   async subscribe(): Promise<void> {
-    await this.send('subscribe');
     this.subscribed = true;
+    await this.send('subscribe');
   }
 
   /**
-   * Unsubscribes from real-time events for this namespace.
+   * Unsubscribes from real-time events for this namespace. The intent is dropped before sending.
    *
-   * After calling this method, no further event notifications will be
-   * received for this namespace until {@link subscribe} is called again.
+   * Sonos keeps one subscription per socket and target, so for a group-level namespace this also stops the events other
+   * handles in the group asked for, until their next {@link resubscribe}.
    */
   async unsubscribe(): Promise<void> {
-    await this.send('unsubscribe');
     this.subscribed = false;
+    await this.send('unsubscribe');
   }
 
   /**
-   * Re-subscribes to events after a WebSocket reconnection.
-   *
-   * This is a no-op if the namespace was not previously subscribed.
-   * Called internally by the client during reconnection to restore
-   * event subscriptions transparently.
+   * Sends the subscribe again if events are wanted. Safe on a live subscription (Sonos keeps one per socket and target),
+   * so owners call it after any change that may have dropped one.
    */
   async resubscribe(): Promise<void> {
-    if (this.subscribed) {
-      await this.send('subscribe');
-    }
+    if (this.subscribed) await this.send('subscribe');
   }
 
   /**

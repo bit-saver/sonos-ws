@@ -13,6 +13,12 @@ export class HomeTheaterControl {
   /** Unsubscribes from home theater events. */
   async unsubscribe(): Promise<void> { await this.ns.unsubscribe(); }
 
+  /**
+   * Re-sends the home theater subscription if it is wanted.
+   * @internal
+   */
+  async resubscribe(): Promise<void> { await this.ns.resubscribe(); }
+
   /** Gets the current home theater settings. */
   async get(): Promise<HomeTheaterOptions> { return this.ns.getOptions(); }
 

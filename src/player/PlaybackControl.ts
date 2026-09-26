@@ -3,9 +3,10 @@ import { PlaybackNamespace } from '../namespaces/PlaybackNamespace.js';
 import { PlaybackMetadataNamespace } from '../namespaces/PlaybackMetadataNamespace.js';
 import type { PlaybackStatus, PlayModes, LoadLineInOptions } from '../types/playback.js';
 import type { MetadataStatus } from '../types/metadata.js';
+import { settleAll } from '../util/settleAll.js';
 
 /**
- * Playback and metadata control for a Sonos player's group.
+ * Playback and metadata control for a Sonos player's group. Every command goes through the group coordinator's socket.
  *
  * Combines the `playback:1` and `playbackMetadata:1` namespaces into
  * a single interface — playback state and track metadata are always
@@ -73,4 +74,18 @@ export class PlaybackControl {
 
   /** Unsubscribes from playback state events. */
   async unsubscribe(): Promise<void> { await this.pb.unsubscribe(); }
+
+  /** Subscribes to track metadata events — separate from {@link subscribe} because they are large and frequent. */
+  async subscribeMetadata(): Promise<void> { await this.meta.subscribe(); }
+
+  /** Unsubscribes from track metadata events. */
+  async unsubscribeMetadata(): Promise<void> { await this.meta.unsubscribe(); }
+
+  /**
+   * Re-sends the playback and metadata subscriptions that are wanted.
+   * @internal
+   */
+  async resubscribe(): Promise<void> {
+    await settleAll([this.pb.resubscribe(), this.meta.resubscribe()], 'Failed to restore playback subscriptions');
+  }
 }
