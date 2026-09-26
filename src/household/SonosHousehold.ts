@@ -85,6 +85,15 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   private setupChain: Promise<void> = Promise.resolve();
   /** Handshakes a connect() call is awaiting: their setup is that call's to run, not the 'connected' listener's. */
   private ownedHandshakes = 0;
+  /** Counts primary 'connected' events, so a completed setup can be matched to the socket it ran on. */
+  private primaryEpoch = 0;
+  /** The primaryEpoch the last completed setup started under. */
+  private setupEpoch = -1;
+
+  /** Set up on the socket that is up now, not merely set up once. */
+  private get setUpOnCurrentSocket(): boolean {
+    return this._initialConnectDone && this.setupEpoch === this.primaryEpoch;
+  }
 
   /** Per-speaker WebSocket connections. Key is player ID. */
   private readonly speakerConnections = new Map<string, SonosConnection>();
@@ -167,8 +176,8 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
    * Populates {@link players} and {@link groups}.
    */
   async connect(): Promise<void> {
-    // Already set up and the socket never dropped — nothing to do.
-    if (this._initialConnectDone && this.connection.state === 'connected') return;
+    // Already set up on the socket that is up now — nothing to do.
+    if (this.setUpOnCurrentSocket && this.connection.state === 'connected') return;
     this._initialConnectDone = false;
     this.ownedHandshakes++;
     try {
@@ -177,11 +186,12 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       this.ownedHandshakes--;
     }
     // Overlapping calls each queue this; the first to run sets up, the rest find it done.
-    await this.enqueueSetup(() => (this._initialConnectDone ? Promise.resolve() : this.handleReconnected()));
+    await this.enqueueSetup(() => (this.setUpOnCurrentSocket ? Promise.resolve() : this.handleReconnected()));
   }
 
   /** Sets up after a handshake no connect() call awaits: the reconnect ladder's. Returns the run so tests can await it. */
   private onPrimaryConnected(): Promise<void> {
+    this.primaryEpoch++;
     if (this.ownedHandshakes > 0) return Promise.resolve();
     // handleReconnected() logs its own failures, and a background run has no caller to tell.
     return this.enqueueSetup(() => this.handleReconnected()).catch(() => {});
@@ -564,6 +574,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
    * subsequent reconnect.
    */
   private async handleReconnected(): Promise<void> {
+    const epoch = this.primaryEpoch;
     if (!this._initialConnectDone) {
       // First successful connect — full initial setup. Runs either after
       // the caller's `await connect()` completes on first try OR after a
@@ -616,6 +627,8 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
         throw err;
       }
     }
+    // Only a run that completed either branch above records the socket it set up.
+    this.setupEpoch = epoch;
     this.emit('connected');
   }
 

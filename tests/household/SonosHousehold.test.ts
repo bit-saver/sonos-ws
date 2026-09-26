@@ -332,14 +332,12 @@ describe('SonosHousehold connect() unhandled rejection safety', () => {
   });
 
   it('does not produce an unhandled rejection when the background ladder fails setup after connect() already rejected', async () => {
-    // The initial connect() attempt fails outright — household.connect()
-    // throws right there, before it ever reaches `await initialSetupPromise`.
+    // The initial connect() attempt fails outright at the handshake, so household.connect()
+    // rejects immediately — it never reaches enqueueSetup().
     mockConn.connect.mockImplementationOnce(() => Promise.reject(new Error('ECONNREFUSED')));
-    // Later, the background reconnect ladder succeeds and fires 'connected'
-    // again, but first-connect setup (getGroups here) fails too. Nothing is
-    // still awaiting the original household.connect() promise by then, so
-    // rejectSetup(err) rejects a promise nobody listens to unless connect()
-    // attached its own no-op catch to it.
+    // Later, the background reconnect ladder succeeds and fires 'connected' again. This run is
+    // unowned (no connect() call is awaiting it), and first-connect setup (getGroups here) fails
+    // too — onPrimaryConnected() must swallow that rejection itself, since no caller is left to see it.
     mockConn.send.mockImplementation((request: any) => {
       const [headers] = request;
       if (headers.namespace === 'groups:1' && headers.command === 'getGroups') {

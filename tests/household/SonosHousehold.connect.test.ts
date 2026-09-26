@@ -6,11 +6,21 @@ import { describe, it, expect, vi } from 'vitest';
 import { SonosHousehold } from '../../src/household/SonosHousehold.js';
 
 const instances: any[] = [];
+// Hosts whose handshake needs manual completion (set/cleared per test that uses it).
+const manualHosts = new Set<string>();
+// Whether the mock topology includes a second player, so a test can exercise connectAllSpeakers().
+let twoPlayers = false;
 
 vi.mock('../../src/client/SonosConnection.js', () => {
-  const topo = [{ householdId: 'HH_1', success: true }, {
-    groups: [{ id: 'G1', name: 'Arc', coordinatorId: 'RINCON_ARC', playerIds: ['RINCON_ARC'] }],
-    players: [{ id: 'RINCON_ARC', name: 'Arc', capabilities: [], websocketUrl: 'wss://10.0.0.1:1443/websocket/api' }],
+  const topo = () => [{ householdId: 'HH_1', success: true }, {
+    groups: [
+      { id: 'G1', name: 'Arc', coordinatorId: 'RINCON_ARC', playerIds: ['RINCON_ARC'] },
+      ...(twoPlayers ? [{ id: 'G2', name: 'Sub', coordinatorId: 'RINCON_SUB', playerIds: ['RINCON_SUB'] }] : []),
+    ],
+    players: [
+      { id: 'RINCON_ARC', name: 'Arc', capabilities: [], websocketUrl: 'wss://10.0.0.1:1443/websocket/api' },
+      ...(twoPlayers ? [{ id: 'RINCON_SUB', name: 'Sub', capabilities: [], websocketUrl: 'wss://10.0.0.9:1443/websocket/api' }] : []),
+    ],
   }];
   const make = (opts: any) => {
     const listeners = new Map<string, Function[]>();
@@ -22,8 +32,10 @@ vi.mock('../../src/client/SonosConnection.js', () => {
       connectReject: null,
       finishHandshake: null,
       failHandshake: null,
-      manualHandshake: false,
+      manualHandshake: manualHosts.has(opts.host),
       handshakes: 0,
+      failTopology: false,
+      sent: [] as any[],
       gate: null as null | ((h: any) => Promise<void> | null),
       listeners,
       on(event: string, h: Function) {
@@ -64,12 +76,21 @@ vi.mock('../../src/client/SonosConnection.js', () => {
         inst.state = 'disconnected';
         inst.emit('disconnected', 'client disconnect');
       },
+      // An unexpected close with reconnect enabled: pending sends fail, state goes to 'reconnecting'.
+      drop() {
+        for (const r of [...pending]) r(new Error('Connection closed: 1006'));
+        pending.clear();
+        inst.state = 'reconnecting';
+        inst.emit('reconnecting', 1, 1000);
+      },
       send: vi.fn((request: any) => new Promise((resolve, reject) => {
         const [headers] = request;
+        inst.sent.push({ ns: headers.namespace, cmd: headers.command, hh: !!headers.householdId, hs: inst.handshakes, state: inst.state });
         if (inst.state !== 'connected') { reject(new Error('Not connected')); return; }
+        if (inst.failTopology && headers.command === 'getGroups' && headers.householdId) { reject(new Error('getGroups failed')); return; }
         pending.add(reject);
         const g = inst.gate?.(headers) ?? null;
-        const result = headers.command === 'getGroups' ? topo : [{ success: true }, {}];
+        const result = headers.command === 'getGroups' ? topo() : [{ success: true }, {}];
         Promise.resolve(g).then(() => { pending.delete(reject); resolve(result); });
       })),
     };
@@ -80,6 +101,7 @@ vi.mock('../../src/client/SonosConnection.js', () => {
 });
 
 const flush = async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); };
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const outcomeOf = (p: Promise<void>) => {
   const box = { v: 'pending' };
   p.then(() => { box.v = 'ok'; }, (e) => { box.v = 'err: ' + e.message; });
@@ -89,6 +111,10 @@ const outcomeOf = (p: Promise<void>) => {
 // call, which never carries a householdId in its own request headers.
 const topologyReads = (inst: any) =>
   inst.send.mock.calls.filter(([r]: any) => r[0].command === 'getGroups' && r[0].householdId).length;
+// Counts groups:1 subscribes sent while connected on a specific handshake, so a test can tell
+// whether a particular socket (not just any socket, ever) got its topology subscription.
+const groupsSubsOn = (inst: any, handshake: number) =>
+  inst.sent.filter((s: any) => s.ns === 'groups:1' && s.cmd === 'subscribe' && s.hs === handshake && s.state === 'connected').length;
 
 describe('connect() settles every caller exactly once', () => {
   it('two overlapping connect() calls both settle, and setup runs once', async () => {
@@ -222,5 +248,82 @@ describe('connect() settles every caller exactly once', () => {
 
     await expect(second).resolves.toBeUndefined();
     expect(household.players.size).toBe(1);
+  });
+
+  it("a connect() started before an earlier attempt's cleanup runs does not also let the listener set up its handshake", async () => {
+    const household = new SonosHousehold({ host: '10.0.0.8', autoConnect: false, reconnect: false });
+    const inst = instances[instances.length - 1];
+    inst.manualHandshake = true;
+    inst.failTopology = true;
+
+    const first = household.connect();
+    first.catch(() => {});
+    await flush();
+
+    inst.manualHandshake = false;
+    // Not awaited: connect() below can start before this call's own cleanup (and first's
+    // ownedHandshakes-- decrement) has actually run.
+    void household.disconnect();
+    const second = household.connect();
+    second.catch(() => {});
+
+    await sleep(50);
+    expect(topologyReads(inst)).toBe(1);
+  });
+
+  it('a connect() whose handshake an older setup run finishes on still sets that socket up (ladder shares the handshake)', async () => {
+    twoPlayers = true;
+    manualHosts.add('10.0.0.9');
+    try {
+      const household = new SonosHousehold({ host: '10.0.0.10' });
+      const primary = instances[instances.length - 1];
+      const first = outcomeOf(household.connect());
+      await sleep(20);
+      const sub = [...instances].reverse().find((i) => i.host === '10.0.0.9' && i !== primary);
+
+      // The primary drops while first's setup run is still parked in connectAllSpeakers,
+      // waiting on the sub speaker's handshake.
+      primary.drop();
+      primary.manualHandshake = true;
+      void primary.connect().catch(() => {}); // the ladder's own reconnect timer: handshake 2, unowned
+      const second = outcomeOf(household.connect()); // the consumer calls connect() while it is in flight
+      await flush();
+      primary.finishHandshake();
+      await sleep(20);
+      sub.finishHandshake();
+      await sleep(50);
+
+      expect(first.v).toBe('ok');
+      expect(second.v).toBe('ok');
+      expect(groupsSubsOn(primary, 2)).toBeGreaterThan(0);
+    } finally {
+      twoPlayers = false;
+      manualHosts.delete('10.0.0.9');
+    }
+  });
+
+  it('a connect() whose handshake an older setup run finishes on still sets that socket up (connect() starts the handshake itself)', async () => {
+    twoPlayers = true;
+    manualHosts.add('10.0.0.9');
+    try {
+      const household = new SonosHousehold({ host: '10.0.0.11' });
+      const primary = instances[instances.length - 1];
+      const first = outcomeOf(household.connect());
+      await sleep(20);
+      const sub = [...instances].reverse().find((i) => i.host === '10.0.0.9' && i.state === 'connecting');
+
+      primary.drop();
+      const second = outcomeOf(household.connect()); // starts handshake 2 itself; no separate ladder call
+      await sleep(20);
+      sub.finishHandshake();
+      await sleep(50);
+
+      expect(first.v).toBe('ok');
+      expect(second.v).toBe('ok');
+      expect(groupsSubsOn(primary, 2)).toBeGreaterThan(0);
+    } finally {
+      twoPlayers = false;
+      manualHosts.delete('10.0.0.9');
+    }
   });
 });
