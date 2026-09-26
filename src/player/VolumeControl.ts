@@ -5,6 +5,9 @@ import type { GroupVolumeStatus, PlayerVolumeStatus, VolumeResponse } from '../t
 import type { SonosResponse } from '../types/messages.js';
 import { settleAll } from '../util/settleAll.js';
 
+/** How long group.relative waits for the groupVolume event before reading the volume instead. */
+const RELATIVE_EVENT_WAIT_MS = 2000;
+
 /**
  * Volume control for a Sonos player.
  *
@@ -105,27 +108,41 @@ export class VolumeControl {
      * @returns The resulting group volume status after the adjustment.
      */
     relative: async (delta: number): Promise<GroupVolumeStatus> => {
-      // Wait for the subscription event that confirms the volume change.
-      const volumeEvent = new Promise<GroupVolumeStatus>((resolve) => {
-        const conn = this.coordinatorContext.connection;
-        const timeout = setTimeout(() => {
-          conn.off('message', handler);
-          this._group.getVolume().then(resolve, () => resolve({ volume: 0, muted: false, fixed: false }));
-        }, 2000);
+      // setRelativeVolume replies with an empty body and an immediate getVolume still reads the old value, so take the
+      // new volume from the groupVolume event — the one naming this group, since the socket carries every group's.
+      const conn = this.coordinatorContext.connection;
+      const groupId = this.coordinatorContext.getGroupId();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let handler: (msg: SonosResponse) => void = () => {};
+      const stopWaiting = () => {
+        clearTimeout(timer);
+        conn.off('message', handler);
+      };
 
-        const handler = (msg: SonosResponse) => {
+      const volumeEvent = new Promise<GroupVolumeStatus>((resolve, reject) => {
+        handler = (msg: SonosResponse) => {
           const [headers, body] = msg;
-          if (headers?.namespace === 'groupVolume:1' && body?._objectType === 'groupVolume') {
-            clearTimeout(timeout);
-            conn.off('message', handler);
+          if (headers?.namespace === 'groupVolume:1' && headers.groupId === groupId && body?._objectType === 'groupVolume') {
+            stopWaiting();
             resolve(body as unknown as GroupVolumeStatus);
           }
         };
-
+        timer = setTimeout(() => {
+          stopWaiting();
+          // No event (likely nothing subscribed this group here), so read instead. A failed read rejects: an invented
+          // volume would pass for a real one.
+          this._group.getVolume().then(resolve, reject);
+        }, RELATIVE_EVENT_WAIT_MS);
         conn.on('message', handler);
       });
 
-      await this._group.setRelativeVolume(delta);
+      try {
+        await this._group.setRelativeVolume(delta);
+      } catch (err) {
+        // Refused: leave nothing behind to fire later. volumeEvent never settles, so it cannot reject unhandled.
+        stopWaiting();
+        throw err;
+      }
       return volumeEvent;
     },
 

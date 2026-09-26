@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { VolumeControl } from '../../src/player/VolumeControl.js';
 import type { NamespaceContext } from '../../src/namespaces/BaseNamespace.js';
 import type { SonosConnection } from '../../src/client/SonosConnection.js';
@@ -14,7 +14,7 @@ function mockContext(): NamespaceContext {
           setTimeout(() => {
             const handlers = listeners['message'] || [];
             for (const h of handlers) {
-              h([{ namespace: 'groupVolume:1' }, { _objectType: 'groupVolume', volume: 47, muted: false, fixed: false }]);
+              h([{ namespace: 'groupVolume:1', groupId: 'GROUP_1' }, { _objectType: 'groupVolume', volume: 47, muted: false, fixed: false }]);
             }
           }, 10);
         }
@@ -108,5 +108,79 @@ describe('VolumeControl', () => {
       const result = await vol.group.relative(5);
       expect(result.volume).toBe(47); // from the simulated event
     });
+  });
+});
+
+describe('VolumeControl.group.relative edge cases', () => {
+  // A context whose socket delivers the given events right after
+  // setRelativeVolume is answered, and whose other commands are scripted.
+  function scriptedContext(opts: {
+    events?: Array<[Record<string, unknown>, Record<string, unknown>]>;
+    setRelative?: () => Promise<unknown>;
+    getVolume?: () => Promise<unknown>;
+  }) {
+    const listeners: Function[] = [];
+    const send = vi.fn(async (req: any) => {
+      const [headers] = req;
+      if (headers.command === 'setRelativeVolume') {
+        const reply = opts.setRelative ? await opts.setRelative() : [{}, {}];
+        setTimeout(() => { for (const e of opts.events ?? []) for (const h of [...listeners]) h(e); }, 10);
+        return reply;
+      }
+      if (headers.command === 'getVolume') {
+        return opts.getVolume ? opts.getVolume() : [{}, { volume: 42, muted: false, fixed: false }];
+      }
+      return [{}, {}];
+    });
+    const off = vi.fn((_e: string, h: Function) => {
+      const i = listeners.indexOf(h);
+      if (i >= 0) listeners.splice(i, 1);
+    });
+    const ctx: NamespaceContext = {
+      connection: {
+        send,
+        on: vi.fn((_e: string, h: Function) => { listeners.push(h); }),
+        off,
+      } as unknown as SonosConnection,
+      getHouseholdId: () => 'HH_1',
+      getGroupId: () => 'GROUP_1',
+      getPlayerId: () => 'PLAYER_1',
+    };
+    return { ctx, send, off, listeners };
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("ignores a groupVolume event for another group on the coordinator's socket", async () => {
+    const { ctx } = scriptedContext({
+      events: [
+        [{ namespace: 'groupVolume:1', groupId: 'OTHER' }, { _objectType: 'groupVolume', volume: 99, muted: false, fixed: false }],
+        [{ namespace: 'groupVolume:1', groupId: 'GROUP_1' }, { _objectType: 'groupVolume', volume: 47, muted: false, fixed: false }],
+      ],
+    });
+    const result = await new VolumeControl(ctx).group.relative(5);
+    expect(result.volume).toBe(47);
+  });
+
+  it('rejects instead of inventing a volume when no event comes and the read fails', async () => {
+    vi.useFakeTimers();
+    const { ctx } = scriptedContext({ getVolume: () => Promise.reject(new Error('read failed')) });
+    const pending = new VolumeControl(ctx).group.relative(5);
+    const outcome = expect(pending).rejects.toThrow('read failed');
+    await vi.advanceTimersByTimeAsync(2000);
+    await outcome;
+  });
+
+  it('removes its listener and timer when setRelativeVolume fails', async () => {
+    vi.useFakeTimers();
+    const { ctx, send, listeners } = scriptedContext({ setRelative: () => Promise.reject(new Error('refused')) });
+
+    await expect(new VolumeControl(ctx).group.relative(5)).rejects.toThrow('refused');
+    expect(listeners).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(send.mock.calls.map(([req]: any) => req[0].command)).toEqual(['setRelativeVolume']);
   });
 });
