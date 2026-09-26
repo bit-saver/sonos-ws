@@ -2090,8 +2090,8 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
   private _householdId: string | undefined;
   /** Setup runs, chained so each starts after the previous one settles. */
   private setupChain: Promise<void> = Promise.resolve();
-  /** Settles the promise that the current connect() call is waiting on. */
-  private pendingSetup: { resolve: () => void; reject: (err: unknown) => void } | null = null;
+  /** Handshakes a connect() call is awaiting: their setup is that call's to run, not the 'connected' listener's. */
+  private ownedHandshakes = 0;
 
   constructor(options: SonosClientOptions) {
     super();
@@ -2142,40 +2142,42 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
    * player controls are usable; rejects if the connection or the lookup fails.
    */
   async connect(): Promise<void> {
-    const setup = new Promise<void>((resolve, reject) => {
-      this.pendingSetup = { resolve, reject };
-    });
-    // If the connect below throws, nothing awaits `setup`, yet a later reconnect can still reject it; unhandled, that crashes the host.
-    setup.catch(() => {});
-
-    await this.connection.connect();
-    await setup;
+    this.ownedHandshakes++;
+    try {
+      await this.connection.connect();
+    } finally {
+      this.ownedHandshakes--;
+    }
+    await this.enqueue(() => this.setUp());
   }
 
   async disconnect(): Promise<void> {
     await this.connection.disconnect();
   }
 
-  /** Queues work behind any setup still running, so two runs never interleave. */
+  /** Runs work after any setup in flight. A failure rejects this call, never the chain. */
   private enqueue(task: () => Promise<void>): Promise<void> {
     const run = this.setupChain.then(task);
     this.setupChain = run.catch(() => {});
     return run;
   }
 
-  /** Runs setup on each connect and reconnect, then emits `connected` once. Returns the run so tests can await it. */
+  /** Sets up after a handshake no connect() call awaits: the reconnect ladder's. Returns the run so tests can await it. */
   private onConnected(): Promise<void> {
-    return this.enqueue(async () => {
-      try {
-        await this.locatePlayer();
-      } catch (err) {
-        this.log.warn('Setup after connect failed', err);
-        this.pendingSetup?.reject(err);
-        return;
-      }
-      this.pendingSetup?.resolve();
-      this.emit('connected');
-    });
+    if (this.ownedHandshakes > 0) return Promise.resolve();
+    // setUp() logs its own failure, and a background run has no caller to tell.
+    return this.enqueue(() => this.setUp()).catch(() => {});
+  }
+
+  /** Finds this speaker, then emits `connected`. Logs and rethrows a failure. */
+  private async setUp(): Promise<void> {
+    try {
+      await this.locatePlayer();
+    } catch (err) {
+      this.log.warn('Setup after connect failed', err);
+      throw err;
+    }
+    this.emit('connected');
   }
 
   /**
