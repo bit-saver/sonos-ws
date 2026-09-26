@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { SonosConnection } from '../client/SonosConnection.js';
 import type { ReconnectOptions } from '../client/SonosConnection.js';
 import { TypedEventEmitter } from '../util/TypedEventEmitter.js';
@@ -295,12 +296,6 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   }
 
   /**
-   * Subscribes to household group changes, so topology follows every
-   * regroup — including ones made from the Sonos app — instead of only
-   * those this library performs. Best effort: a failure leaves the older
-   * refresh triggers (reconnect, coordinator change, grouping calls) intact.
-   */
-  /**
    * Subscribes every player to the events that say what an external
    * controller did: group volume (a group set is otherwise indistinguishable
    * from a player set), playback, and home theater (a TV input switch).
@@ -324,6 +319,12 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     }
   }
 
+  /**
+   * Subscribes to household group changes, so topology follows every
+   * regroup — including ones made from the Sonos app — instead of only
+   * those this library performs. Best effort: a failure leaves the older
+   * refresh triggers (reconnect, coordinator change, grouping calls) intact.
+   */
   private async subscribeToTopology(): Promise<void> {
     try {
       await this.householdGroups.subscribe();
@@ -447,7 +448,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     this.log.debug('Discovering householdId...');
     try {
       const [headers] = await this.connection.send([
-        { namespace: 'groups:1', command: 'getGroups', cmdId: crypto.randomUUID() },
+        { namespace: 'groups:1', command: 'getGroups', cmdId: randomUUID() },
         {},
       ]);
       if (headers.householdId) this._householdId = headers.householdId;

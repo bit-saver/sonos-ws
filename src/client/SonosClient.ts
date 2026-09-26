@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { SonosConnection } from './SonosConnection.js';
 import type { ReconnectOptions, ConnectionOptions } from './SonosConnection.js';
 import { TypedEventEmitter } from '../util/TypedEventEmitter.js';
@@ -105,7 +106,7 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
   private async discoverAndCreateHandle(): Promise<void> {
     // Discover householdId
     const request: SonosRequest = [
-      { namespace: 'groups:1', command: 'getGroups', cmdId: crypto.randomUUID() },
+      { namespace: 'groups:1', command: 'getGroups', cmdId: randomUUID() },
       {},
     ];
 

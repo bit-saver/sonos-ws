@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { SonosConnection } from '../client/SonosConnection.js';
 import type { SonosRequest, SonosResponse } from '../types/messages.js';
 
@@ -96,7 +97,7 @@ export abstract class BaseNamespace {
       {
         namespace: this.namespace,
         command,
-        cmdId: crypto.randomUUID(),
+        cmdId: randomUUID(),
         householdId: this.context.getHouseholdId(),
         groupId: this.context.getGroupId(),
         playerId: this.context.getPlayerId(),
