@@ -715,6 +715,22 @@ describe('household setup lifecycle', () => {
     expect(topologyReads()).toBe(2);
   });
 
+  it('logs a diagnostic subscribe that fails, and still connects', async () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const { household, mockConn } = freshHousehold({ host: '192.168.68.96', autoConnect: false, logger });
+    mockConn.send.mockImplementation((request: any) => {
+      const [headers] = request;
+      if (headers.command === 'getGroups') return Promise.resolve([{ householdId: 'HH_1', success: true }, mockTopology]);
+      if (headers.namespace === 'homeTheater:1') return Promise.reject(new Error('not a home theater'));
+      return Promise.resolve([{ success: true }, {}]);
+    });
+
+    await household.connect();
+
+    await vi.waitFor(() =>
+      expect(logger.warn).toHaveBeenCalledWith('Failed to subscribe Office to homeTheater events', expect.objectContaining({ message: 'not a home theater' })));
+  });
+
   it('logs a reconnect setup that fails', async () => {
     const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const { household, mockConn } = freshHousehold({ host: '192.168.68.96', autoConnect: false, logger });

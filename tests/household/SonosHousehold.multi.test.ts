@@ -7,6 +7,8 @@ import type { GroupsResponse } from '../../src/types/groups.js';
 
 const instances: any[] = [];
 let topology: GroupsResponse;
+// Hosts whose subscribe commands never get an answer, like an offline speaker's.
+const unansweredSubscribes = new Set<string>();
 
 vi.mock('../../src/client/SonosConnection.js', () => ({
   SonosConnection: vi.fn((opts: any) => {
@@ -28,6 +30,7 @@ vi.mock('../../src/client/SonosConnection.js', () => ({
       send: vi.fn(async (request: any) => {
         const [headers] = request;
         if (headers.command === 'getGroups') return [{ householdId: 'HH_1', success: true }, topology];
+        if (headers.command === 'subscribe' && unansweredSubscribes.has(inst.host)) return new Promise(() => {});
         return [{ success: true }, {}];
       }),
       _listeners: listeners,
@@ -246,5 +249,23 @@ describe('subscription upkeep', () => {
 
     expect(wantedOn(PRIMARY, 'playerVolume:1', { playerId: 'RINCON_KITCHEN' })).toBe(1);
     expect(wantedOn(KITCHEN_IP, 'playerVolume:1', { playerId: 'RINCON_KITCHEN' })).toBeGreaterThan(0);
+  });
+});
+
+describe('diagnostic subscriptions', () => {
+  it('connect() does not wait on a speaker whose subscribes never answer, and still subscribes the rest', async () => {
+    unansweredSubscribes.add(OFFICE_IP);
+    try {
+      const timeout = new Promise((_resolve, reject) =>
+        setTimeout(() => reject(new Error('connect() waited on diagnostics')), 1000));
+      await expect(Promise.race([connectedHousehold(solo), timeout])).resolves.toBeInstanceOf(SonosHousehold);
+
+      const diagnostics = ['groupVolume:1', 'playback:1', 'homeTheater:1'];
+      for (const host of [PRIMARY, OFFICE_IP, BED_IP]) {
+        expect(diagnostics.map((namespace) => sentVia(host, namespace, 'subscribe').length)).toEqual([1, 1, 1]);
+      }
+    } finally {
+      unansweredSubscribes.delete(OFFICE_IP);
+    }
   });
 });

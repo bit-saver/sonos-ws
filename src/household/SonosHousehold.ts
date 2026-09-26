@@ -329,14 +329,14 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   }
 
   /**
-   * Subscribes every player to the events that say what an external
-   * controller did: group volume (a group set is otherwise indistinguishable
-   * from a player set), playback, and home theater (a TV input switch).
-   * Best effort per player and per namespace — diagnostics must never stop a
-   * household connecting.
+   * Subscribes every player to the events that say what an external controller did: group volume (a group set is
+   * otherwise indistinguishable from a player set), playback, and home theater (a TV input switch).
+   * Best effort and not awaited: a send to an offline speaker can wait out the whole request timeout, and diagnostics
+   * must never stop or stall a household connecting. Each intent is recorded before its send, so an offline speaker's
+   * are re-sent when its socket connects.
    * Runs once, at first connect; resubscribeAll() keeps them alive after.
    */
-  private async subscribeDiagnostics(): Promise<void> {
+  private subscribeDiagnostics(): void {
     for (const handle of this._players.values()) {
       const subscriptions: [string, () => Promise<void>][] = [
         ['groupVolume', () => handle.volume.group.subscribe()],
@@ -344,11 +344,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
         ['homeTheater', () => handle.homeTheater.subscribe()],
       ];
       for (const [name, subscribe] of subscriptions) {
-        try {
-          await subscribe();
-        } catch (err) {
-          this.log.warn(`Failed to subscribe ${handle.name} to ${name} events`, err);
-        }
+        void subscribe().catch((err: unknown) => this.log.warn(`Failed to subscribe ${handle.name} to ${name} events`, err));
       }
     }
   }
@@ -618,7 +614,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
         }
         // Restores intents on handles that outlived a disconnect(); fresh handles have none.
         await this.resubscribeAll();
-        await this.subscribeDiagnostics();
+        this.subscribeDiagnostics();
         this._initialConnectDone = true;
       } catch (err) {
         this.log.warn('Failed initial setup on connect', err);
