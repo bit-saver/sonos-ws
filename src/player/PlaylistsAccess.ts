@@ -5,7 +5,17 @@ import type { PlaylistsResponse, PlaylistResponse, LoadPlaylistOptions } from '.
 /** Access and load Sonos playlists. */
 export class PlaylistsAccess {
   private readonly ns: PlaylistsNamespace;
-  constructor(context: NamespaceContext) { this.ns = new PlaylistsNamespace(context); }
+  private readonly groupNs: PlaylistsNamespace;
+
+  /**
+   * @param context — for reading playlists, which any speaker answers
+   * @param coordinatorContext — for loading one, a group command that Sonos
+   *   accepts only on the group coordinator's socket
+   */
+  constructor(context: NamespaceContext, coordinatorContext: NamespaceContext = context) {
+    this.ns = new PlaylistsNamespace(context);
+    this.groupNs = new PlaylistsNamespace(coordinatorContext);
+  }
 
   /** Retrieves all Sonos playlists. */
   async get(): Promise<PlaylistsResponse> { return this.ns.getPlaylists(); }
@@ -21,5 +31,5 @@ export class PlaylistsAccess {
    * @param id - Playlist ID.
    * @param options - Playback options.
    */
-  async load(id: string, options?: LoadPlaylistOptions): Promise<void> { return this.ns.loadPlaylist(id, options); }
+  async load(id: string, options?: LoadPlaylistOptions): Promise<void> { return this.groupNs.loadPlaylist(id, options); }
 }

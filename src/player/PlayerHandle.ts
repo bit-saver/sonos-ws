@@ -83,9 +83,12 @@ export class PlayerHandle {
       getPlayerId: () => this.id,
     };
 
-    // Coordinator context — for group volume commands, which must go
-    // through the group coordinator's connection. Falls back to speaker
-    // connection if no resolver is set (e.g. SonosClient single-connection).
+    // Coordinator context — for group-level commands: group volume,
+    // playback, playback metadata, and loading a favorite or playlist. Sonos
+    // accepts these only on the group coordinator's socket; a grouped
+    // non-coordinator's own socket answers groupCoordinatorChanged (verified
+    // live 2026-09-25). Falls back to the speaker connection when no
+    // resolver is set (SonosClient's single connection).
     const coordinatorContext: NamespaceContext = {
       get connection() {
         if (self._coordinatorConnectionResolver) {
@@ -99,9 +102,9 @@ export class PlayerHandle {
     };
 
     this.volume = new VolumeControl(speakerContext, coordinatorContext);
-    this.playback = new PlaybackControl(speakerContext);
-    this.favorites = new FavoritesAccess(speakerContext);
-    this.playlists = new PlaylistsAccess(speakerContext);
+    this.playback = new PlaybackControl(coordinatorContext);
+    this.favorites = new FavoritesAccess(speakerContext, coordinatorContext);
+    this.playlists = new PlaylistsAccess(speakerContext, coordinatorContext);
     this.audioClip = new AudioClipControl(speakerContext);
     this.homeTheater = new HomeTheaterControl(speakerContext);
     this.settings = new SettingsControl(speakerContext);
@@ -119,7 +122,7 @@ export class PlayerHandle {
 
   /**
    * Sets a resolver that returns the coordinator's connection for this player's group.
-   * Used for group volume commands which must go through the coordinator's WebSocket.
+   * Used for group-level commands, which must go through the coordinator's WebSocket.
    * @internal
    */
   setCoordinatorConnectionResolver(resolver: () => SonosConnection): void {
@@ -134,6 +137,11 @@ export class PlayerHandle {
   /** Whether this player is the coordinator of its current group. */
   get isCoordinator(): boolean {
     return this._group.coordinatorId === this.id;
+  }
+
+  /** RINCON ID of the coordinator of this player's current group. */
+  get coordinatorId(): string {
+    return this._group.coordinatorId;
   }
 
   /**

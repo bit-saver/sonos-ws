@@ -109,3 +109,59 @@ describe('PlayerHandle', () => {
     expect(newSend.mock.calls.length).toBeGreaterThan(0);
   });
 });
+
+describe('PlayerHandle routing for a grouped non-coordinator', () => {
+  const officePlayer: Player = { id: 'RINCON_OFFICE', name: 'Office', capabilities: ['PLAYBACK'] };
+  const underBedroom: Group = {
+    id: 'RINCON_BED:1',
+    name: 'Bedroom + 1',
+    coordinatorId: 'RINCON_BED',
+    playerIds: ['RINCON_BED', 'RINCON_OFFICE'],
+  };
+
+  function office() {
+    const speaker = mockConnection();
+    const groups = mockConnection();
+    const coordinator = mockConnection();
+    const handle = new PlayerHandle(officePlayer, underBedroom, 'HH_1', speaker, groups);
+    handle.setCoordinatorConnectionResolver(() => coordinator);
+    return { handle, speaker, coordinator };
+  }
+
+  const sentOn = (conn: SonosConnection) =>
+    (conn.send as ReturnType<typeof vi.fn>).mock.calls.map(([req]: any) => req[0]);
+
+  it('exposes its coordinator', () => {
+    const { handle } = office();
+    expect(handle.coordinatorId).toBe('RINCON_BED');
+    expect(handle.isCoordinator).toBe(false);
+  });
+
+  it.each([
+    ['playback.pause', (h: PlayerHandle) => h.playback.pause(), 'playback:1', 'pause'],
+    ['playback.getStatus', (h: PlayerHandle) => h.playback.getStatus(), 'playback:1', 'getPlaybackStatus'],
+    ['playback.getMetadata', (h: PlayerHandle) => h.playback.getMetadata(), 'playbackMetadata:1', 'getMetadataStatus'],
+    ['favorites.load', (h: PlayerHandle) => h.favorites.load('F1'), 'favorites:1', 'loadFavorite'],
+    ['playlists.load', (h: PlayerHandle) => h.playlists.load('PL1'), 'playlists:1', 'loadPlaylist'],
+  ])('%s goes through the coordinator socket', async (_name, call, namespace, command) => {
+    const { handle, speaker, coordinator } = office();
+    await call(handle);
+    expect(sentOn(speaker)).toHaveLength(0);
+    expect(sentOn(coordinator)).toEqual([
+      expect.objectContaining({ namespace, command, groupId: 'RINCON_BED:1', playerId: 'RINCON_OFFICE' }),
+    ]);
+  });
+
+  it.each([
+    ['volume.set', (h: PlayerHandle) => h.volume.set(20), 'playerVolume:1', 'setVolume'],
+    ['favorites.get', (h: PlayerHandle) => h.favorites.get(), 'favorites:1', 'getFavorites'],
+    ['playlists.get', (h: PlayerHandle) => h.playlists.get(), 'playlists:1', 'getPlaylists'],
+    ['homeTheater.get', (h: PlayerHandle) => h.homeTheater.get(), 'homeTheater:1', 'getOptions'],
+    ['settings.get', (h: PlayerHandle) => h.settings.get(), 'settings:1', 'getPlayerSettings'],
+  ])('%s stays on the player socket', async (_name, call, namespace, command) => {
+    const { handle, speaker, coordinator } = office();
+    await call(handle);
+    expect(sentOn(coordinator)).toHaveLength(0);
+    expect(sentOn(speaker)).toEqual([expect.objectContaining({ namespace, command })]);
+  });
+});
