@@ -47,7 +47,12 @@ export interface SonosHouseholdOptions {
   logger?: Logger;
   /** Command timeout in ms. @defaultValue 5000 */
   requestTimeout?: number;
-  /** Connect to all speakers at startup. @defaultValue true */
+  /**
+   * Connect to all speakers at startup. @defaultValue true
+   *
+   * With `false` every command goes through the primary, so group-level commands for a group led by another speaker fail
+   * with `groupCoordinatorChanged`.
+   */
   autoConnect?: boolean;
 }
 
@@ -264,10 +269,10 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       if (existing) {
         existing.updateGroup(group);
       } else {
-        this._players.set(
-          player.id,
-          new PlayerHandle(player, group, householdId, this.connection, this.connection),
-        );
+        const handle = new PlayerHandle(player, group, householdId, this.connection, this.connection);
+        // Set at creation, so a handle made after setup (a new speaker) routes group commands correctly too.
+        handle.setCoordinatorConnectionResolver(() => this.connectionForPlayer(handle.coordinatorId));
+        this._players.set(player.id, handle);
       }
     }
 
@@ -383,17 +388,6 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
         const handle = this._players.get(player.id);
         if (handle) {
           handle.setSpeakerConnection(conn);
-          // Set coordinator resolver — dynamically looks up the coordinator's connection
-          // so group volume commands route through the correct speaker.
-          handle.setCoordinatorConnectionResolver(() => {
-            const coordId = handle['_group']?.coordinatorId;
-            if (coordId) {
-              const coordConn = this.speakerConnections.get(coordId);
-              if (coordConn) return coordConn;
-            }
-            // Fallback to primary connection
-            return this.connection;
-          });
         }
       } catch (err) {
         this.log.warn(`Failed to connect to ${player.name}:`, err);
@@ -451,6 +445,14 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     }
 
     return conn;
+  }
+
+  /**
+   * A player's own socket, else the primary. Right for the primary speaker, which has no entry of its own; under
+   * `autoConnect: false` group commands for a group led elsewhere then fail, as documented on that option.
+   */
+  private connectionForPlayer(playerId: string): SonosConnection {
+    return this.speakerConnections.get(playerId) ?? this.connection;
   }
 
   /**
@@ -553,18 +555,6 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     }
 
     await Promise.allSettled(reconnectPromises);
-
-    // Re-wire coordinator resolvers for all handles (topology may have changed)
-    for (const handle of this._players.values()) {
-      handle.setCoordinatorConnectionResolver(() => {
-        const coordId = handle['_group']?.coordinatorId;
-        if (coordId) {
-          const coordConn = this.speakerConnections.get(coordId);
-          if (coordConn) return coordConn;
-        }
-        return this.connection;
-      });
-    }
   }
 
   /**
