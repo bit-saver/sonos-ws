@@ -44,20 +44,22 @@ async function main() {
   client.on('connected', () => console.log('\n--- CONNECTED ---'));
   client.on('disconnected', (r) => console.log(`\n--- DISCONNECTED: ${r} ---`));
   client.on('error', (e) => console.error('\n--- ERROR ---', e.message));
-  client.on('groupVolumeChanged', (v) => console.log('Volume event:', v));
+  client.on('volumeChanged', (v, source) =>
+    console.log(`Group volume event: ${v.volume}, muted: ${v.muted} (group ${source.groupId ?? 'unknown'})`));
 
   try {
     await client.connect();
 
     console.log(`Household: ${client.householdId ?? 'unknown'}`);
-    console.log(`Group:     ${client.groupId ?? 'unknown'}`);
-    console.log(`Player:    ${client.playerId ?? 'unknown'}`);
 
-    const vol = await client.groupVolume.getVolume();
-    console.log(`\nCurrent volume: ${vol.volume}, muted: ${vol.muted}`);
+    const vol = await client.volume.get();
+    console.log(`\nSpeaker volume: ${vol.volume}, muted: ${vol.muted}`);
 
-    await client.groupVolume.subscribe();
-    console.log('Subscribed to groupVolume events. Listening for 10 seconds...');
+    const groupVol = await client.volume.group.get();
+    console.log(`Group volume:   ${groupVol.volume}, muted: ${groupVol.muted}`);
+
+    await client.volume.group.subscribe();
+    console.log('Subscribed to group volume events. Listening for 10 seconds...');
 
     await new Promise((resolve) => setTimeout(resolve, 10000));
 
