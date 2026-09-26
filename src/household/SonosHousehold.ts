@@ -334,8 +334,9 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
    * Best effort and not awaited: a send to an offline speaker can wait out the whole request timeout, and diagnostics
    * must never stop or stall a household connecting. Each intent is recorded before its send, so an offline speaker's
    * are re-sent when its socket connects.
-   * Runs once, at first connect; resubscribeAll() keeps them alive after. Re-running first-connect setup (connect() after
-   * disconnect()) re-declares these intents, undoing an earlier unsubscribe() of them.
+   * Runs once, at first connect; resubscribeAll() keeps them alive after. Re-running first-connect setup — connect()
+   * while the socket is down, whether after disconnect() or mid-ladder — re-declares these intents, undoing an
+   * earlier unsubscribe() of them.
    */
   private subscribeDiagnostics(): void {
     for (const handle of this._players.values()) {
@@ -613,8 +614,10 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
         if (this.autoConnectSpeakers) {
           await this.connectAllSpeakers();
         }
-        // Restores intents on handles that outlived a disconnect(); fresh handles have none.
-        await this.resubscribeAll();
+        // Restores intents on handles that outlived a disconnect(); fresh handles have none. Not awaited: a send to a
+        // speaker whose socket is laddering would otherwise hold up this setup — that speaker's own 'connected'
+        // listener re-sends its intents when its socket returns.
+        void this.resubscribeAll();
         this.subscribeDiagnostics();
         this._initialConnectDone = true;
       } catch (err) {
@@ -637,8 +640,10 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
 
         await this.reconnectSpeakers();
 
-        // The reconnected socket holds no subscriptions; re-send the wanted ones.
-        await this.resubscribeAll();
+        // The reconnected socket holds no subscriptions; re-send the wanted ones. Not awaited: a stuck send to a
+        // laddering speaker must not hold up this reconnect run — its own 'connected' listener re-sends its intents
+        // when its socket returns.
+        void this.resubscribeAll();
       } catch (err) {
         this.log.warn('Failed reconnect setup', err);
         throw err;

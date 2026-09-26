@@ -269,3 +269,20 @@ describe('diagnostic subscriptions', () => {
     }
   });
 });
+
+describe('reconnect setup does not stall on a stuck resubscribe', () => {
+  it("completes a primary reconnect run even though a speaker's resubscribe never answers", async () => {
+    const household = await connectedHousehold(solo);
+    // Diagnostics already subscribed Office to groupVolume/playback/homeTheater at first connect.
+    unansweredSubscribes.add(OFFICE_IP);
+    try {
+      const run = socket(PRIMARY)._listeners.get('connected')[0]();
+      const timeout = new Promise((_resolve, reject) =>
+        setTimeout(() => reject(new Error('primary reconnect waited on a stuck resubscribe')), 1000));
+      await expect(Promise.race([run, timeout])).resolves.toBeUndefined();
+    } finally {
+      unansweredSubscribes.delete(OFFICE_IP);
+    }
+    void household;
+  });
+});
