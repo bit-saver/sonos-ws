@@ -10,16 +10,25 @@ const instances: any[] = [];
 const manualHosts = new Set<string>();
 // Whether the mock topology includes a second player, so a test can exercise connectAllSpeakers().
 let twoPlayers = false;
+// Extra sub-speaker hosts beyond twoPlayers' single 'Sub', for tests that need several speakers
+// in play at once. Each becomes its own group, in array order (which is also map-insertion order
+// into SonosHousehold's speakerConnections, since connectAllSpeakers() iterates _rawPlayers in order).
+let subHosts: string[] = [];
 
 vi.mock('../../src/client/SonosConnection.js', () => {
+  const extraPlayers = () => subHosts.map((host, i) => ({
+    id: `RINCON_S${i}`, name: `S${i}`, capabilities: [], websocketUrl: `wss://${host}:1443/websocket/api`,
+  }));
   const topo = () => [{ householdId: 'HH_1', success: true }, {
     groups: [
       { id: 'G1', name: 'Arc', coordinatorId: 'RINCON_ARC', playerIds: ['RINCON_ARC'] },
       ...(twoPlayers ? [{ id: 'G2', name: 'Sub', coordinatorId: 'RINCON_SUB', playerIds: ['RINCON_SUB'] }] : []),
+      ...extraPlayers().map((p) => ({ id: `G_${p.id}`, name: p.name, coordinatorId: p.id, playerIds: [p.id] })),
     ],
     players: [
       { id: 'RINCON_ARC', name: 'Arc', capabilities: [], websocketUrl: 'wss://10.0.0.1:1443/websocket/api' },
       ...(twoPlayers ? [{ id: 'RINCON_SUB', name: 'Sub', capabilities: [], websocketUrl: 'wss://10.0.0.9:1443/websocket/api' }] : []),
+      ...extraPlayers(),
     ],
   }];
   const make = (opts: any) => {
@@ -451,6 +460,35 @@ describe("the 'connected' event contract", () => {
     } finally {
       twoPlayers = false;
       manualHosts.delete('10.0.0.9');
+    }
+  });
+
+  it('no connected is emitted after disconnect() lands during setup, with several speakers after the parked one', async () => {
+    // The parked speaker is first in map order (connectAllSpeakers() inserts speakerConnections in
+    // _rawPlayers order), with 6 more speakers behind it — enough that disconnect()'s per-speaker
+    // loop takes several microtask ticks to reach the primary, during which the primary connection
+    // is still 'connected'. A guard that only checks connection state misses the disconnect() here.
+    subHosts = ['10.0.0.90', '10.0.0.91', '10.0.0.92', '10.0.0.93', '10.0.0.94', '10.0.0.95', '10.0.0.96'];
+    manualHosts.add('10.0.0.90');
+    try {
+      const household = new SonosHousehold({ host: '10.0.0.24' });
+      let connectedEmits = 0;
+      household.on('connected', () => { connectedEmits++; });
+
+      // Primary handshake, topology read and topology subscribe all complete; connectAllSpeakers
+      // then parks on the first sub speaker's handshake, with 6 more sub speakers behind it.
+      const first = outcomeOf(household.connect());
+      await sleep(20);
+
+      await household.disconnect();
+      await flush();
+      await sleep(20);
+
+      expect(first.v).toBe('err: Disconnected during setup');
+      expect(connectedEmits).toBe(0);
+    } finally {
+      subHosts = [];
+      manualHosts.delete('10.0.0.90');
     }
   });
 });

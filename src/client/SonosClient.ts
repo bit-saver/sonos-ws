@@ -123,7 +123,10 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
    *
    * Same `'connected'` contract as `SonosHousehold.connect()`: attach listeners before calling this, since on a
    * first attempt that succeeds `'connected'` fires before this promise resolves; `disconnect()` cancels the ladder
-   * and no `'connected'` follows it.
+   * and no `'connected'` follows it. The reconnect ladder mentioned there only keeps trying while reconnect is
+   * enabled and not exhausted; this call can also reject with a `CONNECTION_LOST` "Disconnected during setup" error
+   * if the socket drops mid-setup without a `disconnect()` call (the ladder still recovers and emits `'connected'`),
+   * and a setup failure on an otherwise healthy socket (e.g. a failed player lookup) rejects with no automatic retry.
    */
   async connect(): Promise<void> {
     if (this.setUpOnCurrentSocket && this.connection.state === 'connected') return;
@@ -169,6 +172,7 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
     // A disconnect() landing during locatePlayer() must not announce a connection that no
     // longer exists.
     if (this.connection.state !== 'connected') {
+      this.log.debug('Setup abandoned: disconnected during setup');
       throw new ConnectionError(ErrorCode.CONNECTION_LOST, 'Disconnected during setup');
     }
     // Only a run that completed locatePlayer() above records the socket it set up.
