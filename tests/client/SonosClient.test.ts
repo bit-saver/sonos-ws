@@ -238,4 +238,27 @@ describe('SonosClient against a speaker', () => {
     expect(scopedGetGroups() - before).toBe(2);
     expect(connected).toHaveBeenCalledTimes(2);
   });
+
+  it('no connected is emitted after disconnect() lands during setup', async () => {
+    const { client, conn } = newClient();
+    const connected = vi.fn();
+    client.on('connected', connected);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    conn.send.mockImplementation(async (request: any) => {
+      if (request[0].command === 'getGroups' && request[0].householdId) await gate;
+      return speakerSend(request);
+    });
+
+    const connecting = client.connect();
+    connecting.catch(() => {});
+    await new Promise((r) => setTimeout(r, 0));
+
+    await client.disconnect();
+    release();
+
+    await expect(connecting).rejects.toMatchObject({ message: 'Disconnected during setup' });
+    expect(connected).not.toHaveBeenCalled();
+  });
 });

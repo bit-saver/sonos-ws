@@ -11,6 +11,7 @@ import type { GroupsResponse } from '../types/groups.js';
 import type { Logger } from '../util/logger.js';
 import { noopLogger } from '../util/logger.js';
 import { SonosError } from '../errors/SonosError.js';
+import { ConnectionError } from '../errors/ConnectionError.js';
 import { ErrorCode } from '../types/errors.js';
 import { PlayerHandle } from '../player/PlayerHandle.js';
 import type { VolumeControl } from '../player/VolumeControl.js';
@@ -119,6 +120,10 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
   /**
    * Connects and finds this speaker in its household. Resolves once the
    * player controls are usable; rejects if the connection or the lookup fails.
+   *
+   * Same `'connected'` contract as `SonosHousehold.connect()`: attach listeners before calling this, since on a
+   * first attempt that succeeds `'connected'` fires before this promise resolves; `disconnect()` cancels the ladder
+   * and no `'connected'` follows it.
    */
   async connect(): Promise<void> {
     if (this.setUpOnCurrentSocket && this.connection.state === 'connected') return;
@@ -160,6 +165,11 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
     } catch (err) {
       this.log.warn('Setup after connect failed', err);
       throw err;
+    }
+    // A disconnect() landing during locatePlayer() must not announce a connection that no
+    // longer exists.
+    if (this.connection.state !== 'connected') {
+      throw new ConnectionError(ErrorCode.CONNECTION_LOST, 'Disconnected during setup');
     }
     // Only a run that completed locatePlayer() above records the socket it set up.
     this.setupEpoch = epoch;

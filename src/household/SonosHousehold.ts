@@ -184,6 +184,14 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   /**
    * Connects to the Sonos speaker and discovers the household topology.
    * Populates {@link players} and {@link groups}.
+   *
+   * The contract, since Neurotto's own setup now runs off the `'connected'` event rather than this promise:
+   * - Resolves once setup completes — {@link players} and {@link groups} are populated by then.
+   * - If the first handshake fails, this call rejects while the reconnect ladder keeps trying in the background; a
+   *   later success there runs setup and emits `'connected'` without anyone awaiting it.
+   * - `'connected'` fires once per successful setup: on a first attempt that succeeds, it fires *before* this promise
+   *   resolves, so attach `'connected'` listeners before calling `connect()`. It also fires after every reconnect.
+   * - {@link disconnect} stops the ladder; no `'connected'` follows it, even if it lands mid-setup.
    */
   async connect(): Promise<void> {
     // Already set up on the socket that is up now — nothing to do.
@@ -650,6 +658,11 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
         this.log.warn('Failed reconnect setup', err);
         throw err;
       }
+    }
+    // A disconnect() landing during the tail above (connectAllSpeakers, diagnostics,
+    // resubscribe) must not announce a connection that no longer exists.
+    if (this.connection.state !== 'connected') {
+      throw new ConnectionError(ErrorCode.CONNECTION_LOST, 'Disconnected during setup');
     }
     // Only a run that completed either branch above records the socket it set up.
     this.setupEpoch = epoch;

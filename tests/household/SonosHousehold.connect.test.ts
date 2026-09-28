@@ -391,3 +391,66 @@ describe('setup runs once per socket', () => {
     }
   });
 });
+
+describe("the 'connected' event contract", () => {
+  it('after a rejected connect(), a later ladder success sets the household up and emits connected', async () => {
+    const household = new SonosHousehold({ host: '10.0.0.20', autoConnect: false });
+    const inst = instances[instances.length - 1];
+    inst.manualHandshake = true;
+    let connectedEmits = 0;
+    household.on('connected', () => { connectedEmits++; });
+
+    const first = outcomeOf(household.connect());
+    await flush();
+    inst.failHandshake();
+    await flush();
+    expect(first.v).toMatch(/^err:/);
+
+    // The reconnect ladder succeeds in the background.
+    inst.state = 'connected';
+    const run = inst.listeners.get('connected')[0]();
+    await run;
+
+    expect(connectedEmits).toBe(1);
+    expect(household.players.size).toBe(1);
+    expect(topologyReads(inst)).toBe(1);
+  });
+
+  it('on a first attempt that succeeds, connected fires once and before connect() resolves', async () => {
+    const household = new SonosHousehold({ host: '10.0.0.21', autoConnect: false });
+    const order: string[] = [];
+    let connectedEmits = 0;
+    household.on('connected', () => { connectedEmits++; order.push('connected'); });
+
+    await household.connect();
+    order.push('resolved');
+
+    expect(connectedEmits).toBe(1);
+    expect(order).toEqual(['connected', 'resolved']);
+  });
+
+  it('no connected is emitted after disconnect() lands during setup', async () => {
+    twoPlayers = true;
+    manualHosts.add('10.0.0.9');
+    try {
+      const household = new SonosHousehold({ host: '10.0.0.22' });
+      let connectedEmits = 0;
+      household.on('connected', () => { connectedEmits++; });
+
+      // Primary handshake, topology read and topology subscribe all complete; connectAllSpeakers
+      // then parks on the sub speaker's handshake.
+      const first = outcomeOf(household.connect());
+      await sleep(20);
+
+      await household.disconnect();
+      await flush();
+      await sleep(20);
+
+      expect(first.v).toBe('err: Disconnected during setup');
+      expect(connectedEmits).toBe(0);
+    } finally {
+      twoPlayers = false;
+      manualHosts.delete('10.0.0.9');
+    }
+  });
+});

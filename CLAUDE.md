@@ -45,6 +45,7 @@ Bun replaces the `ws` package with its own WebSocket and **ignores `ws` construc
 - Subscriptions are intents: `subscribe()` records one, and the household re-sends every wanted subscription after any reconnect or membership change. Re-sending is idempotent on the wire (verified live), so nothing tracks which ones died.
 - Every socket's events reach listeners, tagged `{ playerId?, groupId? }`.
 - `connect()` sets up the handshake it awaits; the `'connected'` listener sets up only handshakes no `connect()` awaits; setup counts as done only for the socket it ran on (epochs).
+- Neurotto finishes its own setup on the household's `'connected'` event, so its behavior is a contract: it fires once per successful setup, before `connect()` resolves on a first attempt that succeeds, and never after a `disconnect()` that lands mid-setup. Covered in `tests/household/SonosHousehold.connect.test.ts` and `tests/client/SonosClient.test.ts`.
 
 ## Testing
 
