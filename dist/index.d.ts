@@ -1279,6 +1279,8 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     private primaryEpoch;
     /** The primaryEpoch the last completed setup started under. */
     private setupEpoch;
+    /** Counts disconnect() calls, so a setup run parked mid-disconnect can tell it happened even while the primary connection still reads 'connected'. */
+    private disconnects;
     /** Set up on the socket that is up now, not merely set up once. */
     private get setUpOnCurrentSocket();
     /** Per-speaker WebSocket connections. Key is player ID. */
@@ -1302,6 +1304,18 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     /**
      * Connects to the Sonos speaker and discovers the household topology.
      * Populates {@link players} and {@link groups}.
+     *
+     * The contract, since Neurotto's own setup now runs off the `'connected'` event rather than this promise:
+     * - Resolves once setup completes — {@link players} and {@link groups} are populated by then.
+     * - If the first handshake fails, this call rejects while the reconnect ladder keeps trying in the background
+     *   (while reconnect is enabled and not exhausted); a later success there runs setup and emits `'connected'`
+     *   without anyone awaiting it.
+     * - Can also reject with a `CONNECTION_LOST` "Disconnected during setup" error if the socket drops mid-setup
+     *   without anyone calling {@link disconnect}; the ladder still recovers in the background and emits `'connected'`.
+     * - A setup failure on an otherwise healthy socket (e.g. a failed topology read) rejects with no automatic retry.
+     * - `'connected'` fires once per successful setup: on a first attempt that succeeds, it fires *before* this promise
+     *   resolves, so attach `'connected'` listeners before calling `connect()`. It also fires after every reconnect.
+     * - {@link disconnect} stops the ladder; no `'connected'` follows it, even if it lands mid-setup.
      */
     connect(): Promise<void>;
     /** Sets up after a handshake no connect() call awaits: the reconnect ladder's. Returns the run so tests can await it. */
@@ -1469,6 +1483,13 @@ declare class SonosClient extends TypedEventEmitter<SonosEvents> {
     /**
      * Connects and finds this speaker in its household. Resolves once the
      * player controls are usable; rejects if the connection or the lookup fails.
+     *
+     * Same `'connected'` contract as `SonosHousehold.connect()`: attach listeners before calling this, since on a
+     * first attempt that succeeds `'connected'` fires before this promise resolves; `disconnect()` cancels the ladder
+     * and no `'connected'` follows it. The reconnect ladder mentioned there only keeps trying while reconnect is
+     * enabled and not exhausted; this call can also reject with a `CONNECTION_LOST` "Disconnected during setup" error
+     * if the socket drops mid-setup without a `disconnect()` call (the ladder still recovers and emits `'connected'`),
+     * and a setup failure on an otherwise healthy socket (e.g. a failed player lookup) rejects with no automatic retry.
      */
     connect(): Promise<void>;
     disconnect(): Promise<void>;

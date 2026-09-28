@@ -382,6 +382,7 @@ var SonosConnection = class extends TypedEventEmitter {
     this.log = options.logger ?? noopLogger;
     this.correlator = new MessageCorrelator(options.requestTimeout);
     this.on("error", (err) => {
+      if (this.listenerCount("error") > 1) return;
       this.log.error(`Unhandled connection error: ${err.message}`);
     });
   }
@@ -1998,6 +1999,8 @@ var SonosHousehold = class extends TypedEventEmitter {
   primaryEpoch = 0;
   /** The primaryEpoch the last completed setup started under. */
   setupEpoch = -1;
+  /** Counts disconnect() calls, so a setup run parked mid-disconnect can tell it happened even while the primary connection still reads 'connected'. */
+  disconnects = 0;
   /** Set up on the socket that is up now, not merely set up once. */
   get setUpOnCurrentSocket() {
     return this._initialConnectDone && this.setupEpoch === this.primaryEpoch;
@@ -2039,6 +2042,7 @@ var SonosHousehold = class extends TypedEventEmitter {
       this.log
     );
     this.on("error", (err) => {
+      if (this.listenerCount("error") > 1) return;
       this.log.error(`Unhandled household error: ${err.message}`);
     });
     this.connection.on("connected", () => this.onPrimaryConnected());
@@ -2066,6 +2070,18 @@ var SonosHousehold = class extends TypedEventEmitter {
   /**
    * Connects to the Sonos speaker and discovers the household topology.
    * Populates {@link players} and {@link groups}.
+   *
+   * The contract, since Neurotto's own setup now runs off the `'connected'` event rather than this promise:
+   * - Resolves once setup completes — {@link players} and {@link groups} are populated by then.
+   * - If the first handshake fails, this call rejects while the reconnect ladder keeps trying in the background
+   *   (while reconnect is enabled and not exhausted); a later success there runs setup and emits `'connected'`
+   *   without anyone awaiting it.
+   * - Can also reject with a `CONNECTION_LOST` "Disconnected during setup" error if the socket drops mid-setup
+   *   without anyone calling {@link disconnect}; the ladder still recovers in the background and emits `'connected'`.
+   * - A setup failure on an otherwise healthy socket (e.g. a failed topology read) rejects with no automatic retry.
+   * - `'connected'` fires once per successful setup: on a first attempt that succeeds, it fires *before* this promise
+   *   resolves, so attach `'connected'` listeners before calling `connect()`. It also fires after every reconnect.
+   * - {@link disconnect} stops the ladder; no `'connected'` follows it, even if it lands mid-setup.
    */
   async connect() {
     if (this.setUpOnCurrentSocket && this.connection.state === "connected") return;
@@ -2094,6 +2110,7 @@ var SonosHousehold = class extends TypedEventEmitter {
   }
   /** Gracefully closes all WebSocket connections. */
   async disconnect() {
+    this.disconnects++;
     if (this.topologyRefreshTimer) {
       clearTimeout(this.topologyRefreshTimer);
       this.topologyRefreshTimer = null;
@@ -2396,6 +2413,7 @@ var SonosHousehold = class extends TypedEventEmitter {
    */
   async handleReconnected() {
     const epoch = this.primaryEpoch;
+    const disconnects = this.disconnects;
     if (!this._initialConnectDone) {
       try {
         await this.discoverHouseholdId();
@@ -2427,6 +2445,10 @@ var SonosHousehold = class extends TypedEventEmitter {
         this.log.warn("Failed reconnect setup", err);
         throw err;
       }
+    }
+    if (this.disconnects !== disconnects || this.connection.state !== "connected") {
+      this.log.debug("Setup abandoned: disconnected during setup");
+      throw new ConnectionError("CONNECTION_LOST" /* CONNECTION_LOST */, "Disconnected during setup");
     }
     this.setupEpoch = epoch;
     this.emit("connected");
@@ -2483,6 +2505,7 @@ var SonosClient = class extends TypedEventEmitter {
       logger: this.log
     });
     this.on("error", (err) => {
+      if (this.listenerCount("error") > 1) return;
       this.log.error(`Unhandled client error: ${err.message}`);
     });
     this.connection.on("connected", () => this.onConnected());
@@ -2528,6 +2551,13 @@ var SonosClient = class extends TypedEventEmitter {
   /**
    * Connects and finds this speaker in its household. Resolves once the
    * player controls are usable; rejects if the connection or the lookup fails.
+   *
+   * Same `'connected'` contract as `SonosHousehold.connect()`: attach listeners before calling this, since on a
+   * first attempt that succeeds `'connected'` fires before this promise resolves; `disconnect()` cancels the ladder
+   * and no `'connected'` follows it. The reconnect ladder mentioned there only keeps trying while reconnect is
+   * enabled and not exhausted; this call can also reject with a `CONNECTION_LOST` "Disconnected during setup" error
+   * if the socket drops mid-setup without a `disconnect()` call (the ladder still recovers and emits `'connected'`),
+   * and a setup failure on an otherwise healthy socket (e.g. a failed player lookup) rejects with no automatic retry.
    */
   async connect() {
     if (this.setUpOnCurrentSocket && this.connection.state === "connected") return;
@@ -2564,6 +2594,10 @@ var SonosClient = class extends TypedEventEmitter {
     } catch (err) {
       this.log.warn("Setup after connect failed", err);
       throw err;
+    }
+    if (this.connection.state !== "connected") {
+      this.log.debug("Setup abandoned: disconnected during setup");
+      throw new ConnectionError("CONNECTION_LOST" /* CONNECTION_LOST */, "Disconnected during setup");
     }
     this.setupEpoch = epoch;
     this.emit("connected");
