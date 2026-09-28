@@ -265,6 +265,20 @@ describe('SonosHousehold safety-net error listener', () => {
       expect.stringContaining('Unhandled household error: boom'),
     );
   });
+
+  it('stays silent when a consumer listener handles the error', () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const household = new SonosHousehold({ host: '192.168.68.96', logger });
+
+    household.on('error', () => {});
+
+    const emit = (household as unknown as { emit: (event: string, ...args: unknown[]) => boolean }).emit.bind(household);
+    emit('error', new Error('boom'));
+
+    expect(logger.error).not.toHaveBeenCalledWith(
+      expect.stringContaining('Unhandled household error'),
+    );
+  });
 });
 
 describe('SonosHousehold first-connect-after-fail setup', () => {

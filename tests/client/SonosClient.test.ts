@@ -55,6 +55,20 @@ describe('SonosClient safety-net error listener', () => {
       expect.stringContaining('Unhandled client error: boom'),
     );
   });
+
+  it('stays silent when a consumer listener handles the error', () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const client = new SonosClient({ host: '192.168.68.96', logger });
+
+    client.on('error', () => {});
+
+    const emit = (client as unknown as { emit: (event: string, ...args: unknown[]) => boolean }).emit.bind(client);
+    emit('error', new Error('boom'));
+
+    expect(logger.error).not.toHaveBeenCalledWith(
+      expect.stringContaining('Unhandled client error'),
+    );
+  });
 });
 
 const household = {

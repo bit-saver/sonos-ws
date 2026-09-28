@@ -140,8 +140,10 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
 
     // Safety-net error listener: guarantees emit('error') never throws for
     // lack of a listener (Node EventEmitter default), which would otherwise
-    // crash the host app. User-attached listeners still fire alongside.
+    // crash the host app. User-attached listeners still fire alongside; it
+    // logs only when nothing else handles the error.
     this.on('error', (err) => {
+      if (this.listenerCount('error') > 1) return;
       this.log.error(`Unhandled connection error: ${err.message}`);
     });
   }

@@ -382,7 +382,36 @@ describe('SonosConnection safety-net error listener', () => {
     emit('error', new Error('boom'));
 
     expect(userHandler).toHaveBeenCalledTimes(1);
-    expect(logger.error).toHaveBeenCalled();
+    // A consumer listener is attached, so the safety net stays silent — see the next test.
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it('stays silent when a consumer listener handles the error', () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const conn = new SonosConnection({
+      host: '192.168.68.96',
+      port: 1443,
+      reconnect: {
+        enabled: true,
+        initialDelay: 100,
+        maxDelay: 1000,
+        factor: 2,
+        maxAttempts: 3,
+        pingInterval: 0,
+        pongTimeout: 200,
+      },
+      requestTimeout: 5000,
+      logger,
+    });
+
+    conn.on('error', () => {});
+
+    const emit = (conn as unknown as { emit: (event: string, ...args: unknown[]) => boolean }).emit.bind(conn);
+    emit('error', new Error('boom'));
+
+    expect(logger.error).not.toHaveBeenCalledWith(
+      expect.stringContaining('Unhandled connection error'),
+    );
   });
 });
 
