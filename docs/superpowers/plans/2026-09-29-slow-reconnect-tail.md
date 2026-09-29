@@ -222,8 +222,7 @@ In `scheduleReconnect()`, move the `setTimeout` above the log line and the emit,
 ```ts
     this.reconnectAttempt++;
 
-    // Arm the attempt before announcing it. A listener may call disconnect(), which cancels the ladder by clearing
-    // this timer; a timer armed after the announcement would outlive that disconnect, and its connect() would undo it.
+    // Armed before it is announced, so a listener's disconnect() can cancel it.
     this.reconnectTimer = setTimeout(async () => {
       try {
         await this.connect();
@@ -501,8 +500,7 @@ Replace `scheduleReconnect()` from `this._state = 'reconnecting';` to the end of
     const slowDelay = this.slowPhaseDelay(attempt);
     const delay = slowDelay ?? Math.min(initialDelay * Math.pow(factor, attempt - 1), maxDelay);
 
-    // Arm the attempt before announcing it. A listener may call disconnect(), which cancels the ladder by clearing
-    // this timer; a timer armed after the announcement would outlive that disconnect, and its connect() would undo it.
+    // Armed before it is announced, so a listener's disconnect() can cancel it.
     const timer = setTimeout(async () => {
       try {
         await this.connect();
@@ -514,13 +512,14 @@ Replace `scheduleReconnect()` from `this._state = 'reconnecting';` to the end of
     }, delay);
     this.reconnectTimer = timer;
 
-    // The first slow attempt. The counter only rises within an outage and resets only on open, so this fires once
-    // per outage: an external connect() that fails mid-ladder advances the counter past this value, never onto it again.
+    // The first slow attempt, so once per outage:
+    // - the counter only rises within an outage and resets on open
+    // - an external connect() that fails moves it past this value, never back onto it
     if (slowDelay !== undefined && attempt - 1 === slowAfter) {
       const message = `Reconnect slowed after ${slowAfter} attempts; retrying every ${slowDelay}ms`;
       this.log.info(message);
       this.emit('error', new ConnectionError(ErrorCode.RECONNECT_SLOWED, message));
-      // A listener that disconnected has cancelled the attempt; do not announce it.
+      // A listener disconnected: nothing left to announce.
       if (this.reconnectTimer !== timer) return;
     }
 
@@ -624,7 +623,7 @@ Expected: `with slowAfter unset` PASSES (a pin); `logs the fast phase…` FAILS 
 In `connect()`, replace `this.log.info(\`Connecting to ${url}\`);` with:
 
 ```ts
-      // An attempt in the slow phase repeats this line for as long as the speaker stays away.
+      // Slow-phase attempts repeat this for as long as the speaker is away.
       const level = this.slowPhaseDelay(this.reconnectAttempt) === undefined ? 'info' : 'debug';
       this.log[level](`Connecting to ${url}`);
 ```
@@ -772,8 +771,8 @@ Replace `createSpeakerConnection()`:
 
 ```ts
   /**
-   * Builds and wires a speaker's connection. Its events reach listeners like the primary's; its errors do not, since
-   * the household's 'error' is its primary's (a consumer alerting on RECONNECT_SLOWED means the household).
+   * Builds and wires a speaker's connection. Its events reach listeners like the primary's; its errors are only
+   * logged, because the household's 'error' is about the primary.
    */
   private createSpeakerConnection(player: Player, url: URL): SonosConnection {
     const conn = new SonosConnection({
@@ -784,8 +783,7 @@ Replace `createSpeakerConnection()`:
       logger: this.log,
     });
     const who = `Speaker ${player.name} (${url.hostname})`;
-    // Set by an outage's first failed attempt, cleared when the socket connects: one warn per outage, the rest at
-    // debug, so a speaker unplugged for days neither fills the log nor trips the connection's "Unhandled" safety net.
+    // One warn per outage, the rest at debug; reset when the socket connects.
     let failing = false;
     conn.on('message', (msg) => this.handleMessage(msg));
     // A reconnected socket holds no subscriptions.
@@ -857,11 +855,8 @@ In the describe's comment block, replace the first paragraph ("Consumers size th
   // (its "Sonos may be offline" alert), then retries every slowDelay with
   // maxAttempts Infinity, so it never gives up.
   //
-  // The 45 minutes are waits only. When a speaker hangs mid-handshake (the Arc
-  // on 2026-09-28), every attempt also spends connectTimeout (10 s) failing,
-  // so the switch comes ~61 minutes into the outage; a refused connection
-  // gets there in ~45. Neurotto reports the duration from its own outage
-  // record, not from this number.
+  // The 45 minutes are waits only: a handshake that hangs adds connectTimeout
+  // (10 s) per attempt, ~61 minutes in all.
 ```
 
 In the "coupling runs both ways" paragraph: "The 94 below is a copy of Neurotto's RECONNECT_POLICY" → "The 94 below is a copy of Neurotto's RECONNECT_POLICY.slowAfter", and "when Neurotto's cap changes" → "when Neurotto's slowAfter changes". Leave the rest of the block as it is.
