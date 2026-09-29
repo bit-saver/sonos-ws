@@ -475,7 +475,7 @@ covers the household's primary, every speaker socket and `SonosClient`
 (both construct their connection in their constructor, so a bad option
 throws from `new SonosHousehold(…)` / `new SonosClient(…)`). `RangeError`
 when only one of the pair is set, when `slowAfter` is not a positive
-integer, or when `slowDelay` is not a finite number above 0. Nothing else
+integer, or when `slowDelay` is not a number above 0 and at most 2147483647 ms (Node runs a longer timer after 1 ms). Nothing else
 is validated here (`connectTimeout` validation stays a separate follow-up).
 
 ### Tests

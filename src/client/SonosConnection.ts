@@ -48,6 +48,14 @@ export interface ReconnectOptions {
   pingInterval: number;
   /** Milliseconds to wait for a pong reply before declaring the connection dead. */
   pongTimeout: number;
+  /**
+   * Attempts on the exponential ladder before the slow phase. From attempt `slowAfter + 1` every delay is
+   * `slowDelay`, and `'error'` fires once with `RECONNECT_SLOWED`. Unset: no slow phase. Set together with
+   * `slowDelay`.
+   */
+  slowAfter?: number;
+  /** Milliseconds between attempts in the slow phase. Set together with `slowAfter`. */
+  slowDelay?: number;
 }
 
 /** Low-level options passed to the {@link SonosConnection} constructor. */
@@ -77,6 +85,27 @@ export interface ConnectionOptions {
  * never ends.
  */
 const DEFAULT_CONNECT_TIMEOUT = 10_000;
+
+/** The longest delay a timer honors. Node runs a longer one after 1 ms, which would turn a slow ladder into a hot loop. */
+const MAX_TIMER_DELAY = 2_147_483_647;
+
+/**
+ * Rejects slow-phase options that would misbehave rather than fail: half a pair, a phase that starts at attempt 0 or
+ * a fractional one, a delay a timer cannot hold.
+ */
+function validateReconnectOptions({ slowAfter, slowDelay }: ReconnectOptions): void {
+  if ((slowAfter === undefined) !== (slowDelay === undefined)) {
+    throw new RangeError('reconnect.slowAfter and reconnect.slowDelay must be set together');
+  }
+  if (slowAfter !== undefined && !(Number.isInteger(slowAfter) && slowAfter > 0)) {
+    throw new RangeError(`reconnect.slowAfter must be a positive integer, got ${slowAfter}`);
+  }
+  if (slowDelay !== undefined && !(Number.isFinite(slowDelay) && slowDelay > 0 && slowDelay <= MAX_TIMER_DELAY)) {
+    throw new RangeError(
+      `reconnect.slowDelay must be a number of ms above 0 and at most ${MAX_TIMER_DELAY}, got ${slowDelay}`,
+    );
+  }
+}
 
 /**
  * One-line form of an event body for the log.
@@ -134,6 +163,7 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
 
   constructor(options: ConnectionOptions) {
     super();
+    validateReconnectOptions(options.reconnect);
     this.options = options;
     this.log = options.logger ?? noopLogger;
     this.correlator = new MessageCorrelator(options.requestTimeout);

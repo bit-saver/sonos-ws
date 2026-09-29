@@ -1030,3 +1030,29 @@ describe('connection lifecycle', () => {
     expect(conn.state).toBe('connected');
   });
 });
+
+describe('SonosConnection reconnect option checks', () => {
+  it.each([
+    [{ slowAfter: 3 }, 'must be set together'],
+    [{ slowDelay: 5000 }, 'must be set together'],
+    [{ slowAfter: 0, slowDelay: 5000 }, 'slowAfter must be a positive integer'],
+    [{ slowAfter: -1, slowDelay: 5000 }, 'slowAfter must be a positive integer'],
+    [{ slowAfter: 1.5, slowDelay: 5000 }, 'slowAfter must be a positive integer'],
+    [{ slowAfter: NaN, slowDelay: 5000 }, 'slowAfter must be a positive integer'],
+    [{ slowAfter: 3, slowDelay: 0 }, 'slowDelay must be'],
+    [{ slowAfter: 3, slowDelay: -1 }, 'slowDelay must be'],
+    [{ slowAfter: 3, slowDelay: NaN }, 'slowDelay must be'],
+    [{ slowAfter: 3, slowDelay: Infinity }, 'slowDelay must be'],
+    // Node clamps a timer delay above 2^31-1 to 1 ms: a "5-day" slowDelay would retry in a hot loop.
+    [{ slowAfter: 3, slowDelay: 2_147_483_648 }, 'slowDelay must be'],
+  ])('rejects %o', (reconnect, message) => {
+    expect(() => new SonosConnection(makeOptions(reconnect))).toThrow(RangeError);
+    expect(() => new SonosConnection(makeOptions(reconnect))).toThrow(message);
+  });
+
+  it('accepts the pair, and accepts neither', () => {
+    expect(() => new SonosConnection(makeOptions({ slowAfter: 94, slowDelay: 300_000 }))).not.toThrow();
+    expect(() => new SonosConnection(makeOptions({ slowAfter: 1, slowDelay: 2_147_483_647 }))).not.toThrow();
+    expect(() => new SonosConnection(makeOptions())).not.toThrow();
+  });
+});

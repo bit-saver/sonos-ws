@@ -1,7 +1,7 @@
 /**
  * Error codes used by {@link SonosError} and its subclasses.
  *
- * The first four codes are client-side errors raised by sonos-ws itself.
+ * The first five codes are client-side errors raised by sonos-ws itself.
  * The remaining `ERROR_*` codes are Sonos API error codes returned by the device.
  */
 export enum ErrorCode {
@@ -11,6 +11,11 @@ export enum ErrorCode {
   CONNECTION_LOST = 'CONNECTION_LOST',
   /** All automatic reconnect attempts have been exhausted. */
   RECONNECT_EXHAUSTED = 'RECONNECT_EXHAUSTED',
+  /**
+   * The reconnect ladder passed `slowAfter` attempts and now retries every `slowDelay` ms. Emitted once per outage;
+   * the ladder keeps going.
+   */
+  RECONNECT_SLOWED = 'RECONNECT_SLOWED',
   /** A command did not receive a response within the configured timeout. */
   REQUEST_TIMEOUT = 'REQUEST_TIMEOUT',
 

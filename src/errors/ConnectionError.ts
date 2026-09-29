@@ -9,6 +9,7 @@ import { SonosError } from './SonosError.js';
  * - {@link ErrorCode.CONNECTION_FAILED} -- initial connection could not be established
  * - {@link ErrorCode.CONNECTION_LOST} -- an existing connection was unexpectedly lost
  * - {@link ErrorCode.RECONNECT_EXHAUSTED} -- all automatic reconnect attempts failed
+ * - {@link ErrorCode.RECONNECT_SLOWED} -- the reconnect ladder switched to its slow phase (it keeps retrying)
  */
 export class ConnectionError extends SonosError {
   /**
@@ -18,7 +19,11 @@ export class ConnectionError extends SonosError {
    * @param options.cause - The underlying error that caused the connection failure.
    */
   constructor(
-    code: ErrorCode.CONNECTION_FAILED | ErrorCode.CONNECTION_LOST | ErrorCode.RECONNECT_EXHAUSTED,
+    code:
+      | ErrorCode.CONNECTION_FAILED
+      | ErrorCode.CONNECTION_LOST
+      | ErrorCode.RECONNECT_EXHAUSTED
+      | ErrorCode.RECONNECT_SLOWED,
     message: string,
     options?: { cause?: unknown },
   ) {
