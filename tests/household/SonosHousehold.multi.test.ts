@@ -3,7 +3,10 @@
 // mock, keyed by host, so a test can see which socket carried what.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SonosHousehold } from '../../src/household/SonosHousehold.js';
+import type { SonosHouseholdOptions } from '../../src/household/SonosHousehold.js';
 import type { GroupsResponse } from '../../src/types/groups.js';
+import { ConnectionError } from '../../src/errors/ConnectionError.js';
+import { ErrorCode } from '../../src/types/errors.js';
 
 const instances: any[] = [];
 let topology: GroupsResponse;
@@ -15,6 +18,7 @@ vi.mock('../../src/client/SonosConnection.js', () => ({
     const listeners = new Map<string, Function[]>();
     const inst: any = {
       host: opts.host,
+      opts,
       state: 'disconnected',
       on(event: string, handler: Function) {
         if (!listeners.has(event)) listeners.set(event, []);
@@ -82,10 +86,13 @@ const sentVia = (host: string, namespace?: string, command?: string) =>
     .map(([req]: any) => req[0])
     .filter((h: any) => (!namespace || h.namespace === namespace) && (!command || h.command === command));
 
-async function connectedHousehold(start: GroupsResponse): Promise<SonosHousehold> {
+async function connectedHousehold(
+  start: GroupsResponse,
+  options: Partial<SonosHouseholdOptions> = {},
+): Promise<SonosHousehold> {
   instances.length = 0;
   topology = start;
-  const household = new SonosHousehold({ host: PRIMARY });
+  const household = new SonosHousehold({ host: PRIMARY, ...options });
   await household.connect();
   return household;
 }
@@ -284,5 +291,66 @@ describe('reconnect setup does not stall on a stuck resubscribe', () => {
       unansweredSubscribes.delete(OFFICE_IP);
     }
     void household;
+  });
+});
+
+describe('speaker socket errors', () => {
+  const refused = () => new ConnectionError(ErrorCode.CONNECTION_FAILED, 'Failed to connect: ECONNREFUSED');
+  const slowed = () =>
+    new ConnectionError(ErrorCode.RECONNECT_SLOWED, 'Reconnect slowed after 94 attempts; retrying every 300000ms');
+  const logger = () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() });
+  const officeLines = (log: any, level: 'warn' | 'debug') =>
+    log[level].mock.calls.map((call: unknown[]) => String(call[0])).filter((l: string) => l.startsWith('Speaker Office'));
+
+  it("forwards the primary's RECONNECT_SLOWED to the household, and never a speaker's", async () => {
+    const household = await connectedHousehold(solo);
+    const heard: string[] = [];
+    household.on('error', (e: any) => heard.push(e.code));
+
+    socket(OFFICE_IP)._emit('error', slowed());
+    socket(BED_IP)._emit('error', slowed());
+    socket(PRIMARY)._emit('error', slowed());
+
+    expect(heard).toEqual(['RECONNECT_SLOWED']);
+  });
+
+  it("logs a speaker's failed attempts at warn once per outage, the rest at debug, and nothing at error", async () => {
+    const log = logger();
+    await connectedHousehold(solo, { logger: log });
+
+    socket(OFFICE_IP)._emit('error', refused());
+    socket(OFFICE_IP)._emit('error', refused());
+    socket(OFFICE_IP)._emit('error', refused());
+    socket(OFFICE_IP)._emit('error', slowed());
+    socket(OFFICE_IP)._emit('error', refused());
+
+    expect(officeLines(log, 'warn')).toEqual([
+      `Speaker Office (${OFFICE_IP}): Failed to connect: ECONNREFUSED`,
+      `Speaker Office (${OFFICE_IP}): Reconnect slowed after 94 attempts; retrying every 300000ms`,
+    ]);
+    expect(officeLines(log, 'debug')).toHaveLength(3);
+    expect(log.error).not.toHaveBeenCalled();
+  });
+
+  it("warns again for a speaker's next outage once its socket has connected", async () => {
+    const log = logger();
+    await connectedHousehold(solo, { logger: log });
+
+    socket(OFFICE_IP)._emit('error', refused());
+    socket(OFFICE_IP)._emit('error', refused());
+    socket(OFFICE_IP)._emit('connected');
+    socket(OFFICE_IP)._emit('error', refused());
+
+    expect(officeLines(log, 'warn')).toHaveLength(2);
+    expect(officeLines(log, 'debug')).toHaveLength(1);
+  });
+
+  it("hands every speaker socket the household's reconnect options, slow tail included", async () => {
+    const reconnect = { maxAttempts: Infinity, slowAfter: 94, slowDelay: 300_000 };
+    await connectedHousehold(solo, { reconnect });
+
+    for (const host of [PRIMARY, OFFICE_IP, BED_IP]) {
+      expect(socket(host).opts.reconnect).toMatchObject(reconnect);
+    }
   });
 });

@@ -470,7 +470,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     }
 
     const url = new URL(player.websocketUrl);
-    const conn = existing ?? this.createSpeakerConnection(url);
+    const conn = existing ?? this.createSpeakerConnection(player, url);
 
     // Store BEFORE awaiting connect so a failure still leaves the
     // reconnect loop running in the background. The connection's own
@@ -483,15 +483,18 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       await conn.connect();
       this.log.info(`Connected to ${player.name} at ${url.hostname}`);
     } catch (err) {
-      this.log.warn(`Initial connect to ${player.name} failed; reconnect loop will retry`, err);
+      this.log.debug(`Initial connect to ${player.name} failed; reconnect loop will retry`, err);
       // Do not rethrow — connection is in the map with reconnect scheduled.
     }
 
     return conn;
   }
 
-  /** Builds and wires a speaker's connection; its events reach listeners like the primary's. */
-  private createSpeakerConnection(url: URL): SonosConnection {
+  /**
+   * Builds and wires a speaker's connection. Its events reach listeners like the primary's; its errors are only
+   * logged, because the household's 'error' is about the primary.
+   */
+  private createSpeakerConnection(player: Player, url: URL): SonosConnection {
     const conn = new SonosConnection({
       host: url.hostname,
       port: parseInt(url.port) || 1443,
@@ -499,9 +502,25 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       requestTimeout: this.requestTimeoutMs,
       logger: this.log,
     });
+    const who = `Speaker ${player.name} (${url.hostname})`;
+    // One warn per outage, the rest at debug; reset when the socket connects.
+    let failing = false;
     conn.on('message', (msg) => this.handleMessage(msg));
     // A reconnected socket holds no subscriptions.
-    conn.on('connected', () => { void this.resubscribeAll(); });
+    conn.on('connected', () => {
+      failing = false;
+      void this.resubscribeAll();
+    });
+    conn.on('error', (err) => {
+      if (err instanceof ConnectionError && err.code === ErrorCode.CONNECTION_FAILED) {
+        if (failing) {
+          this.log.debug(`${who}: ${err.message}`);
+          return;
+        }
+        failing = true;
+      }
+      this.log.warn(`${who}: ${err.message}`);
+    });
     return conn;
   }
 
@@ -580,7 +599,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
         this.log.info(`Reconnecting speaker ${playerId}`);
         reconnectPromises.push(
           conn.connect().catch((err: unknown) =>
-            this.log.warn(`Failed to reconnect speaker ${playerId}:`, err)),
+            this.log.debug(`Failed to reconnect speaker ${playerId}:`, err)),
         );
       }
     }
