@@ -351,3 +351,184 @@ setup abort log line, the interleaving `handleReconnected()` runs, and
 subscribe-then-read ordering gap is closed in practice: Sonos sends a
 `groups` event on subscribe (seen at the 19:37 deploy), which triggers the
 debounced re-read.
+
+## Addendum 2026-09-29 — slow reconnect tail
+
+Approved by the owner 2026-09-28 07:58 (the behavior) and 2026-09-29 12:43
+(this design, including the speaker handling). Agreed with the Neurotto
+session, whose side is `neurotto/docs/superpowers/specs/2026-09-28-sonos-slow-retry-design.md`
+(`7acf186`); HOA accepted the speaker handling 09-29 09:06.
+
+### Why
+
+09-28: the Arc hung from 03:56 to about 06:30. Neurotto's `maxAttempts: 94`
+exhausted the ladder, alerted "Sonos may be offline", and then nothing
+retried until a manual `sonos reconnect`. The owner's ruling: after the
+alert, keep retrying every few minutes and recover by itself, "as long as the
+logs don't get too spammed from it". A finite `maxAttempts` cannot do both:
+it is the only thing that produces the alert, and it is what stops the
+retrying.
+
+### Behavior
+
+`ReconnectOptions` gains two optional fields:
+
+- `slowAfter?: number` — attempts on the exponential ladder before the slow
+  phase starts.
+- `slowDelay?: number` — the delay in ms before every attempt after that.
+
+Attempt `n` (1-based) waits `min(initialDelay * factor^(n-1), maxDelay)`
+for `n <= slowAfter`, and `slowDelay` for `n > slowAfter`. The exhaustion
+check is unchanged and runs first: a finite `maxAttempts` still exhausts
+(after the slow phase if it is larger than `slowAfter`, before it if not).
+With `maxAttempts: Infinity` the ladder never exhausts. The attempt counter
+already resets on a successful open, so the next outage starts fast again.
+
+**Both unset means today's ladder exactly** — same delays, same attempt
+count, same exhaustion, same log levels on the primary. A test pins this so
+the new library can deploy ahead of Neurotto's policy change without
+changing what production does.
+
+Neurotto will pass `{ maxAttempts: Infinity, slowAfter: 94, slowDelay:
+300_000 }`.
+
+### The signal: `RECONNECT_SLOWED`
+
+When `scheduleReconnect()` schedules attempt `slowAfter + 1`, the connection
+emits `'error'` with `new ConnectionError(ErrorCode.RECONNECT_SLOWED,
+'Reconnect slowed after <slowAfter> attempts; retrying every <slowDelay>ms')`
+— an `Error`, like `RECONNECT_EXHAUSTED`. It fires once per outage by
+construction: the counter only rises within an outage and resets only on
+open, so it crosses `slowAfter` exactly once. An external `connect()` that
+fails mid-ladder also goes through `scheduleReconnect()` and advances the
+counter, so it cannot re-fire the signal either. The household forwards the
+primary's, as it forwards every primary `'error'`. `'reconnecting'(attempt,
+delay)` still fires on every attempt, slow ones included.
+
+**Emits happen after the next timer is armed.** Today `'reconnecting'` is
+emitted before the timer is set, so a listener that calls `disconnect()`
+from it clears nothing, and the timer armed afterwards calls `connect()`,
+which resets `intentionalClose` — the ladder survives the disconnect. A new
+`'error'` at the same spot makes that likelier (an error is what a consumer
+reacts to). `scheduleReconnect()` now arms the timer, then logs and emits;
+if a listener cleared the timer (`disconnect()`), it stops emitting.
+
+### Logging
+
+- Fast phase: unchanged (`Connecting to …`, `Reconnecting in …` at info).
+- The switch: one info line, the `RECONNECT_SLOWED` message.
+- Slow phase: `Connecting to …` and `Reconnecting in …` drop to debug.
+  `connect()` knows it is in the slow phase from `reconnectAttempt >
+  slowAfter` (the ladder increments before its timer calls `connect()`).
+- Per-attempt `CONNECTION_FAILED` `'error'` events are still emitted;
+  Neurotto quiets its own per-attempt line (its side of the design).
+
+### Speaker sockets
+
+Every speaker connection gets the household's reconnect options, so under
+Neurotto's policy the speakers get the slow tail too. That is wanted: today
+a speaker whose ladder exhausts (Neurotto's 94) is revived only by the
+primary reconnecting (`reconnectSpeakers()`), so an Office unplugged for an
+hour stays dead until the Arc drops or Neurotto restarts. With the slow tail
+it heals itself within `slowDelay` of coming back.
+
+But nothing listens to a speaker socket's `'error'` except the connection's
+safety net, so today every failed speaker attempt logs `Unhandled connection
+error` at ERROR — ~94 lines per outage under a cap of 94, and every 5 min
+forever under the new policy. **The household now owns each speaker
+socket's `'error'` listener:**
+
+- `CONNECTION_FAILED`: warn on the first failure since that socket was last
+  connected, naming the speaker and host; debug after that. The socket's
+  `'connected'` resets it.
+- `RECONNECT_SLOWED`, `RECONNECT_EXHAUSTED`: warn (once each per outage by
+  construction).
+- Anything else: warn.
+- **Never forwarded to the household's `'error'`**, so a speaker can never
+  raise Neurotto's alert; only the primary (the Arc) does. A test pins this.
+
+The `Initial connect … failed` (`connectToSpeaker`) and `Failed to reconnect
+speaker` (`reconnectSpeakers`) warn lines drop to debug; the listener
+already warns once for that failure. A dead speaker then writes two warn
+lines per outage (first failure, the switch) instead of ~94 errors.
+
+⚠ **This applies with `slowAfter` unset too** — speakers log less than
+today whatever the policy. It changes what production says, never what it
+does; the ladder pin covers the doing. The commit message and the deploy
+note call it out, so the missing ERROR lines are not read as a regression.
+
+### Timing: 45 minutes of waits, ~61 minutes of outage
+
+Neurotto's 94 attempts sum to 45.0 min of waits (1+2+4+8+16 s, then 89 ×
+30 s). That is the whole story only when each attempt fails fast (a refused
+connection). When the speaker hangs mid-handshake, as the Arc did on 09-28,
+each attempt also spends `connectTimeout` (10 s) before it fails: 94 × 10 s
+adds 15.7 min, so the switch comes about 61 min into the outage. 09-28
+fits: the stall began 03:56 and the ladder exhausted 05:00:25. Neurotto's
+alert states the measured duration from its own outage record rather than
+a literal.
+
+### Validation
+
+`SonosConnection`'s constructor validates the reconnect options once, which
+covers the household's primary, every speaker socket and `SonosClient`
+(both construct their connection in their constructor, so a bad option
+throws from `new SonosHousehold(…)` / `new SonosClient(…)`). `RangeError`
+when only one of the pair is set, when `slowAfter` is not a positive
+integer, or when `slowDelay` is not a finite number above 0. Nothing else
+is validated here (`connectTimeout` validation stays a separate follow-up).
+
+### Tests
+
+Each guard is mutation-verified (break the line, watch exactly its test
+fail, restore).
+
+1. Unset pin: over a finite ladder, the `'reconnecting'` (attempt, delay)
+   sequence, the single `RECONNECT_EXHAUSTED` and the info-level log lines
+   equal today's; no `RECONNECT_SLOWED`.
+2. The switch: delays follow the ladder through `slowAfter`, then equal
+   `slowDelay`; with `maxAttempts: Infinity` nothing exhausts.
+3. `RECONNECT_SLOWED` exactly once per outage, as a `ConnectionError` with
+   that code, when attempt `slowAfter + 1` is scheduled — including when an
+   external `connect()` fails in the slow phase.
+4. Reset on success: a later outage starts at `initialDelay` and signals
+   again. (The reset line has no test today.)
+5. Finite cap above `slowAfter`: slows, then exhausts once.
+6. Log levels: info in the fast phase, one info line at the switch, debug
+   for `Connecting to` / `Reconnecting in` in the slow phase.
+7. `disconnect()` from a `RECONNECT_SLOWED` listener, and from a
+   `'reconnecting'` listener, stops the ladder: no socket after the delay.
+8. Validation: each rejected shape throws `RangeError`; the valid pair and
+   both-unset construct.
+9. Household: the primary's `RECONNECT_SLOWED` reaches household `'error'`;
+   a speaker's does not. Speaker logging: first failure warn, later debug,
+   reset after `'connected'`; slowed/exhausted warn; no `Unhandled
+   connection error`.
+10. Speaker self-heal: a speaker socket built with the household's options
+    keeps retrying past where a cap of `slowAfter` would have exhausted,
+    reconnects when the speaker answers, and re-sends its subscriptions —
+    without the primary reconnecting.
+11. The published-contract test (`SonosHousehold.test.ts`): defaults still
+    1000 / 2 / 30000 / Infinity, `slowAfter` and `slowDelay` unset; the
+    ~45-minute window is now derived for `slowAfter: 94` (Neurotto's
+    value); the comment gains the ~61-minute note and still points at
+    Neurotto's `RECONNECT_POLICY` as the source of truth.
+
+### Out of scope
+
+- Closing a speaker's socket when it leaves the topology. Nothing reopens a
+  socket for a returning speaker outside a primary reconnect, so closing
+  would turn "retries every 5 min" into "dead until the Arc drops".
+- Kicking slow-phase speakers when the primary returns:
+  `reconnectSpeakers()` only reconnects speakers in `'disconnected'`, so
+  after a long whole-house outage a speaker can lag the primary by up to
+  `slowDelay`.
+- The `connect()` settle-once contract (ruled out 09-28).
+
+### Shipping
+
+The library commit lands first; the new fields change nothing until a
+consumer sets them. Neurotto bumps the pin in the same change that moves
+`RECONNECT_POLICY` and switches its alert to `RECONNECT_SLOWED`, so the two
+ship together. HOA and the Neurotto session get the sha, a diff summary and
+the test evidence before anything deploys.
