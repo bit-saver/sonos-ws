@@ -531,15 +531,13 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
     }
 
     this._state = 'reconnecting';
-    const delay = Math.min(
-      this.options.reconnect.initialDelay * Math.pow(this.options.reconnect.factor, this.reconnectAttempt),
-      this.options.reconnect.maxDelay,
-    );
-
-    this.reconnectAttempt++;
+    const attempt = ++this.reconnectAttempt;
+    const { initialDelay, factor, maxDelay, slowAfter } = this.options.reconnect;
+    const slowDelay = this.slowPhaseDelay(attempt);
+    const delay = slowDelay ?? Math.min(initialDelay * Math.pow(factor, attempt - 1), maxDelay);
 
     // Armed before it is announced, so a listener's disconnect() can cancel it.
-    this.reconnectTimer = setTimeout(async () => {
+    const timer = setTimeout(async () => {
       try {
         await this.connect();
       } catch {
@@ -548,9 +546,21 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
         // RECONNECT_EXHAUSTED and halve the effective maxAttempts.
       }
     }, delay);
+    this.reconnectTimer = timer;
 
-    this.log.info(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempt})`);
-    this.emit('reconnecting', this.reconnectAttempt, delay);
+    // The first slow attempt, so once per outage:
+    // - the counter only rises within an outage and resets on open
+    // - an external connect() that fails moves it past this value, never back onto it
+    if (slowDelay !== undefined && attempt - 1 === slowAfter) {
+      const message = `Reconnect slowed after ${slowAfter} attempts; retrying every ${slowDelay}ms`;
+      this.log.info(message);
+      this.emit('error', new ConnectionError(ErrorCode.RECONNECT_SLOWED, message));
+      // A listener disconnected: nothing left to announce.
+      if (this.reconnectTimer !== timer) return;
+    }
+
+    this.log.info(`Reconnecting in ${delay}ms (attempt ${attempt})`);
+    this.emit('reconnecting', attempt, delay);
   }
 
   private clearReconnectTimer(): void {
@@ -558,6 +568,12 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+  }
+
+  /** The delay before ladder attempt `attempt` if it falls in the slow phase; undefined on the exponential ladder. */
+  private slowPhaseDelay(attempt: number): number | undefined {
+    const { slowAfter, slowDelay } = this.options.reconnect;
+    return slowAfter !== undefined && attempt > slowAfter ? slowDelay : undefined;
   }
 
   private startPing(): void {

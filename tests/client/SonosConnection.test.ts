@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SonosConnection } from '../../src/client/SonosConnection.js';
 import type { ReconnectOptions } from '../../src/client/SonosConnection.js';
 import WebSocket from 'ws';
+import { ConnectionError } from '../../src/errors/ConnectionError.js';
 
 vi.mock('ws', () => {
   const MockWebSocket = vi.fn(() => {
@@ -71,6 +72,32 @@ function makeOptions(overrides?: Partial<ReconnectOptions>): any {
     requestTimeout: 5000,
     logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   };
+}
+
+/** Records each attempt the ladder schedules, as [attempt, delay]. */
+function recordAttempts(conn: SonosConnection): Array<[number, number]> {
+  const scheduled: Array<[number, number]> = [];
+  conn.on('reconnecting', (attempt, delay) => scheduled.push([attempt, delay]));
+  return scheduled;
+}
+
+/** Starts `conn` against a speaker that refuses it: the first attempt fails and the ladder begins. */
+function startRefused(conn: SonosConnection): void {
+  conn.connect().catch(() => {});
+  getLastMockWs()._emit('error', new Error('ECONNREFUSED'));
+}
+
+/**
+ * Lets the ladder run, refusing every attempt it makes, until `scheduled` holds `count` attempts or the ladder
+ * stops scheduling (exhausted). Each step advances exactly the last attempt's delay, so its socket exists.
+ */
+async function refuseUntil(scheduled: Array<[number, number]>, count: number): Promise<void> {
+  while (scheduled.length > 0 && scheduled.length < count) {
+    const before = scheduled.length;
+    await vi.advanceTimersByTimeAsync(scheduled[before - 1]![1]);
+    getLastMockWs()._emit('error', new Error('ECONNREFUSED'));
+    if (scheduled.length === before) return;
+  }
 }
 
 describe('SonosConnection keepalive', () => {
@@ -1079,6 +1106,174 @@ describe('SonosConnection reconnect ladder', () => {
     await vi.advanceTimersByTimeAsync(10_000);
 
     expect(getLastMockWs()).toBe(ws1);
+    expect(conn.state).toBe('disconnected');
+  });
+
+  it('with slowAfter and slowDelay unset, the ladder is exactly the exponential one and exhausts at maxAttempts', async () => {
+    const conn = new SonosConnection(makeOptions({ pingInterval: 0, maxAttempts: 6 }));
+    const codes: string[] = [];
+    conn.on('error', (e: any) => codes.push(e.code));
+    const scheduled = recordAttempts(conn);
+
+    startRefused(conn);
+    await refuseUntil(scheduled, 20);
+
+    expect(scheduled).toEqual([[1, 100], [2, 200], [3, 400], [4, 800], [5, 1000], [6, 1000]]);
+    expect(codes.filter((c) => c === 'RECONNECT_EXHAUSTED')).toHaveLength(1);
+    expect(codes).not.toContain('RECONNECT_SLOWED');
+  });
+
+  it('past slowAfter every attempt waits slowDelay, and with maxAttempts Infinity nothing exhausts', async () => {
+    const conn = new SonosConnection(
+      makeOptions({ pingInterval: 0, maxAttempts: Infinity, slowAfter: 3, slowDelay: 5000 }),
+    );
+    const codes: string[] = [];
+    conn.on('error', (e: any) => codes.push(e.code));
+    const scheduled = recordAttempts(conn);
+
+    startRefused(conn);
+    await refuseUntil(scheduled, 8);
+
+    expect(scheduled).toEqual([[1, 100], [2, 200], [3, 400], [4, 5000], [5, 5000], [6, 5000], [7, 5000], [8, 5000]]);
+    expect(codes).not.toContain('RECONNECT_EXHAUSTED');
+    expect(conn.state).toBe('reconnecting');
+  });
+
+  it('signals RECONNECT_SLOWED once, as a ConnectionError, just before attempt slowAfter + 1', async () => {
+    const conn = new SonosConnection(
+      makeOptions({ pingInterval: 0, maxAttempts: Infinity, slowAfter: 3, slowDelay: 5000 }),
+    );
+    const slowed: unknown[] = [];
+    const events: string[] = [];
+    conn.on('error', (e: any) => {
+      if (e.code !== 'RECONNECT_SLOWED') return;
+      slowed.push(e);
+      events.push(`slowed: ${e.message}`);
+    });
+    conn.on('reconnecting', (attempt) => events.push(`attempt ${attempt}`));
+    const scheduled = recordAttempts(conn);
+
+    startRefused(conn);
+    await refuseUntil(scheduled, 7);
+
+    expect(events).toEqual([
+      'attempt 1', 'attempt 2', 'attempt 3',
+      'slowed: Reconnect slowed after 3 attempts; retrying every 5000ms',
+      'attempt 4', 'attempt 5', 'attempt 6', 'attempt 7',
+    ]);
+    expect(slowed[0]).toBeInstanceOf(ConnectionError);
+  });
+
+  it('an external connect() that fails in the slow phase does not signal again', async () => {
+    const conn = new SonosConnection(
+      makeOptions({ pingInterval: 0, maxAttempts: Infinity, slowAfter: 2, slowDelay: 5000 }),
+    );
+    const slowed: unknown[] = [];
+    conn.on('error', (e: any) => { if (e.code === 'RECONNECT_SLOWED') slowed.push(e); });
+    const scheduled = recordAttempts(conn);
+
+    startRefused(conn);
+    await refuseUntil(scheduled, 4);
+    // Something outside the ladder tries while attempt 4 waits; that fails too.
+    conn.connect().catch(() => {});
+    getLastMockWs()._emit('error', new Error('ECONNREFUSED'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(scheduled.at(-1)).toEqual([5, 5000]);
+    expect(slowed).toHaveLength(1);
+  });
+
+  it('a successful open resets the ladder: the next outage starts fast and signals again', async () => {
+    const conn = new SonosConnection(
+      makeOptions({ pingInterval: 0, maxAttempts: Infinity, slowAfter: 2, slowDelay: 5000 }),
+    );
+    const slowed: unknown[] = [];
+    conn.on('error', (e: any) => { if (e.code === 'RECONNECT_SLOWED') slowed.push(e); });
+    const scheduled = recordAttempts(conn);
+
+    startRefused(conn);
+    await refuseUntil(scheduled, 3);
+    await vi.advanceTimersByTimeAsync(5000);
+    getLastMockWs()._emit('open'); // attempt 3 answers
+    await vi.advanceTimersByTimeAsync(0);
+    expect(conn.state).toBe('connected');
+
+    // A second outage.
+    scheduled.length = 0;
+    getLastMockWs()._emit('close', 1006, Buffer.from(''));
+    await refuseUntil(scheduled, 3);
+
+    expect(scheduled).toEqual([[1, 100], [2, 200], [3, 5000]]);
+    expect(slowed).toHaveLength(2);
+  });
+
+  it('a finite maxAttempts above slowAfter slows first, then exhausts once', async () => {
+    const conn = new SonosConnection(
+      makeOptions({ pingInterval: 0, maxAttempts: 4, slowAfter: 2, slowDelay: 5000 }),
+    );
+    const codes: string[] = [];
+    conn.on('error', (e: any) => { if (e.code !== 'CONNECTION_FAILED') codes.push(e.code); });
+    const scheduled = recordAttempts(conn);
+
+    startRefused(conn);
+    await refuseUntil(scheduled, 20);
+
+    expect(scheduled).toEqual([[1, 100], [2, 200], [3, 5000], [4, 5000]]);
+    expect(codes).toEqual(['RECONNECT_SLOWED', 'RECONNECT_EXHAUSTED']);
+  });
+
+  it('a maxAttempts at or below slowAfter exhausts without ever slowing', async () => {
+    const conn = new SonosConnection(
+      makeOptions({ pingInterval: 0, maxAttempts: 2, slowAfter: 2, slowDelay: 5000 }),
+    );
+    const codes: string[] = [];
+    conn.on('error', (e: any) => { if (e.code !== 'CONNECTION_FAILED') codes.push(e.code); });
+    const scheduled = recordAttempts(conn);
+
+    startRefused(conn);
+    await refuseUntil(scheduled, 20);
+
+    expect(scheduled).toEqual([[1, 100], [2, 200]]);
+    expect(codes).toEqual(['RECONNECT_EXHAUSTED']);
+  });
+
+  it('keeps retrying past where a cap of slowAfter would have exhausted, and reconnects when the speaker answers', async () => {
+    const conn = new SonosConnection(
+      makeOptions({ pingInterval: 0, maxAttempts: Infinity, slowAfter: 3, slowDelay: 5000 }),
+    );
+    conn.on('error', () => {});
+    const connected = vi.fn();
+    conn.on('connected', connected);
+    const scheduled = recordAttempts(conn);
+
+    startRefused(conn);
+    await refuseUntil(scheduled, 10);
+    // Without a slow phase an Infinity ladder also keeps going; the delay is what says this one is slow.
+    expect(scheduled.at(-1)).toEqual([10, 5000]);
+    await vi.advanceTimersByTimeAsync(5000); // attempt 10 builds its socket
+    getLastMockWs()._emit('open');
+
+    expect(connected).toHaveBeenCalledTimes(1);
+    expect(conn.state).toBe('connected');
+  });
+
+  it('disconnect() from a RECONNECT_SLOWED listener stops the ladder', async () => {
+    const conn = new SonosConnection(
+      makeOptions({ pingInterval: 0, maxAttempts: Infinity, slowAfter: 2, slowDelay: 5000 }),
+    );
+    conn.on('error', (e: any) => { if (e.code === 'RECONNECT_SLOWED') void conn.disconnect(); });
+    const scheduled = recordAttempts(conn);
+
+    startRefused(conn);
+    await refuseUntil(scheduled, 2);
+    await vi.advanceTimersByTimeAsync(200); // attempt 2 builds its socket
+    const last = getLastMockWs();
+    last._emit('error', new Error('ECONNREFUSED')); // attempt 3 would be the first slow one
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(getLastMockWs()).toBe(last);
+    expect(scheduled).toEqual([[1, 100], [2, 200]]);
     expect(conn.state).toBe('disconnected');
   });
 });
