@@ -537,9 +537,8 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
     );
 
     this.reconnectAttempt++;
-    this.log.info(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempt})`);
-    this.emit('reconnecting', this.reconnectAttempt, delay);
 
+    // Armed before it is announced, so a listener's disconnect() can cancel it.
     this.reconnectTimer = setTimeout(async () => {
       try {
         await this.connect();
@@ -549,6 +548,9 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
         // RECONNECT_EXHAUSTED and halve the effective maxAttempts.
       }
     }, delay);
+
+    this.log.info(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempt})`);
+    this.emit('reconnecting', this.reconnectAttempt, delay);
   }
 
   private clearReconnectTimer(): void {

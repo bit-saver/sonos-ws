@@ -1056,3 +1056,29 @@ describe('SonosConnection reconnect option checks', () => {
     expect(() => new SonosConnection(makeOptions())).not.toThrow();
   });
 });
+
+describe('SonosConnection reconnect ladder', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("disconnect() from a 'reconnecting' listener stops the ladder", async () => {
+    const conn = new SonosConnection(makeOptions({ pingInterval: 0, maxAttempts: Infinity }));
+    conn.on('error', () => {});
+    conn.on('reconnecting', () => { void conn.disconnect(); });
+
+    conn.connect().catch(() => {});
+    const ws1 = getLastMockWs();
+    ws1._emit('error', new Error('ECONNREFUSED'));
+
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(getLastMockWs()).toBe(ws1);
+    expect(conn.state).toBe('disconnected');
+  });
+});
