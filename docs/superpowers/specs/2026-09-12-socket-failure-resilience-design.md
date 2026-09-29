@@ -447,10 +447,13 @@ socket's `'error'` listener:**
 - **Never forwarded to the household's `'error'`**, so a speaker can never
   raise Neurotto's alert; only the primary (the Arc) does. A test pins this.
 
-The `Initial connect … failed` (`connectToSpeaker`) and `Failed to reconnect
-speaker` (`reconnectSpeakers`) warn lines drop to debug; the listener
-already warns once for that failure. A dead speaker then writes two warn
-lines per outage (first failure, the switch) instead of ~94 errors.
+`connectToSpeaker`'s `Initial connect … failed` line drops to debug when the
+rejection is `CONNECTION_FAILED`, which the listener already warned for; any
+other rejection (a close before open emits no `'error'`) still warns there.
+`reconnectSpeakers`' `Failed to reconnect speaker` line drops to debug: a
+failed kick of an exhausted speaker re-exhausts at once, and the listener
+warns `RECONNECT_EXHAUSTED`. A dead speaker then writes two warn lines per
+outage (first failure, the switch) instead of ~94 errors.
 
 ⚠ **This applies with `slowAfter` unset too** — speakers log less than
 today whatever the policy. It changes what production says, never what it

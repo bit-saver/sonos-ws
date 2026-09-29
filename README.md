@@ -111,6 +111,8 @@ Every socket reconnects by itself after a drop, backing off exponentially. Tune 
 | `pongTimeout` | `10000` | ms to wait for a pong before treating the socket as dead |
 
 ```typescript
+import { SonosHousehold, ConnectionError, ErrorCode } from 'sonos-ws';
+
 // Retry fast for ~45 minutes, then every 5 minutes for as long as it takes; hear about it once.
 const household = new SonosHousehold({
   host: '192.168.1.100',
