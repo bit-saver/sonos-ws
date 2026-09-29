@@ -123,7 +123,7 @@ household.on('error', (err) => {
 });
 ```
 
-Every speaker's socket uses the same options. Speaker sockets log their errors (one warning per outage) rather than emitting them, so the household's `'error'` is always about the primary speaker. A connection attempt that hangs mid-handshake also spends up to 10 s failing, so the slow phase can start later than the waits alone suggest.
+Every speaker's socket uses the same options. Speaker sockets log their errors rather than emitting them (a warning when a speaker first fails and at each phase change, debug for the attempts in between), so the household's `'error'` is always about the primary speaker. A connection attempt that hangs mid-handshake also spends up to 10 s failing, so the slow phase can start later than the waits alone suggest.
 
 ### Discovery
 

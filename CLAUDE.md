@@ -47,7 +47,7 @@ Bun replaces the `ws` package with its own WebSocket and **ignores `ws` construc
 - `connect()` sets up the handshake it awaits; the `'connected'` listener sets up only handshakes no `connect()` awaits; setup counts as done only for the socket it ran on (epochs).
 - Neurotto finishes its own setup on the household's `'connected'` event, so its behavior is a contract: it fires once per successful setup, before `connect()` resolves on a first attempt that succeeds, and never after a `disconnect()` that lands mid-setup. Covered in `tests/household/SonosHousehold.connect.test.ts` and `tests/client/SonosClient.test.ts`.
 - `RECONNECT_SLOWED` fires once per outage: the attempt counter only rises within an outage and resets only on open, and the signal fires as it crosses `slowAfter`. `scheduleReconnect()` arms the next timer before it logs or emits, so a listener's `disconnect()` cancels it. With `slowAfter`/`slowDelay` unset the ladder is exactly the pre-09-29 one (pinned).
-- The household's `'error'` is its primary's. Speaker sockets' errors are the household's to log (one warn per outage), never to emit — Neurotto alerts on `RECONNECT_SLOWED`, and a speaker must not trigger it.
+- The household's `'error'` is its primary's. Speaker sockets' errors are the household's to log (a warn on the first failure and at each phase change, debug otherwise), never to emit — Neurotto alerts on `RECONNECT_SLOWED`, and a speaker must not trigger it.
 
 ## Testing
 
