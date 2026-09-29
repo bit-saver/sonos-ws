@@ -154,6 +154,7 @@ var ErrorCode = /* @__PURE__ */ ((ErrorCode2) => {
   ErrorCode2["CONNECTION_FAILED"] = "CONNECTION_FAILED";
   ErrorCode2["CONNECTION_LOST"] = "CONNECTION_LOST";
   ErrorCode2["RECONNECT_EXHAUSTED"] = "RECONNECT_EXHAUSTED";
+  ErrorCode2["RECONNECT_SLOWED"] = "RECONNECT_SLOWED";
   ErrorCode2["REQUEST_TIMEOUT"] = "REQUEST_TIMEOUT";
   ErrorCode2["ERROR_MISSING_PARAMETERS"] = "ERROR_MISSING_PARAMETERS";
   ErrorCode2["ERROR_INVALID_SYNTAX"] = "ERROR_INVALID_SYNTAX";
@@ -345,6 +346,20 @@ var CommandError = class extends SonosError {
 
 // src/client/SonosConnection.ts
 var DEFAULT_CONNECT_TIMEOUT = 1e4;
+var MAX_TIMER_DELAY = 2147483647;
+function validateReconnectOptions({ slowAfter, slowDelay }) {
+  if (slowAfter === void 0 !== (slowDelay === void 0)) {
+    throw new RangeError("reconnect.slowAfter and reconnect.slowDelay must be set together");
+  }
+  if (slowAfter !== void 0 && !(Number.isInteger(slowAfter) && slowAfter > 0)) {
+    throw new RangeError(`reconnect.slowAfter must be a positive integer, got ${slowAfter}`);
+  }
+  if (slowDelay !== void 0 && !(Number.isFinite(slowDelay) && slowDelay > 0 && slowDelay <= MAX_TIMER_DELAY)) {
+    throw new RangeError(
+      `reconnect.slowDelay must be a number of ms above 0 and at most ${MAX_TIMER_DELAY}, got ${slowDelay}`
+    );
+  }
+}
 function summarize(body) {
   try {
     const json = JSON.stringify(body) ?? String(body);
@@ -378,6 +393,7 @@ var SonosConnection = class extends TypedEventEmitter {
   pongDeadlineTimer = null;
   constructor(options) {
     super();
+    validateReconnectOptions(options.reconnect);
     this.options = options;
     this.log = options.logger ?? noopLogger;
     this.correlator = new MessageCorrelator(options.requestTimeout);
@@ -406,7 +422,8 @@ var SonosConnection = class extends TypedEventEmitter {
     this.connectPromise = new Promise((resolve, reject) => {
       this.connectReject = reject;
       const url = `wss://${this.options.host}:${this.options.port}/websocket/api`;
-      this.log.info(`Connecting to ${url}`);
+      const level = this.slowPhaseDelay(this.reconnectAttempt) === void 0 ? "info" : "debug";
+      this.log[level](`Connecting to ${url}`);
       this.ws = new import_ws.default(url, SUB_PROTOCOL, {
         rejectUnauthorized: false,
         headers: {
@@ -646,25 +663,36 @@ var SonosConnection = class extends TypedEventEmitter {
       return;
     }
     this._state = "reconnecting";
-    const delay = Math.min(
-      this.options.reconnect.initialDelay * Math.pow(this.options.reconnect.factor, this.reconnectAttempt),
-      this.options.reconnect.maxDelay
-    );
-    this.reconnectAttempt++;
-    this.log.info(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempt})`);
-    this.emit("reconnecting", this.reconnectAttempt, delay);
-    this.reconnectTimer = setTimeout(async () => {
+    const attempt = ++this.reconnectAttempt;
+    const { initialDelay, factor, maxDelay, slowAfter } = this.options.reconnect;
+    const slowDelay = this.slowPhaseDelay(attempt);
+    const delay = slowDelay ?? Math.min(initialDelay * Math.pow(factor, attempt - 1), maxDelay);
+    const timer = setTimeout(async () => {
       try {
         await this.connect();
       } catch {
       }
     }, delay);
+    this.reconnectTimer = timer;
+    if (slowDelay !== void 0 && attempt - 1 === slowAfter) {
+      const message = `Reconnect slowed after ${slowAfter} attempts; retrying every ${slowDelay}ms`;
+      this.log.info(message);
+      this.emit("error", new ConnectionError("RECONNECT_SLOWED" /* RECONNECT_SLOWED */, message));
+      if (this.reconnectTimer !== timer) return;
+    }
+    this.log[slowDelay === void 0 ? "info" : "debug"](`Reconnecting in ${delay}ms (attempt ${attempt})`);
+    this.emit("reconnecting", attempt, delay);
   }
   clearReconnectTimer() {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+  }
+  /** The delay before ladder attempt `attempt` if it falls in the slow phase; undefined on the exponential ladder. */
+  slowPhaseDelay(attempt) {
+    const { slowAfter, slowDelay } = this.options.reconnect;
+    return slowAfter !== void 0 && attempt > slowAfter ? slowDelay : void 0;
   }
   startPing() {
     const { pingInterval, pongTimeout } = this.options.reconnect;
@@ -2307,19 +2335,23 @@ var SonosHousehold = class extends TypedEventEmitter {
       return this.connection;
     }
     const url = new URL(player.websocketUrl);
-    const conn = existing ?? this.createSpeakerConnection(url);
+    const conn = existing ?? this.createSpeakerConnection(player, url);
     this.speakerConnections.set(player.id, conn);
     this._players.get(player.id)?.setSpeakerConnection(conn);
     try {
       await conn.connect();
       this.log.info(`Connected to ${player.name} at ${url.hostname}`);
     } catch (err) {
-      this.log.warn(`Initial connect to ${player.name} failed; reconnect loop will retry`, err);
+      const reported = err instanceof ConnectionError && err.code === "CONNECTION_FAILED" /* CONNECTION_FAILED */;
+      this.log[reported ? "debug" : "warn"](`Initial connect to ${player.name} failed; reconnect loop will retry`, err);
     }
     return conn;
   }
-  /** Builds and wires a speaker's connection; its events reach listeners like the primary's. */
-  createSpeakerConnection(url) {
+  /**
+   * Builds and wires a speaker's connection. Its events reach listeners like the primary's; its errors are only
+   * logged, because the household's 'error' is about the primary.
+   */
+  createSpeakerConnection(player, url) {
     const conn = new SonosConnection({
       host: url.hostname,
       port: parseInt(url.port) || 1443,
@@ -2327,9 +2359,22 @@ var SonosHousehold = class extends TypedEventEmitter {
       requestTimeout: this.requestTimeoutMs,
       logger: this.log
     });
+    const who = `Speaker ${player.name} (${url.hostname})`;
+    let failing = false;
     conn.on("message", (msg) => this.handleMessage(msg));
     conn.on("connected", () => {
+      failing = false;
       void this.resubscribeAll();
+    });
+    conn.on("error", (err) => {
+      if (err instanceof ConnectionError && err.code === "CONNECTION_FAILED" /* CONNECTION_FAILED */) {
+        if (failing) {
+          this.log.debug(`${who}: ${err.message}`);
+          return;
+        }
+        failing = true;
+      }
+      this.log.warn(`${who}: ${err.message}`);
     });
     return conn;
   }
@@ -2389,7 +2434,7 @@ var SonosHousehold = class extends TypedEventEmitter {
       if (conn.state === "disconnected") {
         this.log.info(`Reconnecting speaker ${playerId}`);
         reconnectPromises.push(
-          conn.connect().catch((err) => this.log.warn(`Failed to reconnect speaker ${playerId}:`, err))
+          conn.connect().catch((err) => this.log.debug(`Failed to reconnect speaker ${playerId}:`, err))
         );
       }
     }

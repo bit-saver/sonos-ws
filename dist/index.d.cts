@@ -147,6 +147,14 @@ interface ReconnectOptions {
     pingInterval: number;
     /** Milliseconds to wait for a pong reply before declaring the connection dead. */
     pongTimeout: number;
+    /**
+     * Attempts on the exponential ladder before the slow phase. From attempt `slowAfter + 1` every delay is
+     * `slowDelay`, and `'error'` fires once with `RECONNECT_SLOWED`. Unset: no slow phase. Set together with
+     * `slowDelay`.
+     */
+    slowAfter?: number;
+    /** Milliseconds between attempts in the slow phase. Set together with `slowAfter`. */
+    slowDelay?: number;
 }
 /** Low-level options passed to the {@link SonosConnection} constructor. */
 interface ConnectionOptions {
@@ -248,6 +256,8 @@ declare class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
     private handleClose;
     private scheduleReconnect;
     private clearReconnectTimer;
+    /** The delay before ladder attempt `attempt` if it falls in the slow phase; undefined on the exponential ladder. */
+    private slowPhaseDelay;
     private startPing;
     private stopPing;
     private waitForReconnect;
@@ -581,7 +591,7 @@ interface HomeTheaterOptions {
 /**
  * Error codes used by {@link SonosError} and its subclasses.
  *
- * The first four codes are client-side errors raised by sonos-ws itself.
+ * The first five codes are client-side errors raised by sonos-ws itself.
  * The remaining `ERROR_*` codes are Sonos API error codes returned by the device.
  */
 declare enum ErrorCode {
@@ -591,6 +601,11 @@ declare enum ErrorCode {
     CONNECTION_LOST = "CONNECTION_LOST",
     /** All automatic reconnect attempts have been exhausted. */
     RECONNECT_EXHAUSTED = "RECONNECT_EXHAUSTED",
+    /**
+     * The reconnect ladder passed `slowAfter` attempts and now retries every `slowDelay` ms. Emitted once per outage;
+     * the ladder keeps going.
+     */
+    RECONNECT_SLOWED = "RECONNECT_SLOWED",
     /** A command did not receive a response within the configured timeout. */
     REQUEST_TIMEOUT = "REQUEST_TIMEOUT",
     /** The command is missing one or more required parameters. */
@@ -1398,7 +1413,10 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
      * Returns the primary connection if the speaker is the primary host.
      */
     private connectToSpeaker;
-    /** Builds and wires a speaker's connection; its events reach listeners like the primary's. */
+    /**
+     * Builds and wires a speaker's connection. Its events reach listeners like the primary's; its errors are only
+     * logged, because the household's 'error' is about the primary.
+     */
     private createSpeakerConnection;
     /**
      * A player's own socket, else the primary. Right for the primary speaker, which has no entry of its own; under
@@ -1562,6 +1580,7 @@ declare class SonosDiscovery {
  * - {@link ErrorCode.CONNECTION_FAILED} -- initial connection could not be established
  * - {@link ErrorCode.CONNECTION_LOST} -- an existing connection was unexpectedly lost
  * - {@link ErrorCode.RECONNECT_EXHAUSTED} -- all automatic reconnect attempts failed
+ * - {@link ErrorCode.RECONNECT_SLOWED} -- the reconnect ladder switched to its slow phase (it keeps retrying)
  */
 declare class ConnectionError extends SonosError {
     /**
@@ -1570,7 +1589,7 @@ declare class ConnectionError extends SonosError {
      * @param options - Optional context.
      * @param options.cause - The underlying error that caused the connection failure.
      */
-    constructor(code: ErrorCode.CONNECTION_FAILED | ErrorCode.CONNECTION_LOST | ErrorCode.RECONNECT_EXHAUSTED, message: string, options?: {
+    constructor(code: ErrorCode.CONNECTION_FAILED | ErrorCode.CONNECTION_LOST | ErrorCode.RECONNECT_EXHAUSTED | ErrorCode.RECONNECT_SLOWED, message: string, options?: {
         cause?: unknown;
     });
 }
