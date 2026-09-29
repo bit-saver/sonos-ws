@@ -492,8 +492,12 @@ describe('SonosHousehold per-speaker resilience', () => {
 describe('default backoff shape is a published contract', () => {
   // Consumers size their recovery window by multiplying these three defaults
   // out to a wall-clock duration. Neurotto does exactly this: it sets
-  // maxAttempts to 94 to get a ~45 minute ladder before RECONNECT_EXHAUSTED,
-  // and keeps it finite so the exhaustion notification still fires.
+  // slowAfter to 94 to get a ~45 minute fast ladder before RECONNECT_SLOWED
+  // (its "Sonos may be offline" alert), then retries every slowDelay with
+  // maxAttempts Infinity, so it never gives up.
+  //
+  // The 45 minutes are waits only: a handshake that hangs adds connectTimeout
+  // (10 s) per attempt, ~61 minutes in all.
   //
   // DEFAULT_RECONNECT is module-private, so no downstream test can assert
   // against it. Changing initialDelay, factor or maxDelay would silently
@@ -504,11 +508,11 @@ describe('default backoff shape is a published contract', () => {
   // and tell the consumers; this test failing is the reminder to do that.
   //
   // The coupling runs both ways, and the reverse direction fails *quietly*.
-  // The 94 below is a copy of Neurotto's RECONNECT_POLICY, not something we
+  // The 94 below is a copy of Neurotto's RECONNECT_POLICY.slowAfter, not something we
   // control: if they move off it, this test keeps computing the window for
   // 94, keeps passing, and silently becomes an assertion about a number
   // nobody uses. It will not tell you it has gone stale. So when Neurotto's
-  // cap changes, update the input and the bound together — and if you are
+  // slowAfter changes, update the input and the bound together — and if you are
   // reading this while wondering whether 94 is still real, check
   // `RECONNECT_POLICY` in their `Sonos.ts` rather than trusting this block.
   function optionsHandedToConnection() {
@@ -516,7 +520,10 @@ describe('default backoff shape is a published contract', () => {
     Constructor.mockClear();
     new SonosHousehold({ host: '192.168.68.96' });
     return Constructor.mock.calls[0][0] as {
-      reconnect: { initialDelay: number; factor: number; maxDelay: number; maxAttempts: number };
+      reconnect: {
+        initialDelay: number; factor: number; maxDelay: number; maxAttempts: number;
+        slowAfter?: number; slowDelay?: number;
+      };
     };
   }
 
@@ -532,14 +539,20 @@ describe('default backoff shape is a published contract', () => {
     expect(reconnect.maxAttempts).toBe(Infinity);
   });
 
-  it('yields a ~45 minute ladder at the cap Neurotto chose', () => {
+  it('has no slow phase unless the consumer asks for one', () => {
+    const { reconnect } = optionsHandedToConnection();
+    expect(reconnect.slowAfter).toBeUndefined();
+    expect(reconnect.slowDelay).toBeUndefined();
+  });
+
+  it('yields a ~45 minute fast phase at the slowAfter Neurotto chose', () => {
     const { reconnect } = optionsHandedToConnection();
     const { initialDelay, factor, maxDelay } = reconnect;
 
     // Mirrors scheduleReconnect(): delay n = min(initialDelay * factor^n, maxDelay)
-    const windowFor = (maxAttempts: number) => {
+    const windowFor = (attempts: number) => {
       let total = 0;
-      for (let n = 0; n < maxAttempts; n++) {
+      for (let n = 0; n < attempts; n++) {
         total += Math.min(initialDelay * Math.pow(factor, n), maxDelay);
       }
       return total;

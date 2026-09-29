@@ -95,6 +95,36 @@ household.on('topologyChanged', (groups: Group[], players: Player[]) => {});
 
 `source` (a `SonosEventSource`) holds the `playerId` or `groupId` the event is about — Sonos reports state, never who caused it, so an external Spotify or Sonos-app controller looks like any other change. Subscriptions are kept alive across reconnects and regroups automatically, once `subscribe()` has been called once.
 
+### Reconnection
+
+Every socket reconnects by itself after a drop, backing off exponentially. Tune it with `reconnect` (every field optional), or turn it off with `reconnect: false`:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `initialDelay` | `1000` | ms before the first retry |
+| `factor` | `2` | backoff multiplier per retry |
+| `maxDelay` | `30000` | ceiling on the backoff, ms |
+| `maxAttempts` | `Infinity` | give up after this many retries, with `'error'` `RECONNECT_EXHAUSTED` |
+| `slowAfter` | unset | after this many retries, switch to one retry every `slowDelay`, with `'error'` `RECONNECT_SLOWED` once per outage |
+| `slowDelay` | unset | ms between retries in the slow phase; set together with `slowAfter` |
+| `pingInterval` | `30000` | ms between keepalive pings; `0` disables them |
+| `pongTimeout` | `10000` | ms to wait for a pong before treating the socket as dead |
+
+```typescript
+// Retry fast for ~45 minutes, then every 5 minutes for as long as it takes; hear about it once.
+const household = new SonosHousehold({
+  host: '192.168.1.100',
+  reconnect: { maxAttempts: Infinity, slowAfter: 94, slowDelay: 300_000 },
+});
+household.on('error', (err) => {
+  if (err instanceof ConnectionError && err.code === ErrorCode.RECONNECT_SLOWED) {
+    // The primary speaker has been unreachable for a while; retries continue.
+  }
+});
+```
+
+Every speaker's socket uses the same options. Speaker sockets log their errors (one warning per outage) rather than emitting them, so the household's `'error'` is always about the primary speaker. A connection attempt that hangs mid-handshake also spends up to 10 s failing, so the slow phase can start later than the waits alone suggest.
+
 ### Discovery
 
 ```typescript
