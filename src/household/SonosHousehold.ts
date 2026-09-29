@@ -483,7 +483,9 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       await conn.connect();
       this.log.info(`Connected to ${player.name} at ${url.hostname}`);
     } catch (err) {
-      this.log.debug(`Initial connect to ${player.name} failed; reconnect loop will retry`, err);
+      // CONNECTION_FAILED was already warned by the speaker's 'error' listener; a close before open emits no 'error'.
+      const reported = err instanceof ConnectionError && err.code === ErrorCode.CONNECTION_FAILED;
+      this.log[reported ? 'debug' : 'warn'](`Initial connect to ${player.name} failed; reconnect loop will retry`, err);
       // Do not rethrow — connection is in the map with reconnect scheduled.
     }
 

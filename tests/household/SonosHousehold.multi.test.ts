@@ -12,6 +12,9 @@ const instances: any[] = [];
 let topology: GroupsResponse;
 // Hosts whose subscribe commands never get an answer, like an offline speaker's.
 const unansweredSubscribes = new Set<string>();
+// Hosts whose connect() fails: 'refused' reports it on 'error' first, as the real connection does; 'closed' is a
+// close before open, which rejects without an 'error'.
+const failingConnects = new Map<string, 'refused' | 'closed'>();
 
 vi.mock('../../src/client/SonosConnection.js', () => ({
   SonosConnection: vi.fn((opts: any) => {
@@ -27,6 +30,15 @@ vi.mock('../../src/client/SonosConnection.js', () => ({
       },
       off() { return inst; },
       async connect() {
+        const failure = failingConnects.get(inst.host);
+        if (failure === 'refused') {
+          const err = new ConnectionError(ErrorCode.CONNECTION_FAILED, 'Failed to connect: ECONNREFUSED');
+          for (const h of listeners.get('error') ?? []) h(err);
+          throw err;
+        }
+        if (failure === 'closed') {
+          throw new ConnectionError(ErrorCode.CONNECTION_LOST, 'Connection closed before open: 1006 ');
+        }
         inst.state = 'connected';
         for (const h of listeners.get('connected') ?? []) h();
       },
@@ -329,7 +341,24 @@ describe('speaker socket errors', () => {
       `Speaker Office (${OFFICE_IP}): Reconnect slowed after 94 attempts; retrying every 300000ms`,
     ]);
     expect(officeLines(log, 'debug')).toHaveLength(3);
+    // This mock has no connection safety net; SonosConnection.test.ts covers it standing down for a second listener.
     expect(log.error).not.toHaveBeenCalled();
+  });
+
+  it("warns once for a speaker's failed first connect, whether or not its socket reported the failure", async () => {
+    const log = logger();
+    failingConnects.set(OFFICE_IP, 'refused');
+    failingConnects.set(BED_IP, 'closed');
+    try {
+      await connectedHousehold(solo, { logger: log });
+    } finally {
+      failingConnects.clear();
+    }
+    const warns = (name: string) =>
+      log.warn.mock.calls.map((call: unknown[]) => String(call[0])).filter((line: string) => line.includes(name));
+
+    expect(warns('Office')).toEqual([`Speaker Office (${OFFICE_IP}): Failed to connect: ECONNREFUSED`]);
+    expect(warns('Bedroom')).toEqual(['Initial connect to Bedroom failed; reconnect loop will retry']);
   });
 
   it("warns again for a speaker's next outage once its socket has connected", async () => {
