@@ -201,7 +201,9 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
     this.connectPromise = new Promise<void>((resolve, reject) => {
       this.connectReject = reject;
       const url = `wss://${this.options.host}:${this.options.port}/websocket/api`;
-      this.log.info(`Connecting to ${url}`);
+      // Slow-phase attempts repeat this for as long as the speaker is away.
+      const level = this.slowPhaseDelay(this.reconnectAttempt) === undefined ? 'info' : 'debug';
+      this.log[level](`Connecting to ${url}`);
 
       this.ws = new WebSocket(url, SUB_PROTOCOL, {
         rejectUnauthorized: false,
@@ -559,7 +561,7 @@ export class SonosConnection extends TypedEventEmitter<ConnectionEvents> {
       if (this.reconnectTimer !== timer) return;
     }
 
-    this.log.info(`Reconnecting in ${delay}ms (attempt ${attempt})`);
+    this.log[slowDelay === undefined ? 'info' : 'debug'](`Reconnecting in ${delay}ms (attempt ${attempt})`);
     this.emit('reconnecting', attempt, delay);
   }
 

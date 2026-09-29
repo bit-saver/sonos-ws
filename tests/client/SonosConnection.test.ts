@@ -1276,4 +1276,50 @@ describe('SonosConnection reconnect ladder', () => {
     expect(scheduled).toEqual([[1, 100], [2, 200]]);
     expect(conn.state).toBe('disconnected');
   });
+
+  const URL_LINE = 'Connecting to wss://192.168.68.96:1443/websocket/api';
+
+  /** The ladder's own lines a logger method received, in order. */
+  const ladderLines = (logger: any, level: 'info' | 'debug') =>
+    logger[level].mock.calls
+      .map((call: unknown[]) => String(call[0]))
+      .filter((line: string) => /^(Connecting to|Reconnecting in|Reconnect slowed)/.test(line));
+
+  it('with slowAfter unset, every ladder line stays at info', async () => {
+    const options = makeOptions({ pingInterval: 0, maxAttempts: 3 });
+    const conn = new SonosConnection(options);
+    conn.on('error', () => {});
+    const scheduled = recordAttempts(conn);
+
+    startRefused(conn);
+    await refuseUntil(scheduled, 20);
+
+    expect(ladderLines(options.logger, 'info')).toEqual([
+      URL_LINE, 'Reconnecting in 100ms (attempt 1)',
+      URL_LINE, 'Reconnecting in 200ms (attempt 2)',
+      URL_LINE, 'Reconnecting in 400ms (attempt 3)',
+      URL_LINE,
+    ]);
+    expect(ladderLines(options.logger, 'debug')).toEqual([]);
+  });
+
+  it('logs the fast phase at info, the switch once at info, and the slow phase at debug', async () => {
+    const options = makeOptions({ pingInterval: 0, maxAttempts: Infinity, slowAfter: 2, slowDelay: 5000 });
+    const conn = new SonosConnection(options);
+    conn.on('error', () => {});
+    const scheduled = recordAttempts(conn);
+
+    startRefused(conn);
+    await refuseUntil(scheduled, 4);
+
+    expect(ladderLines(options.logger, 'info')).toEqual([
+      URL_LINE, 'Reconnecting in 100ms (attempt 1)',
+      URL_LINE, 'Reconnecting in 200ms (attempt 2)',
+      URL_LINE, 'Reconnect slowed after 2 attempts; retrying every 5000ms',
+    ]);
+    expect(ladderLines(options.logger, 'debug')).toEqual([
+      'Reconnecting in 5000ms (attempt 3)',
+      URL_LINE, 'Reconnecting in 5000ms (attempt 4)',
+    ]);
+  });
 });
