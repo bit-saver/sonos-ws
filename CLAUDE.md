@@ -7,7 +7,7 @@ Its one production consumer is **Neurotto** (`~/workspace/neurotto`), a home-aut
 ## Current state
 
 - Branch `main` after merge, clean, level with `origin` (`git@github.com:bit-saver/sonos-ws.git`).
-- Slow reconnect tail merged 2026-09-29: last source commit `52cac16`, `bbdafee` is its `dist` rebuild. **Not yet in Neurotto**, which runs pin `b500608` (deployed 2026-09-28 07:08 CDT). By agreement the Neurotto session bumps its pin in the same change that sets `{ maxAttempts: Infinity, slowAfter: 94, slowDelay: 300_000 }` and alerts on `RECONNECT_SLOWED`; HOA was sent the sha, diff summary and tests first.
+- Slow reconnect tail merged 2026-09-29: last source commit `52cac16`, `bbdafee` is its `dist` rebuild. Live in Neurotto since its container start 2026-10-01 20:12 CDT: pin `bbdafee`, policy `{ maxAttempts: Infinity, slowAfter: 94, slowDelay: 300_000 }`, alert on `RECONNECT_SLOWED` (the Neurotto session shipped it; checked 10-03 in the deployed `node_modules` and `dist`). As of 10-03 that pin bump and policy were still uncommitted in Neurotto's workspace — theirs to commit.
 - 188 tests (`npx vitest run`), `npx tsc --noEmit` clean.
 
 ## Layout
