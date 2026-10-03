@@ -287,6 +287,20 @@ var CommandError = class extends SonosError {
 };
 
 // src/client/SonosConnection.ts
+var DEFAULT_RECONNECT = {
+  enabled: true,
+  initialDelay: 1e3,
+  maxDelay: 3e4,
+  factor: 2,
+  maxAttempts: Infinity,
+  pingInterval: 3e4,
+  pongTimeout: 1e4
+};
+function resolveReconnectOptions(input) {
+  if (input === false) return { ...DEFAULT_RECONNECT, enabled: false };
+  if (input === true || input === void 0) return { ...DEFAULT_RECONNECT };
+  return { ...DEFAULT_RECONNECT, ...input };
+}
 var DEFAULT_CONNECT_TIMEOUT = 1e4;
 var MAX_TIMER_DELAY = 2147483647;
 function validateReconnectOptions({ slowAfter, slowDelay }) {
@@ -692,6 +706,84 @@ var SonosConnection = class extends TypedEventEmitter {
       this.on("connected", onConnected);
       this.on("disconnected", onDisconnected);
     });
+  }
+};
+
+// src/client/ConnectionSetup.ts
+var ConnectionSetup = class {
+  connection;
+  setUp;
+  onSetUp;
+  log;
+  /** Setup runs and runAfterSetup tasks, each starting after the previous settles, so a flap never overlaps setup. */
+  chain = Promise.resolve();
+  /** Handshakes a connect() call is awaiting: their setup is that call's to run, not the 'connected' listener's. */
+  ownedHandshakes = 0;
+  /** Counts 'connected' events, so a completed setup can be matched to the socket it ran on. */
+  connectedEpoch = 0;
+  /** The connectedEpoch the last completed setup started under. */
+  setupEpoch = -1;
+  /** Counts disconnects, so a run parked mid-disconnect can tell one happened while the socket still reads 'connected'. */
+  disconnects = 0;
+  /**
+   * @param setUp - the owner's setup work; it logs its own failure
+   * @param onSetUp - called when a run completes on a live socket; the owner emits 'connected' here
+   */
+  constructor(connection, setUp, onSetUp, log) {
+    this.connection = connection;
+    this.setUp = setUp;
+    this.onSetUp = onSetUp;
+    this.log = log;
+    connection.on("connected", () => this.onConnected());
+  }
+  /** Set up on the socket that is up now, not merely set up once. */
+  get setUpOnCurrentSocket() {
+    return this.setupEpoch === this.connectedEpoch;
+  }
+  /** Connects and sets up, unless already set up on the live socket. Rejects if the handshake or the setup fails. */
+  async connect() {
+    if (this.setUpOnCurrentSocket && this.connection.state === "connected") return;
+    this.ownedHandshakes++;
+    try {
+      await this.connection.connect();
+    } finally {
+      this.ownedHandshakes--;
+    }
+    await this.enqueue();
+  }
+  /** Call first in the owner's disconnect(): a run in flight then abandons rather than announcing. */
+  noteDisconnect() {
+    this.disconnects++;
+  }
+  /** Runs work after any setup in flight, so the two never overlap. A failure rejects this call, never the chain. */
+  runAfterSetup(task) {
+    const run = this.chain.then(task);
+    this.chain = run.catch(() => {
+    });
+    return run;
+  }
+  /** Sets up after a handshake no connect() call awaits: the reconnect ladder's. */
+  onConnected() {
+    this.connectedEpoch++;
+    if (this.ownedHandshakes > 0) return Promise.resolve();
+    return this.enqueue().catch(() => {
+    });
+  }
+  /** Queues a setup run; one queued ahead may already have set this socket up. */
+  enqueue() {
+    return this.runAfterSetup(() => this.setUpOnCurrentSocket ? Promise.resolve() : this.run());
+  }
+  /** Runs setUp(), records the socket it ran on, then announces. Rejects if setUp() fails or a disconnect landed meanwhile. */
+  async run() {
+    const epoch = this.connectedEpoch;
+    const disconnects = this.disconnects;
+    await this.setUp();
+    if (this.disconnects !== disconnects || this.connection.state !== "connected") {
+      this.log.debug("Setup abandoned: disconnected during setup");
+      throw new ConnectionError("CONNECTION_LOST" /* CONNECTION_LOST */, "Disconnected during setup");
+    }
+    this.setupEpoch = epoch;
+    this.onSetUp();
   }
 };
 
@@ -1938,15 +2030,6 @@ var GroupingEngine = class {
 };
 
 // src/household/SonosHousehold.ts
-var DEFAULT_RECONNECT = {
-  enabled: true,
-  initialDelay: 1e3,
-  maxDelay: 3e4,
-  factor: 2,
-  maxAttempts: Infinity,
-  pingInterval: 3e4,
-  pongTimeout: 1e4
-};
 var TOPOLOGY_EVENT_DEBOUNCE_MS = 250;
 var SonosHousehold = class extends TypedEventEmitter {
   connection;
@@ -1961,20 +2044,7 @@ var SonosHousehold = class extends TypedEventEmitter {
   _lastMembershipKey = "";
   /** Pending debounced topology re-read, armed by groups:1 events. */
   topologyRefreshTimer = null;
-  /** Setup runs, chained so each starts after the previous one settles: a flap mid-setup must not run two at once. */
-  setupChain = Promise.resolve();
-  /** Handshakes a connect() call is awaiting: their setup is that call's to run, not the 'connected' listener's. */
-  ownedHandshakes = 0;
-  /** Counts primary 'connected' events, so a completed setup can be matched to the socket it ran on. */
-  primaryEpoch = 0;
-  /** The primaryEpoch the last completed setup started under. */
-  setupEpoch = -1;
-  /** Counts disconnect() calls, so a setup run parked mid-disconnect can tell it happened even while the primary connection still reads 'connected'. */
-  disconnects = 0;
-  /** Set up on the socket that is up now, not merely set up once. */
-  get setUpOnCurrentSocket() {
-    return this._initialConnectDone && this.setupEpoch === this.primaryEpoch;
-  }
+  setup;
   /** Per-speaker WebSocket connections. Key is player ID. */
   speakerConnections = /* @__PURE__ */ new Map();
   primaryHost;
@@ -2015,7 +2085,7 @@ var SonosHousehold = class extends TypedEventEmitter {
       if (this.listenerCount("error") > 1) return;
       this.log.error(`Unhandled household error: ${err.message}`);
     });
-    this.connection.on("connected", () => this.onPrimaryConnected());
+    this.setup = new ConnectionSetup(this.connection, () => this.handleReconnected(), () => this.emit("connected"), this.log);
     this.connection.on("disconnected", (r) => this.emit("disconnected", r));
     this.connection.on("reconnecting", (a, d) => this.emit("reconnecting", a, d));
     this.connection.on("error", (e) => this.emit("error", e));
@@ -2054,33 +2124,12 @@ var SonosHousehold = class extends TypedEventEmitter {
    * - {@link disconnect} stops the ladder; no `'connected'` follows it, even if it lands mid-setup.
    */
   async connect() {
-    if (this.setUpOnCurrentSocket && this.connection.state === "connected") return;
     if (this.connection.state !== "connected") this._initialConnectDone = false;
-    this.ownedHandshakes++;
-    try {
-      await this.connection.connect();
-    } finally {
-      this.ownedHandshakes--;
-    }
-    await this.enqueueSetup(() => this.setUpOnCurrentSocket ? Promise.resolve() : this.handleReconnected());
-  }
-  /** Sets up after a handshake no connect() call awaits: the reconnect ladder's. Returns the run so tests can await it. */
-  onPrimaryConnected() {
-    this.primaryEpoch++;
-    if (this.ownedHandshakes > 0) return Promise.resolve();
-    return this.enqueueSetup(() => this.setUpOnCurrentSocket ? Promise.resolve() : this.handleReconnected()).catch(() => {
-    });
-  }
-  /** Runs setup work after any run in flight. A failure rejects this call, never the chain. */
-  enqueueSetup(task) {
-    const run = this.setupChain.then(task);
-    this.setupChain = run.catch(() => {
-    });
-    return run;
+    await this.setup.connect();
   }
   /** Gracefully closes all WebSocket connections. */
   async disconnect() {
-    this.disconnects++;
+    this.setup.noteDisconnect();
     if (this.topologyRefreshTimer) {
       clearTimeout(this.topologyRefreshTimer);
       this.topologyRefreshTimer = null;
@@ -2396,11 +2445,9 @@ var SonosHousehold = class extends TypedEventEmitter {
    * Handles reconnection events. Runs full initial setup on the first
    * successful connect (whether that's the caller's first attempt or after
    * a background reconnect loop), and reconnect-specific work on every
-   * subsequent reconnect.
+   * subsequent reconnect. ConnectionSetup announces the result.
    */
   async handleReconnected() {
-    const epoch = this.primaryEpoch;
-    const disconnects = this.disconnects;
     if (!this._initialConnectDone) {
       try {
         await this.discoverHouseholdId();
@@ -2433,53 +2480,18 @@ var SonosHousehold = class extends TypedEventEmitter {
         throw err;
       }
     }
-    if (this.disconnects !== disconnects || this.connection.state !== "connected") {
-      this.log.debug("Setup abandoned: disconnected during setup");
-      throw new ConnectionError("CONNECTION_LOST" /* CONNECTION_LOST */, "Disconnected during setup");
-    }
-    this.setupEpoch = epoch;
-    this.emit("connected");
   }
 };
-function resolveReconnectOptions(input) {
-  if (input === false) {
-    return { ...DEFAULT_RECONNECT, enabled: false };
-  }
-  if (input === true || input === void 0) {
-    return { ...DEFAULT_RECONNECT };
-  }
-  return { ...DEFAULT_RECONNECT, ...input };
-}
 
 // src/client/SonosClient.ts
 import { randomUUID as randomUUID3 } from "crypto";
-var DEFAULT_RECONNECT2 = {
-  enabled: true,
-  initialDelay: 1e3,
-  maxDelay: 3e4,
-  factor: 2,
-  maxAttempts: Infinity,
-  pingInterval: 3e4,
-  pongTimeout: 1e4
-};
 var SonosClient = class extends TypedEventEmitter {
   connection;
   log;
   host;
   _handle;
   _householdId;
-  /** Setup runs, chained so each starts after the previous one settles. */
-  setupChain = Promise.resolve();
-  /** Handshakes a connect() call is awaiting: their setup is that call's to run, not the 'connected' listener's. */
-  ownedHandshakes = 0;
-  /** Counts 'connected' events, so a completed setup can be matched to the socket it ran on. */
-  connectedEpoch = 0;
-  /** The connectedEpoch the last completed setup started under. */
-  setupEpoch = -1;
-  /** Set up on the socket that is up now, not merely set up once. */
-  get setUpOnCurrentSocket() {
-    return this._handle !== void 0 && this.setupEpoch === this.connectedEpoch;
-  }
+  setup;
   constructor(options) {
     super();
     this.log = options.logger ?? noopLogger;
@@ -2487,7 +2499,7 @@ var SonosClient = class extends TypedEventEmitter {
     this.connection = new SonosConnection({
       host: options.host,
       port: options.port ?? 1443,
-      reconnect: resolveReconnectOptions2(options.reconnect),
+      reconnect: resolveReconnectOptions(options.reconnect),
       requestTimeout: options.requestTimeout ?? 12e4,
       logger: this.log
     });
@@ -2495,7 +2507,7 @@ var SonosClient = class extends TypedEventEmitter {
       if (this.listenerCount("error") > 1) return;
       this.log.error(`Unhandled client error: ${err.message}`);
     });
-    this.connection.on("connected", () => this.onConnected());
+    this.setup = new ConnectionSetup(this.connection, () => this.setUp(), () => this.emit("connected"), this.log);
     this.connection.on("disconnected", (r) => this.emit("disconnected", r));
     this.connection.on("reconnecting", (a, d) => this.emit("reconnecting", a, d));
     this.connection.on("error", (e) => this.emit("error", e));
@@ -2547,47 +2559,20 @@ var SonosClient = class extends TypedEventEmitter {
    * and a setup failure on an otherwise healthy socket (e.g. a failed player lookup) rejects with no automatic retry.
    */
   async connect() {
-    if (this.setUpOnCurrentSocket && this.connection.state === "connected") return;
-    this.ownedHandshakes++;
-    try {
-      await this.connection.connect();
-    } finally {
-      this.ownedHandshakes--;
-    }
-    await this.enqueue(() => this.setUpOnCurrentSocket ? Promise.resolve() : this.setUp());
+    await this.setup.connect();
   }
   async disconnect() {
+    this.setup.noteDisconnect();
     await this.connection.disconnect();
   }
-  /** Runs work after any setup in flight. A failure rejects this call, never the chain. */
-  enqueue(task) {
-    const run = this.setupChain.then(task);
-    this.setupChain = run.catch(() => {
-    });
-    return run;
-  }
-  /** Sets up after a handshake no connect() call awaits: the reconnect ladder's. Returns the run so tests can await it. */
-  onConnected() {
-    this.connectedEpoch++;
-    if (this.ownedHandshakes > 0) return Promise.resolve();
-    return this.enqueue(() => this.setUpOnCurrentSocket ? Promise.resolve() : this.setUp()).catch(() => {
-    });
-  }
-  /** Finds this speaker, then emits `connected`. Logs and rethrows a failure. */
+  /** Finds this speaker. Logs and rethrows a failure; ConnectionSetup announces success. */
   async setUp() {
-    const epoch = this.connectedEpoch;
     try {
       await this.locatePlayer();
     } catch (err) {
       this.log.warn("Setup after connect failed", err);
       throw err;
     }
-    if (this.connection.state !== "connected") {
-      this.log.debug("Setup abandoned: disconnected during setup");
-      throw new ConnectionError("CONNECTION_LOST" /* CONNECTION_LOST */, "Disconnected during setup");
-    }
-    this.setupEpoch = epoch;
-    this.emit("connected");
   }
   /**
    * Finds this speaker by host and builds its handle. On a reconnect, moves the existing handle to its current group and
@@ -2632,7 +2617,7 @@ var SonosClient = class extends TypedEventEmitter {
     const objectType = body?._objectType;
     if (objectType === "groupCoordinatorChanged") {
       this.emit("coordinatorChanged", body, source);
-      this.enqueue(() => this.locatePlayer()).catch((err) => this.log.warn("Failed to refresh after coordinator change", err));
+      this.setup.runAfterSetup(() => this.locatePlayer()).catch((err) => this.log.warn("Failed to refresh after coordinator change", err));
       return;
     }
     if (!objectType) return;
@@ -2649,11 +2634,6 @@ function hostOf(url) {
   } catch {
     return void 0;
   }
-}
-function resolveReconnectOptions2(input) {
-  if (input === false) return { ...DEFAULT_RECONNECT2, enabled: false };
-  if (input === true || input === void 0) return { ...DEFAULT_RECONNECT2 };
-  return { ...DEFAULT_RECONNECT2, ...input };
 }
 
 // src/discovery/SsdpDiscovery.ts

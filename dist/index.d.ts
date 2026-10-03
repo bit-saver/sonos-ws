@@ -1286,18 +1286,7 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     private _lastMembershipKey;
     /** Pending debounced topology re-read, armed by groups:1 events. */
     private topologyRefreshTimer;
-    /** Setup runs, chained so each starts after the previous one settles: a flap mid-setup must not run two at once. */
-    private setupChain;
-    /** Handshakes a connect() call is awaiting: their setup is that call's to run, not the 'connected' listener's. */
-    private ownedHandshakes;
-    /** Counts primary 'connected' events, so a completed setup can be matched to the socket it ran on. */
-    private primaryEpoch;
-    /** The primaryEpoch the last completed setup started under. */
-    private setupEpoch;
-    /** Counts disconnect() calls, so a setup run parked mid-disconnect can tell it happened even while the primary connection still reads 'connected'. */
-    private disconnects;
-    /** Set up on the socket that is up now, not merely set up once. */
-    private get setUpOnCurrentSocket();
+    private readonly setup;
     /** Per-speaker WebSocket connections. Key is player ID. */
     private readonly speakerConnections;
     private readonly primaryHost;
@@ -1333,10 +1322,6 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
      * - {@link disconnect} stops the ladder; no `'connected'` follows it, even if it lands mid-setup.
      */
     connect(): Promise<void>;
-    /** Sets up after a handshake no connect() call awaits: the reconnect ladder's. Returns the run so tests can await it. */
-    private onPrimaryConnected;
-    /** Runs setup work after any run in flight. A failure rejects this call, never the chain. */
-    private enqueueSetup;
     /** Gracefully closes all WebSocket connections. */
     disconnect(): Promise<void>;
     /**
@@ -1442,7 +1427,7 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
      * Handles reconnection events. Runs full initial setup on the first
      * successful connect (whether that's the caller's first attempt or after
      * a background reconnect loop), and reconnect-specific work on every
-     * subsequent reconnect.
+     * subsequent reconnect. ConnectionSetup announces the result.
      */
     private handleReconnected;
 }
@@ -1476,16 +1461,7 @@ declare class SonosClient extends TypedEventEmitter<SonosEvents> {
     private readonly host;
     private _handle;
     private _householdId;
-    /** Setup runs, chained so each starts after the previous one settles. */
-    private setupChain;
-    /** Handshakes a connect() call is awaiting: their setup is that call's to run, not the 'connected' listener's. */
-    private ownedHandshakes;
-    /** Counts 'connected' events, so a completed setup can be matched to the socket it ran on. */
-    private connectedEpoch;
-    /** The connectedEpoch the last completed setup started under. */
-    private setupEpoch;
-    /** Set up on the socket that is up now, not merely set up once. */
-    private get setUpOnCurrentSocket();
+    private readonly setup;
     constructor(options: SonosClientOptions);
     get connected(): boolean;
     get connectionState(): ConnectionState;
@@ -1511,11 +1487,7 @@ declare class SonosClient extends TypedEventEmitter<SonosEvents> {
      */
     connect(): Promise<void>;
     disconnect(): Promise<void>;
-    /** Runs work after any setup in flight. A failure rejects this call, never the chain. */
-    private enqueue;
-    /** Sets up after a handshake no connect() call awaits: the reconnect ladder's. Returns the run so tests can await it. */
-    private onConnected;
-    /** Finds this speaker, then emits `connected`. Logs and rethrows a failure. */
+    /** Finds this speaker. Logs and rethrows a failure; ConnectionSetup announces success. */
     private setUp;
     /**
      * Finds this speaker by host and builds its handle. On a reconnect, moves the existing handle to its current group and
