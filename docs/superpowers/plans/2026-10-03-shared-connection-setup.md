@@ -21,8 +21,8 @@ The block being merged, per the spec's table: `src/client/SonosClient.ts:60-71` 
 
 ## Global Constraints
 
-- No behavior change. The public API, the `'connected'` contract (CLAUDE.md, Invariants) and every existing test's expectations stay as they are; tests change only in comments naming moved members and in the five `vi.mock` factories of Task 1.
-- `ConnectionSetup`'s `'connected'` listener must be the connection's first `'connected'` listener and must return its setup run (`tests/client/SonosClient.test.ts:230`, `tests/household/SonosHousehold.test.ts:315, :636, :682` call `_listeners.get('connected')[0]` and await it).
+- No behavior change. The public API, the `'connected'` contract (CLAUDE.md, Invariants) and every existing test's expectations stay as they are; tests change only in comments naming moved members, the five `vi.mock` factories of Task 1, and the four listener-index sites of Task 2.
+- `ConnectionSetup`'s `'connected'` listener returns its setup run. Its position among `'connected'` listeners is not a constraint: no test may depend on it (Task 2 Step 3 removes the four `[0]` lookups).
 - Follow the style guide in project memory (`codebase-conventions.md`): explicit field assignment in constructors (no parameter properties), `.js` import suffixes, `import type` for types, JSDoc on exports, brief comments (`~/.claude/rules/code-comments.md`).
 - Do NOT touch `dist/`. Conventional commit prefixes; no `Co-Authored-By` line. American spelling.
 - Mutation-verify each moved guard (break it, see a named test fail, restore); a named test failing alongside others is fine.
@@ -116,7 +116,7 @@ git commit -m "refactor: one copy of the reconnect defaults, in SonosConnection"
 **Files:**
 - Create: `src/client/ConnectionSetup.ts`
 - Modify: `src/client/SonosClient.ts` (fields `:60-71`, constructor's `'connected'` line, `connect` `:131-140`, `disconnect`, `enqueue`/`onConnected` `:147-162`, `setUp` `:164-181`, imports)
-- Test: `tests/client/SonosClient.test.ts` (comments only, if any name a moved member)
+- Test: `tests/client/SonosClient.test.ts:230-233`, `tests/household/SonosHousehold.test.ts:315, :636-637, :682-683` (listener-index sites); comments naming moved members
 
 **Interfaces:**
 - Produces: `class ConnectionSetup` — `constructor(connection: SonosConnection, setUp: () => Promise<void>, onSetUp: () => void, log: Logger)`, `connect(): Promise<void>`, `noteDisconnect(): void`. Task 3 uses all three.
@@ -158,7 +158,7 @@ export class ConnectionSetup {
     this.setUp = setUp;
     this.onSetUp = onSetUp;
     this.log = log;
-    // Must be the connection's first 'connected' listener; returns the run so tests can await it.
+    // Returns the run, so a test can await it.
     connection.on('connected', () => this.onConnected());
   }
 
@@ -219,7 +219,7 @@ export class ConnectionSetup {
 
 - Import: `import { ConnectionSetup } from './ConnectionSetup.js';`
 - Replace the fields `setupChain`, `ownedHandshakes`, `connectedEpoch`, `setupEpoch` and the `setUpOnCurrentSocket` getter (`:60-71`) with `private readonly setup: ConnectionSetup;`.
-- In the constructor, replace `this.connection.on('connected', () => this.onConnected());` with `this.setup = new ConnectionSetup(this.connection, () => this.setUp(), () => this.emit('connected'), this.log);` (same position: it stays the first `'connected'` registration).
+- In the constructor, replace `this.connection.on('connected', () => this.onConnected());` with `this.setup = new ConnectionSetup(this.connection, () => this.setUp(), () => this.emit('connected'), this.log);` .
 - `connect()` keeps its JSDoc; its body becomes `await this.setup.connect();`.
 - `disconnect()` becomes `this.setup.noteDisconnect();` then `await this.connection.disconnect();`.
 - Delete `enqueue()` and `onConnected()`.
@@ -239,12 +239,37 @@ export class ConnectionSetup {
 
 - Remove imports left unused (`ConnectionError` if nothing else in the file uses it — check with grep).
 
-- [ ] **Step 3: Run**
+- [ ] **Step 3: Stop the tests depending on listener order**
+
+Four sites take the first `'connected'` listener and await it. Make each run every `'connected'` listener and await them all (same behavior today: each fake has exactly one).
+
+`tests/client/SonosClient.test.ts:230-233`:
+
+```ts
+    // before
+    const onConnected = conn._listeners.get('connected')[0];
+    const first = onConnected(); // socket 2: its setup run parks in getGroups
+    await new Promise((r) => setTimeout(r, 0));
+    const queued = [onConnected(), onConnected()]; // sockets 3 and 4 come up while it is parked
+    // after
+    const fireConnected = () => Promise.all(conn._listeners.get('connected').map((h: () => unknown) => h()));
+    const first = fireConnected(); // socket 2: its setup run parks in getGroups
+    await new Promise((r) => setTimeout(r, 0));
+    const queued = [fireConnected(), fireConnected()]; // sockets 3 and 4 come up while it is parked
+```
+
+`tests/household/SonosHousehold.test.ts:315`: `await connectedHandlers[0]();` → `await Promise.all(connectedHandlers.map((h: () => unknown) => h()));`
+
+`tests/household/SonosHousehold.test.ts:636-637` and `:682-683`: the two lines `const onConnected = mockConn._listeners.get('connected')![0];` / `await onConnected();` become `await Promise.all(mockConn._listeners.get('connected')!.map((h: () => unknown) => h()));`
+
+Run `npx vitest run tests/client/SonosClient.test.ts tests/household/SonosHousehold.test.ts`: all pass.
+
+- [ ] **Step 4: Run**
 
 Run: `npx vitest run tests/client/SonosClient.test.ts`, then `npx vitest run` and `npx tsc --noEmit`
 Expected: all pass (188); tsc clean. If a test comment names `onConnected`/`enqueue` as a `SonosClient` member, update the comment only.
 
-- [ ] **Step 4: Mutation-verify through `SonosClient`**
+- [ ] **Step 5: Mutation-verify through `SonosClient`**
 
 One at a time, each restored before the next; record which `SonosClient.test.ts` tests fail:
 - delete `if (this.ownedHandshakes > 0) return Promise.resolve();`
@@ -254,10 +279,10 @@ One at a time, each restored before the next; record which `SonosClient.test.ts`
 
 Each must fail at least one test. A mutation no test catches: add one focused test to a new `tests/client/ConnectionSetup.test.ts` (a mock connection like `SonosClient.test.ts`'s, driving `connect()` and the `'connected'` listener), watch it fail under the mutation, and report it. (The disconnect-count check is unobservable through `SonosClient`; Task 3 verifies it.)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/client/ConnectionSetup.ts src/client/SonosClient.ts tests/client/
+git add src/client/ConnectionSetup.ts src/client/SonosClient.ts tests/client/ tests/household/SonosHousehold.test.ts
 git commit -m "refactor: SonosClient sets up through ConnectionSetup"
 ```
 

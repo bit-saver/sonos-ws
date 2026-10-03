@@ -63,9 +63,11 @@ export class ConnectionSetup {
 }
 ```
 
-- The constructor registers the connection's `'connected'` listener. It must be the connection's **first**
-  `'connected'` listener and must **return its setup run**: `SonosClient.test.ts:230` and `SonosHousehold.test.ts:315,
-  :636, :682` call `_listeners.get('connected')[0]` and await the result.
+- The constructor registers the connection's `'connected'` listener, which returns its setup run. Listener order is
+  not load-bearing: nothing else in the library listens for that connection's `'connected'`, and consumers listen on
+  the owner. Four test sites take `_listeners.get('connected')[0]` and await it (`SonosClient.test.ts:230`,
+  `SonosHousehold.test.ts:315, :636, :682`); they change to run every `'connected'` listener and await them all, so
+  no test depends on the order.
 - `connect()`: return at once if set up on the current socket and connected; otherwise count the handshake as owned,
   await `connection.connect()`, uncount it, and queue a setup run.
 - The listener: advance the epoch; if a `connect()` owns the handshake, do nothing; otherwise queue a setup run and
@@ -103,8 +105,8 @@ No change intended. One deliberate, unobservable change: `SonosClient` gains the
 
 The existing suites are the guard: `SonosClient.test.ts`, `SonosHousehold.connect.test.ts`,
 `SonosHousehold.disconnect-during-setup.test.ts` and the setup tests in `SonosHousehold.test.ts` pin the
-`'connected'` contract for both owners. They change only in comments naming moved members, plus the five mock
-factories above. Each moved guard is mutation-verified through both owners (drop the owned-handshake skip, the epoch
+`'connected'` contract for both owners. They change only in comments naming moved members, the five mock
+factories above, and the four listener-index sites. Each moved guard is mutation-verified through both owners (drop the owned-handshake skip, the epoch
 match, the disconnect check, the queue). A mutation no existing test catches gets one focused test in a new
 `tests/client/ConnectionSetup.test.ts`, and only then.
 
