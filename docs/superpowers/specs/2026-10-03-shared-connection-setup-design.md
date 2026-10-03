@@ -1,8 +1,8 @@
 # Shared Connection Setup — Design
 
 **Date:** 2026-10-03
-**Status:** Direction approved by the owner (08:19, "begin all recommended tasks", relayed by HOA): option 1, one
-small class in `src/client/` plus the reconnect-defaults move. This spec awaits his review; the build waits on the plan.
+**Status:** Built 2026-10-03 (branch `shared-connection-setup`). Two deliberate changes, both under Behavior; one
+public member added during the build, `runAfterSetup`.
 
 ## Why
 
@@ -41,6 +41,9 @@ Precedent for code both classes share: `src/client/discoverHouseholdId.ts` (one 
   it, but the block is about an owner's setup work riding on the connection, not about the socket, and putting it there
   would give the connection a callback into its owners. `discoverHouseholdId.ts` set the precedent for a shared unit
   beside them.
+- `ConnectionSetup.runAfterSetup(task)` (public): queues an owner's other work behind setup runs on the same chain.
+  `SonosClient` routes its `groupCoordinatorChanged` player lookup through it so the lookup cannot interleave with a
+  setup run; the old `enqueue()` served both, which the first draft of this spec missed.
 - No new public names: `ConnectionSetup` is not exported from `src/index.ts`.
 - `DEFAULT_RECONNECT` and `resolveReconnectOptions` keep their names and move into `SonosConnection.ts` (no new file).
 
@@ -48,7 +51,7 @@ Precedent for code both classes share: `src/client/discoverHouseholdId.ts` (one 
 
 ### `src/client/ConnectionSetup.ts`
 
-It owns only the bookkeeping:
+It owns the bookkeeping, and the queue other owner work joins:
 
 ```ts
 export class ConnectionSetup {
@@ -60,14 +63,15 @@ export class ConnectionSetup {
   );
   connect(): Promise<void>;       // the owner's connect() delegates here
   noteDisconnect(): void;         // first line of the owner's disconnect()
+  runAfterSetup(task: () => Promise<void>): Promise<void>; // owner work queued behind setup runs
 }
 ```
 
 - The constructor registers the connection's `'connected'` listener, which returns its setup run. Listener order is
-  not load-bearing: nothing else in the library listens for that connection's `'connected'`, and consumers listen on
-  the owner. Four test sites take `_listeners.get('connected')[0]` and await it (`SonosClient.test.ts:230`,
-  `SonosHousehold.test.ts:315, :636, :682`); they change to run every `'connected'` listener and await them all, so
-  no test depends on the order.
+  not load-bearing: the only other listener on that connection is `SonosConnection.waitForReconnect()`'s transient
+  one, registered later, and the emit is synchronous; consumers listen on the owner. Every test site that took the
+  first `'connected'` listener by index (about 15, across the client and household suites) changes to run every
+  `'connected'` listener and await them all, so no test depends on the order.
 - `connect()`: return at once if set up on the current socket and connected; otherwise count the handshake as owned,
   await `connection.connect()`, uncount it, and queue a setup run.
 - The listener: advance the epoch; if a `connect()` owns the handshake, do nothing; otherwise queue a setup run and
@@ -98,17 +102,28 @@ exported for the two classes but not from the barrel. Cost: the five test files 
 
 ## Behavior
 
-No change intended. One deliberate, unobservable change: `SonosClient` gains the disconnect check. Its
-`disconnect()` already flips the socket state synchronously, so the state check caught it before.
+Two deliberate changes, neither observable by Neurotto's usage:
+
+- `SonosClient` gains the disconnect check. Its `disconnect()` already flips the socket state synchronously, so the
+  state check caught it before.
+- Overlapping `connect()` calls where a `'connected'` listener calls `disconnect()` then `connect()` synchronously:
+  before, a setup run queued by the earlier caller could check after the household's `_initialConnectDone` reset but
+  before the new socket's `'connected'`, and run first-connect setup on a down socket (rejecting that caller with "Not
+  connected"), or with the real connection run a second setup recorded under the old epoch and emit an extra
+  `'connected'`. Now "set up on the current socket" is the epoch match alone, so the queued run waits for the new
+  socket: every caller resolves and the socket is set up once. Found by the final review with a probe against both
+  commits.
 
 ## Tests
 
 The existing suites are the guard: `SonosClient.test.ts`, `SonosHousehold.connect.test.ts`,
 `SonosHousehold.disconnect-during-setup.test.ts` and the setup tests in `SonosHousehold.test.ts` pin the
 `'connected'` contract for both owners. They change only in comments naming moved members, the five mock
-factories above, and the four listener-index sites. Each moved guard is mutation-verified through both owners (drop the owned-handshake skip, the epoch
-match, the disconnect check, the queue). A mutation no existing test catches gets one focused test in a new
-`tests/client/ConnectionSetup.test.ts`, and only then.
+factories above, and every listener-index site. Each moved guard is mutation-verified through both owners (drop the
+owned-handshake skip, the epoch match, the disconnect check, the queue). A mutation no existing test catches gets one
+focused test in a new `tests/client/ConnectionSetup.test.ts`, and only then. New: `tests/client/ConnectionSetup.test.ts`
+pins `runAfterSetup` ordering and the early return's state check; `SonosClient.test.ts` pins the coordinator-change
+lookup waiting behind a setup run.
 
 ## Out of scope
 
