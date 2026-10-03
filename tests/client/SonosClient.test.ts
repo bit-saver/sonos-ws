@@ -151,7 +151,7 @@ describe('SonosClient against a speaker', () => {
     await client.volume.subscribe();
     const subscribes = () => conn.send.mock.calls.filter(([r]: any) => r[0].namespace === 'playerVolume:1' && r[0].command === 'subscribe').length;
 
-    await conn._listeners.get('connected')[0]();
+    await Promise.all(conn._listeners.get('connected').map((h: () => unknown) => h()));
 
     expect(client.volume).toBe(volume);
     expect(subscribes()).toBe(2);
@@ -207,7 +207,7 @@ describe('SonosClient against a speaker', () => {
     ).length;
     const before = unscopedGetGroups();
 
-    await conn._listeners.get('connected')[0]();
+    await Promise.all(conn._listeners.get('connected').map((h: () => unknown) => h()));
 
     expect(unscopedGetGroups()).toBe(before);
   });

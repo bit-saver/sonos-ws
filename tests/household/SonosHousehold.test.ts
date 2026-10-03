@@ -222,7 +222,7 @@ describe('SonosHousehold speaker reconnection', () => {
     // Trigger handleReconnected via the 'connected' event listener
     const connectedHandlers = mockConn._listeners.get('connected') || [];
     expect(connectedHandlers.length).toBeGreaterThan(0);
-    await connectedHandlers[0]();
+    await Promise.all(connectedHandlers.map((h: () => unknown) => h()));
 
     // Dead connection should have been reconnected
     expect(deadConn.connect).toHaveBeenCalled();
@@ -244,7 +244,7 @@ describe('SonosHousehold speaker reconnection', () => {
     speakerConnections.set('RINCON_OFFICE', reconnectingConn);
 
     const connectedHandlers = mockConn._listeners.get('connected') || [];
-    await connectedHandlers[0]();
+    await Promise.all(connectedHandlers.map((h: () => unknown) => h()));
 
     expect(reconnectingConn.connect).not.toHaveBeenCalled();
   });
@@ -374,7 +374,7 @@ describe('SonosHousehold connect() unhandled rejection safety', () => {
       // 'connected' listener the household's constructor registered.
       const connectedHandlers = mockConn._listeners.get('connected') || [];
       expect(connectedHandlers.length).toBeGreaterThan(0);
-      await connectedHandlers[0]();
+      await Promise.all(connectedHandlers.map((h: () => unknown) => h()));
 
       // Flush microtasks, then yield a real macrotask turn: Node only fires
       // 'unhandledRejection' once the microtask queue has fully drained and
@@ -483,7 +483,7 @@ describe('SonosHousehold per-speaker resilience', () => {
     // Trigger connect flow, simulating 'connected' event
     const connectPromise = household.connect();
     const connectedHandlers = primaryMock._listeners.get('connected') || [];
-    await connectedHandlers[0]();
+    await Promise.all(connectedHandlers.map((h: () => unknown) => h()));
     await connectPromise;
 
     // The Office connection failed but should still be in the map
@@ -502,10 +502,10 @@ describe('default backoff shape is a published contract', () => {
   // The 45 minutes are waits only: a handshake that hangs adds connectTimeout
   // (10 s) per attempt, ~61 minutes in all.
   //
-  // DEFAULT_RECONNECT is module-private, so no downstream test can assert
-  // against it. Changing initialDelay, factor or maxDelay would silently
-  // resize every consumer's window with nothing failing anywhere — so the
-  // tripwire lives here, where the change would be made.
+  // DEFAULT_RECONNECT is module-private to src/client/SonosConnection.ts, so no
+  // downstream test can assert against it. Changing initialDelay, factor or
+  // maxDelay would silently resize every consumer's window with nothing
+  // failing anywhere — so this test is the tripwire.
   //
   // These values are not sacred. If you change one, change it deliberately
   // and tell the consumers; this test failing is the reminder to do that.
@@ -733,7 +733,7 @@ describe('household setup lifecycle', () => {
     expect(topologyReads()).toBe(1);
 
     // The connection flaps while the first run waits on its topology read.
-    const secondRun = mockConn._listeners.get('connected')[0]();
+    const secondRun = Promise.all(mockConn._listeners.get('connected').map((h: () => unknown) => h()));
     await flush();
     expect(topologyReads()).toBe(1);
 
@@ -768,17 +768,18 @@ describe('household setup lifecycle', () => {
       return Promise.resolve([{ success: true }, {}]);
     });
     await household.connect();
+    const fireConnected = () => Promise.all(mockConn._listeners.get('connected').map((h: () => unknown) => h()));
 
     // The socket drops again while the reconnect's setup is running.
     mockConn.state = 'disconnected';
-    await mockConn._listeners.get('connected')[0]();
+    await fireConnected();
 
     expect(logger.warn).toHaveBeenCalledWith('Failed reconnect setup', expect.objectContaining({ message: 'Disconnected during setup' }));
 
     // The chain must still be usable after a failed run: a later reconnect runs normally.
     const readsBefore = mockConn.send.mock.calls.filter(([r]: any) => r[0].command === 'getGroups' && r[0].householdId).length;
     mockConn.state = 'connected';
-    await mockConn._listeners.get('connected')[0]();
+    await fireConnected();
     const readsAfter = mockConn.send.mock.calls.filter(([r]: any) => r[0].command === 'getGroups' && r[0].householdId).length;
     expect(readsAfter).toBe(readsBefore + 1);
   });

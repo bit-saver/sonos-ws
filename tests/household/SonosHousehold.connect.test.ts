@@ -171,7 +171,7 @@ describe('connect() settles every caller exactly once', () => {
     const gate = new Promise<void>((r) => { release = r; });
     inst.gate = (h: any) => (h.namespace === 'groups:1' && h.command === 'subscribe' ? gate : null);
     inst.state = 'connected';
-    const R = inst.listeners.get('connected')[0]();
+    const R = Promise.all(inst.listeners.get('connected').map((h: () => unknown) => h()));
     await flush();
 
     // Socket goes away; the consumer calls connect() again; its handshake is in flight.
@@ -420,7 +420,7 @@ describe("the 'connected' event contract", () => {
 
     // The reconnect ladder succeeds in the background.
     inst.state = 'connected';
-    const run = inst.listeners.get('connected')[0]();
+    const run = Promise.all(inst.listeners.get('connected').map((h: () => unknown) => h()));
     await run;
 
     expect(connectedEmits).toBe(1);

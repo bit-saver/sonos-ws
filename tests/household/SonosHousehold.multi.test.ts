@@ -93,6 +93,11 @@ const socket = (host: string) => {
   return found;
 };
 
+/** Fires every 'connected' listener on a host's socket and waits for all their runs. */
+const fireConnected = async (host: string) => {
+  await Promise.all(socket(host)._listeners.get('connected').map((h: () => unknown) => h()));
+};
+
 /** Headers of every command sent through a host's socket, optionally filtered. */
 const sentVia = (host: string, namespace?: string, command?: string) =>
   socket(host).send.mock.calls
@@ -246,7 +251,7 @@ describe('subscription upkeep', () => {
     const household = await connectedHousehold(solo);
     await household.player('Arc').volume.subscribe();
 
-    await socket(PRIMARY)._listeners.get('connected')[0]();
+    await fireConnected(PRIMARY);
 
     expect(wantedOn(PRIMARY, 'playerVolume:1', { playerId: 'RINCON_ARC' })).toBe(2);
     expect(sentVia(OFFICE_IP, 'playerVolume:1', 'subscribe')).toHaveLength(0);
@@ -265,7 +270,7 @@ describe('subscription upkeep', () => {
     expect(wantedOn(PRIMARY, 'playerVolume:1', { playerId: 'RINCON_KITCHEN' })).toBe(1);
 
     // A primary reconnect opens Kitchen's own socket.
-    await socket(PRIMARY)._listeners.get('connected')[0]();
+    await fireConnected(PRIMARY);
 
     expect(wantedOn(PRIMARY, 'playerVolume:1', { playerId: 'RINCON_KITCHEN' })).toBe(1);
     expect(wantedOn(KITCHEN_IP, 'playerVolume:1', { playerId: 'RINCON_KITCHEN' })).toBeGreaterThan(0);
@@ -296,7 +301,7 @@ describe('reconnect setup does not stall on a stuck resubscribe', () => {
     // Diagnostics already subscribed Office to groupVolume/playback/homeTheater at first connect.
     unansweredSubscribes.add(OFFICE_IP);
     try {
-      const run = socket(PRIMARY)._listeners.get('connected')[0]();
+      const run = fireConnected(PRIMARY);
       const timeout = new Promise((_resolve, reject) =>
         setTimeout(() => reject(new Error('primary reconnect waited on a stuck resubscribe')), 1000));
       await expect(Promise.race([run, timeout])).resolves.toBeUndefined();
