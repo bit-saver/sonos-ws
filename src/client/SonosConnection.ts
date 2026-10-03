@@ -77,6 +77,24 @@ export interface ConnectionOptions {
   logger: Logger;
 }
 
+/** Reconnect behavior when the caller passes none. */
+const DEFAULT_RECONNECT: ReconnectOptions = {
+  enabled: true,
+  initialDelay: 1000,
+  maxDelay: 30000,
+  factor: 2,
+  maxAttempts: Infinity,
+  pingInterval: 30000,
+  pongTimeout: 10000,
+};
+
+/** Fills a caller's partial reconnect options from the defaults; `false` turns reconnecting off. */
+export function resolveReconnectOptions(input: Partial<ReconnectOptions> | boolean | undefined): ReconnectOptions {
+  if (input === false) return { ...DEFAULT_RECONNECT, enabled: false };
+  if (input === true || input === undefined) return { ...DEFAULT_RECONNECT };
+  return { ...DEFAULT_RECONNECT, ...input };
+}
+
 /**
  * A healthy handshake to a speaker on the LAN completes in well under a
  * second. Anything still pending after this long is not coming: under Bun a

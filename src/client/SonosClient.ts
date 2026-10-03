@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { SonosConnection } from './SonosConnection.js';
+import { SonosConnection, resolveReconnectOptions } from './SonosConnection.js';
 import type { ReconnectOptions } from './SonosConnection.js';
 import { discoverHouseholdId } from './discoverHouseholdId.js';
 import { TypedEventEmitter } from '../util/TypedEventEmitter.js';
@@ -30,11 +30,6 @@ export interface SonosClientOptions {
   logger?: Logger;
   requestTimeout?: number;
 }
-
-const DEFAULT_RECONNECT: ReconnectOptions = {
-  enabled: true, initialDelay: 1000, maxDelay: 30000, factor: 2, maxAttempts: Infinity,
-  pingInterval: 30000, pongTimeout: 10000,
-};
 
 /**
  * Simple single-speaker API for controlling one Sonos player.
@@ -252,12 +247,4 @@ function hostOf(url: string | undefined): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-function resolveReconnectOptions(
-  input: Partial<ReconnectOptions> | boolean | undefined,
-): ReconnectOptions {
-  if (input === false) return { ...DEFAULT_RECONNECT, enabled: false };
-  if (input === true || input === undefined) return { ...DEFAULT_RECONNECT };
-  return { ...DEFAULT_RECONNECT, ...input };
 }

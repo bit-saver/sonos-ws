@@ -5,7 +5,7 @@ import { SonosConnection } from '../../src/client/SonosConnection.js';
 import type { GroupsResponse, Group, Player } from '../../src/types/groups.js';
 
 // Mock SonosConnection
-vi.mock('../../src/client/SonosConnection.js', () => {
+vi.mock('../../src/client/SonosConnection.js', async (importOriginal) => {
   const listeners = new Map<string, Function[]>();
   const mockConnection = {
     // Mirrors the real SonosConnection: fires 'connected' listeners
@@ -29,7 +29,10 @@ vi.mock('../../src/client/SonosConnection.js', () => {
     send: vi.fn(),
     _listeners: listeners,
   };
-  return { SonosConnection: vi.fn(() => mockConnection) };
+  return {
+    ...(await importOriginal<typeof import('../../src/client/SonosConnection.js')>()),
+    SonosConnection: vi.fn(() => mockConnection),
+  };
 });
 
 const mockTopology: GroupsResponse = {

@@ -11,7 +11,7 @@ import { SonosHousehold } from '../../src/household/SonosHousehold.js';
 
 const instances: any[] = [];
 
-vi.mock('../../src/client/SonosConnection.js', () => {
+vi.mock('../../src/client/SonosConnection.js', async (importOriginal) => {
   const make = (opts: any) => {
     const listeners = new Map<string, Function[]>();
     const pending: Array<(e: Error) => void> = [];
@@ -61,7 +61,10 @@ vi.mock('../../src/client/SonosConnection.js', () => {
     instances.push(inst);
     return inst;
   };
-  return { SonosConnection: vi.fn(make) };
+  return {
+    ...(await importOriginal<typeof import('../../src/client/SonosConnection.js')>()),
+    SonosConnection: vi.fn(make),
+  };
 });
 
 describe('repro: disconnect() while the groups:1 subscribe is in flight', () => {

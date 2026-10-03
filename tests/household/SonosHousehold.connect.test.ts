@@ -15,7 +15,7 @@ let twoPlayers = false;
 // into SonosHousehold's speakerConnections, since connectAllSpeakers() iterates _rawPlayers in order).
 let subHosts: string[] = [];
 
-vi.mock('../../src/client/SonosConnection.js', () => {
+vi.mock('../../src/client/SonosConnection.js', async (importOriginal) => {
   const extraPlayers = () => subHosts.map((host, i) => ({
     id: `RINCON_S${i}`, name: `S${i}`, capabilities: [], websocketUrl: `wss://${host}:1443/websocket/api`,
   }));
@@ -106,7 +106,10 @@ vi.mock('../../src/client/SonosConnection.js', () => {
     instances.push(inst);
     return inst;
   };
-  return { SonosConnection: vi.fn(make) };
+  return {
+    ...(await importOriginal<typeof import('../../src/client/SonosConnection.js')>()),
+    SonosConnection: vi.fn(make),
+  };
 });
 
 const flush = async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); };

@@ -1,4 +1,4 @@
-import { SonosConnection } from '../client/SonosConnection.js';
+import { SonosConnection, resolveReconnectOptions } from '../client/SonosConnection.js';
 import type { ReconnectOptions } from '../client/SonosConnection.js';
 import { discoverHouseholdId } from '../client/discoverHouseholdId.js';
 import { TypedEventEmitter } from '../util/TypedEventEmitter.js';
@@ -16,16 +16,6 @@ import { PlayerHandle } from '../player/PlayerHandle.js';
 import { GroupingEngine } from './GroupingEngine.js';
 import { GroupsNamespace } from '../namespaces/GroupsNamespace.js';
 import type { NamespaceContext } from '../namespaces/BaseNamespace.js';
-
-const DEFAULT_RECONNECT: ReconnectOptions = {
-  enabled: true,
-  initialDelay: 1000,
-  maxDelay: 30000,
-  factor: 2,
-  maxAttempts: Infinity,
-  pingInterval: 30000,
-  pongTimeout: 10000,
-};
 
 /**
  * A regroup emits several groups:1 events in quick succession, and a read
@@ -701,16 +691,4 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     this.emit('connected');
   }
 
-}
-
-function resolveReconnectOptions(
-  input: Partial<ReconnectOptions> | boolean | undefined,
-): ReconnectOptions {
-  if (input === false) {
-    return { ...DEFAULT_RECONNECT, enabled: false };
-  }
-  if (input === true || input === undefined) {
-    return { ...DEFAULT_RECONNECT };
-  }
-  return { ...DEFAULT_RECONNECT, ...input };
 }

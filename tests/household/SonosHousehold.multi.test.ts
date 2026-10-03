@@ -16,7 +16,8 @@ const unansweredSubscribes = new Set<string>();
 // close before open, which rejects without an 'error'.
 const failingConnects = new Map<string, 'refused' | 'closed'>();
 
-vi.mock('../../src/client/SonosConnection.js', () => ({
+vi.mock('../../src/client/SonosConnection.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/client/SonosConnection.js')>()),
   SonosConnection: vi.fn((opts: any) => {
     const listeners = new Map<string, Function[]>();
     const inst: any = {

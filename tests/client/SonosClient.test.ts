@@ -4,7 +4,8 @@ import { CommandError } from '../../src/errors/CommandError.js';
 
 const conns: any[] = [];
 
-vi.mock('../../src/client/SonosConnection.js', () => ({
+vi.mock('../../src/client/SonosConnection.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/client/SonosConnection.js')>()),
   SonosConnection: vi.fn(() => {
     const listeners = new Map<string, Function[]>();
     const inst: any = {
