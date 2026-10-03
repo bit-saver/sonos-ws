@@ -228,10 +228,10 @@ describe('SonosClient against a speaker', () => {
       if (request[0].command === 'getGroups' && request[0].householdId) await gate;
       return speakerSend(request);
     });
-    const onConnected = conn._listeners.get('connected')[0];
-    const first = onConnected(); // socket 2: its setup run parks in getGroups
+    const fireConnected = () => Promise.all(conn._listeners.get('connected').map((h: () => unknown) => h()));
+    const first = fireConnected(); // socket 2: its setup run parks in getGroups
     await new Promise((r) => setTimeout(r, 0));
-    const queued = [onConnected(), onConnected()]; // sockets 3 and 4 come up while it is parked
+    const queued = [fireConnected(), fireConnected()]; // sockets 3 and 4 come up while it is parked
     release();
     await Promise.all([first, ...queued]);
 

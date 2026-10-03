@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { SonosConnection, resolveReconnectOptions } from './SonosConnection.js';
 import type { ReconnectOptions } from './SonosConnection.js';
+import { ConnectionSetup } from './ConnectionSetup.js';
 import { discoverHouseholdId } from './discoverHouseholdId.js';
 import { TypedEventEmitter } from '../util/TypedEventEmitter.js';
 import { sourceOf } from '../util/eventSource.js';
@@ -11,7 +12,6 @@ import type { GroupsResponse } from '../types/groups.js';
 import type { Logger } from '../util/logger.js';
 import { noopLogger } from '../util/logger.js';
 import { SonosError } from '../errors/SonosError.js';
-import { ConnectionError } from '../errors/ConnectionError.js';
 import { ErrorCode } from '../types/errors.js';
 import { PlayerHandle } from '../player/PlayerHandle.js';
 import type { VolumeControl } from '../player/VolumeControl.js';
@@ -52,19 +52,7 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
   private readonly host: string;
   private _handle: PlayerHandle | undefined;
   private _householdId: string | undefined;
-  /** Setup runs, chained so each starts after the previous one settles. */
-  private setupChain: Promise<void> = Promise.resolve();
-  /** Handshakes a connect() call is awaiting: their setup is that call's to run, not the 'connected' listener's. */
-  private ownedHandshakes = 0;
-  /** Counts 'connected' events, so a completed setup can be matched to the socket it ran on. */
-  private connectedEpoch = 0;
-  /** The connectedEpoch the last completed setup started under. */
-  private setupEpoch = -1;
-
-  /** Set up on the socket that is up now, not merely set up once. */
-  private get setUpOnCurrentSocket(): boolean {
-    return this._handle !== undefined && this.setupEpoch === this.connectedEpoch;
-  }
+  private readonly setup: ConnectionSetup;
 
   constructor(options: SonosClientOptions) {
     super();
@@ -88,7 +76,7 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
     });
 
     // Attached once: attaching in connect() stacked another copy on every call.
-    this.connection.on('connected', () => this.onConnected());
+    this.setup = new ConnectionSetup(this.connection, () => this.setUp(), () => this.emit('connected'), this.log);
     this.connection.on('disconnected', (r) => this.emit('disconnected', r));
     this.connection.on('reconnecting', (a, d) => this.emit('reconnecting', a, d));
     this.connection.on('error', (e) => this.emit('error', e));
@@ -124,55 +112,22 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
    * and a setup failure on an otherwise healthy socket (e.g. a failed player lookup) rejects with no automatic retry.
    */
   async connect(): Promise<void> {
-    if (this.setUpOnCurrentSocket && this.connection.state === 'connected') return;
-    this.ownedHandshakes++;
-    try {
-      await this.connection.connect();
-    } finally {
-      this.ownedHandshakes--;
-    }
-    // Overlapping calls each queue this; the first to run sets up, the rest find it done.
-    await this.enqueue(() => (this.setUpOnCurrentSocket ? Promise.resolve() : this.setUp()));
+    await this.setup.connect();
   }
 
   async disconnect(): Promise<void> {
+    this.setup.noteDisconnect();
     await this.connection.disconnect();
   }
 
-  /** Runs work after any setup in flight. A failure rejects this call, never the chain. */
-  private enqueue(task: () => Promise<void>): Promise<void> {
-    const run = this.setupChain.then(task);
-    this.setupChain = run.catch(() => {});
-    return run;
-  }
-
-  /** Sets up after a handshake no connect() call awaits: the reconnect ladder's. Returns the run so tests can await it. */
-  private onConnected(): Promise<void> {
-    this.connectedEpoch++;
-    if (this.ownedHandshakes > 0) return Promise.resolve();
-    // setUp() logs its own failure, and a background run has no caller to tell. A run queued ahead of this one may
-    // already have set this socket up.
-    return this.enqueue(() => (this.setUpOnCurrentSocket ? Promise.resolve() : this.setUp())).catch(() => {});
-  }
-
-  /** Finds this speaker, then emits `connected`. Logs and rethrows a failure. */
+  /** Finds this speaker. Logs and rethrows a failure; ConnectionSetup announces success. */
   private async setUp(): Promise<void> {
-    const epoch = this.connectedEpoch;
     try {
       await this.locatePlayer();
     } catch (err) {
       this.log.warn('Setup after connect failed', err);
       throw err;
     }
-    // A disconnect() landing during locatePlayer() must not announce a connection that no
-    // longer exists.
-    if (this.connection.state !== 'connected') {
-      this.log.debug('Setup abandoned: disconnected during setup');
-      throw new ConnectionError(ErrorCode.CONNECTION_LOST, 'Disconnected during setup');
-    }
-    // Only a run that completed locatePlayer() above records the socket it set up.
-    this.setupEpoch = epoch;
-    this.emit('connected');
   }
 
   /**
@@ -225,7 +180,7 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
 
     if (objectType === 'groupCoordinatorChanged') {
       this.emit('coordinatorChanged', body as unknown as GroupCoordinatorChangedEvent, source);
-      this.enqueue(() => this.locatePlayer()).catch((err: unknown) =>
+      this.setup.runAfterSetup(() => this.locatePlayer()).catch((err: unknown) =>
         this.log.warn('Failed to refresh after coordinator change', err));
       return;
     }

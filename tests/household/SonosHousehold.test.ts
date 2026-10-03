@@ -316,7 +316,7 @@ describe('SonosHousehold first-connect-after-fail setup', () => {
     await Promise.resolve();
 
     // Trigger the 'connected' event that handleReconnected listens to
-    await connectedHandlers[0]();
+    await Promise.all(connectedHandlers.map((h: () => unknown) => h()));
 
     // Now connectPromise should be able to complete
     await connectPromise;
@@ -636,8 +636,7 @@ describe('topology follows group changes', () => {
   });
 
   it('re-subscribes after a reconnect', async () => {
-    const onConnected = mockConn._listeners.get('connected')![0];
-    await onConnected();
+    await Promise.all(mockConn._listeners.get('connected')!.map((h: () => unknown) => h()));
     expect(sent('groups:1', 'subscribe')).toBe(2);
   });
 
@@ -682,8 +681,7 @@ describe('diagnostic event subscriptions', () => {
   });
 
   it('re-subscribes them after a reconnect', async () => {
-    const onConnected = mockConn._listeners.get('connected')![0];
-    await onConnected();
+    await Promise.all(mockConn._listeners.get('connected')!.map((h: () => unknown) => h()));
     expect(sent('groupVolume:1', 'subscribe')).toBe(6);
     expect(sent('playback:1', 'subscribe')).toBe(6);
     expect(sent('homeTheater:1', 'subscribe')).toBe(6);
