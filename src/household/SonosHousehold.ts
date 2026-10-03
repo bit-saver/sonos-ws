@@ -1,5 +1,6 @@
 import { SonosConnection, resolveReconnectOptions } from '../client/SonosConnection.js';
 import type { ReconnectOptions } from '../client/SonosConnection.js';
+import { ConnectionSetup } from '../client/ConnectionSetup.js';
 import { discoverHouseholdId } from '../client/discoverHouseholdId.js';
 import { TypedEventEmitter } from '../util/TypedEventEmitter.js';
 import type { SonosHouseholdEvents, GroupCoordinatorChangedEvent } from '../types/events.js';
@@ -79,21 +80,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   private _lastMembershipKey = '';
   /** Pending debounced topology re-read, armed by groups:1 events. */
   private topologyRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Setup runs, chained so each starts after the previous one settles: a flap mid-setup must not run two at once. */
-  private setupChain: Promise<void> = Promise.resolve();
-  /** Handshakes a connect() call is awaiting: their setup is that call's to run, not the 'connected' listener's. */
-  private ownedHandshakes = 0;
-  /** Counts primary 'connected' events, so a completed setup can be matched to the socket it ran on. */
-  private primaryEpoch = 0;
-  /** The primaryEpoch the last completed setup started under. */
-  private setupEpoch = -1;
-  /** Counts disconnect() calls, so a setup run parked mid-disconnect can tell it happened even while the primary connection still reads 'connected'. */
-  private disconnects = 0;
-
-  /** Set up on the socket that is up now, not merely set up once. */
-  private get setUpOnCurrentSocket(): boolean {
-    return this._initialConnectDone && this.setupEpoch === this.primaryEpoch;
-  }
+  private readonly setup: ConnectionSetup;
 
   /** Per-speaker WebSocket connections. Key is player ID. */
   private readonly speakerConnections = new Map<string, SonosConnection>();
@@ -145,8 +132,8 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       this.log.error(`Unhandled household error: ${err.message}`);
     });
 
-    // Attached once: attaching in connect() stacked another copy on every call.
-    this.connection.on('connected', () => this.onPrimaryConnected());
+    // Built once: building it in connect() would stack another 'connected' listener on every call.
+    this.setup = new ConnectionSetup(this.connection, () => this.handleReconnected(), () => this.emit('connected'), this.log);
     this.connection.on('disconnected', (r) => this.emit('disconnected', r));
     this.connection.on('reconnecting', (a, d) => this.emit('reconnecting', a, d));
     this.connection.on('error', (e) => this.emit('error', e));
@@ -190,39 +177,14 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
    * - {@link disconnect} stops the ladder; no `'connected'` follows it, even if it lands mid-setup.
    */
   async connect(): Promise<void> {
-    // Already set up on the socket that is up now — nothing to do.
-    if (this.setUpOnCurrentSocket && this.connection.state === 'connected') return;
     // A new socket gets first-connect setup; a live one may have a ladder run in flight, which this call just waits for.
     if (this.connection.state !== 'connected') this._initialConnectDone = false;
-    this.ownedHandshakes++;
-    try {
-      await this.connection.connect();
-    } finally {
-      this.ownedHandshakes--;
-    }
-    // Overlapping calls each queue this; the first to run sets up, the rest find it done.
-    await this.enqueueSetup(() => (this.setUpOnCurrentSocket ? Promise.resolve() : this.handleReconnected()));
-  }
-
-  /** Sets up after a handshake no connect() call awaits: the reconnect ladder's. Returns the run so tests can await it. */
-  private onPrimaryConnected(): Promise<void> {
-    this.primaryEpoch++;
-    if (this.ownedHandshakes > 0) return Promise.resolve();
-    // handleReconnected() logs its own failures, and a background run has no caller to tell. A run queued ahead of this
-    // one may already have set this socket up.
-    return this.enqueueSetup(() => (this.setUpOnCurrentSocket ? Promise.resolve() : this.handleReconnected())).catch(() => {});
-  }
-
-  /** Runs setup work after any run in flight. A failure rejects this call, never the chain. */
-  private enqueueSetup(task: () => Promise<void>): Promise<void> {
-    const run = this.setupChain.then(task);
-    this.setupChain = run.catch(() => {});
-    return run;
+    await this.setup.connect();
   }
 
   /** Gracefully closes all WebSocket connections. */
   async disconnect(): Promise<void> {
-    this.disconnects++;
+    this.setup.noteDisconnect();
     if (this.topologyRefreshTimer) {
       clearTimeout(this.topologyRefreshTimer);
       this.topologyRefreshTimer = null;
@@ -618,11 +580,9 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
    * Handles reconnection events. Runs full initial setup on the first
    * successful connect (whether that's the caller's first attempt or after
    * a background reconnect loop), and reconnect-specific work on every
-   * subsequent reconnect.
+   * subsequent reconnect. ConnectionSetup announces the result.
    */
   private async handleReconnected(): Promise<void> {
-    const epoch = this.primaryEpoch;
-    const disconnects = this.disconnects;
     if (!this._initialConnectDone) {
       // First successful connect — full initial setup. Runs either after
       // the caller's `await connect()` completes on first try OR after a
@@ -678,17 +638,6 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
         throw err;
       }
     }
-    // A disconnect() landing during the tail above (connectAllSpeakers, diagnostics,
-    // resubscribe) must not announce a connection that no longer exists. Checking disconnects
-    // too, not just connection state: disconnect() disconnects each speaker before the primary,
-    // so with enough speakers in play the primary can still read 'connected' when this runs.
-    if (this.disconnects !== disconnects || this.connection.state !== 'connected') {
-      this.log.debug('Setup abandoned: disconnected during setup');
-      throw new ConnectionError(ErrorCode.CONNECTION_LOST, 'Disconnected during setup');
-    }
-    // Only a run that completed either branch above records the socket it set up.
-    this.setupEpoch = epoch;
-    this.emit('connected');
   }
 
 }

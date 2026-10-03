@@ -273,8 +273,8 @@ describe('connect() settles every caller exactly once', () => {
     await flush();
 
     inst.manualHandshake = false;
-    // Not awaited: connect() below can start before this call's own cleanup (and first's
-    // ownedHandshakes-- decrement) has actually run.
+    // Not awaited: connect() below can start before this call's own cleanup (and the
+    // ownedHandshakes-- decrement for first, in ConnectionSetup) has actually run.
     void household.disconnect();
     const second = household.connect();
     second.catch(() => {});

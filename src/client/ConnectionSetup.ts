@@ -5,7 +5,8 @@ import { ErrorCode } from '../types/errors.js';
 
 /**
  * Runs an owner's setup once per socket its connection brings up. A connect() call sets up the handshake it awaited;
- * the 'connected' listener sets up the reconnect ladder's. Shared by SonosClient and SonosHousehold.
+ * the 'connected' listener sets up the reconnect ladder's. It also queues an owner's other work behind those runs
+ * (runAfterSetup). Shared by SonosClient and SonosHousehold.
  */
 export class ConnectionSetup {
   private readonly connection: SonosConnection;

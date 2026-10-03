@@ -75,7 +75,7 @@ export class SonosClient extends TypedEventEmitter<SonosEvents> {
       this.log.error(`Unhandled client error: ${err.message}`);
     });
 
-    // Attached once: attaching in connect() stacked another copy on every call.
+    // Built once: building it in connect() would stack another 'connected' listener on every call.
     this.setup = new ConnectionSetup(this.connection, () => this.setUp(), () => this.emit('connected'), this.log);
     this.connection.on('disconnected', (r) => this.emit('disconnected', r));
     this.connection.on('reconnecting', (a, d) => this.emit('reconnecting', a, d));
