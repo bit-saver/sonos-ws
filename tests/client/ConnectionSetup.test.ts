@@ -14,7 +14,6 @@ function fakeConnection() {
       inst.state = 'connected';
       for (const h of listeners.get('connected') ?? []) await h();
     }),
-    _listeners: listeners,
   };
   return inst;
 }
@@ -41,5 +40,24 @@ describe('ConnectionSetup.runAfterSetup', () => {
     release();
     await Promise.all([connecting, queued]);
     expect(task).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('ConnectionSetup.connect', () => {
+  it('reconnects and sets up again when the socket has dropped since the last setup', async () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const connection = fakeConnection();
+    const setUp = vi.fn(async () => {});
+    const setup = new ConnectionSetup(connection, setUp, vi.fn(), logger);
+
+    await setup.connect();
+    expect(connection.connect).toHaveBeenCalledTimes(1);
+    expect(setUp).toHaveBeenCalledTimes(1);
+
+    connection.state = 'disconnected'; // as after a drop or a disconnect()
+    await setup.connect();
+
+    expect(connection.connect).toHaveBeenCalledTimes(2);
+    expect(setUp).toHaveBeenCalledTimes(2);
   });
 });

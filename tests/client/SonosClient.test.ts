@@ -240,6 +240,37 @@ describe('SonosClient against a speaker', () => {
     expect(connected).toHaveBeenCalledTimes(2);
   });
 
+  it('a coordinator change during a parked setup run looks the player up only after it', async () => {
+    const { client, conn } = newClient();
+    await client.connect();
+    const scopedGetGroups = () => conn.send.mock.calls.filter(
+      ([r]: any) => r[0].namespace === 'groups:1' && r[0].command === 'getGroups' && r[0].householdId,
+    ).length;
+    const before = scopedGetGroups();
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    conn.send.mockImplementation(async (request: any) => {
+      if (request[0].command === 'getGroups' && request[0].householdId) await gate;
+      return speakerSend(request);
+    });
+    const setup = Promise.all(conn._listeners.get('connected').map((h: () => unknown) => h()));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(scopedGetGroups() - before).toBe(1); // the setup run, parked in getGroups
+
+    conn._listeners.get('message')[0]([
+      { namespace: 'groupVolume:1', type: 'groupCoordinatorChanged', groupId: 'G_OFF' },
+      { _objectType: 'groupCoordinatorChanged', groupStatus: 'GROUP_STATUS_MOVED' },
+    ]);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(scopedGetGroups() - before).toBe(1); // the lookup waits behind it
+
+    release();
+    await setup;
+    await new Promise((r) => setTimeout(r, 0));
+    expect(scopedGetGroups() - before).toBe(2);
+  });
+
   it('no connected is emitted after disconnect() lands during setup', async () => {
     const { client, conn } = newClient();
     const connected = vi.fn();

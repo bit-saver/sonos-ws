@@ -80,7 +80,7 @@ export class ConnectionSetup {
     return this.runAfterSetup(() => (this.setUpOnCurrentSocket ? Promise.resolve() : this.run()));
   }
 
-  /** Runs the owner's setup, records the socket it ran on, then announces. Rejects if a disconnect landed meanwhile. */
+  /** Runs setUp(), records the socket it ran on, then announces. Rejects if setUp() fails or a disconnect landed meanwhile. */
   private async run(): Promise<void> {
     const epoch = this.connectedEpoch;
     const disconnects = this.disconnects;
