@@ -13,7 +13,7 @@ export class ConnectionSetup {
   private readonly setUp: () => Promise<void>;
   private readonly onSetUp: () => void;
   private readonly log: Logger;
-  /** Setup runs, chained so each starts after the previous one settles: a flap mid-setup must not run two at once. */
+  /** Setup runs and runAfterSetup tasks, each starting after the previous settles, so a flap never overlaps setup. */
   private chain: Promise<void> = Promise.resolve();
   /** Handshakes a connect() call is awaiting: their setup is that call's to run, not the 'connected' listener's. */
   private ownedHandshakes = 0;
@@ -80,6 +80,7 @@ export class ConnectionSetup {
     return this.runAfterSetup(() => (this.setUpOnCurrentSocket ? Promise.resolve() : this.run()));
   }
 
+  /** Runs the owner's setup, records the socket it ran on, then announces. Rejects if a disconnect landed meanwhile. */
   private async run(): Promise<void> {
     const epoch = this.connectedEpoch;
     const disconnects = this.disconnects;
