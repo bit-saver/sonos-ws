@@ -1,16 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { PlayerVolumeNamespace } from '../../src/namespaces/PlayerVolumeNamespace.js';
-import type { NamespaceContext } from '../../src/namespaces/BaseNamespace.js';
-import type { SonosConnection } from '../../src/client/SonosConnection.js';
-
-function contextWith(send: ReturnType<typeof vi.fn>): NamespaceContext {
-  return {
-    connection: { send } as unknown as SonosConnection,
-    getHouseholdId: () => 'HH_1',
-    getGroupId: () => 'G_1',
-    getPlayerId: () => 'P_1',
-  };
-}
+import { contextWith } from './contextWith.js';
 
 describe('command IDs', () => {
   afterEach(() => {
