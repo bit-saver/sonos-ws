@@ -176,3 +176,63 @@ session — so the morning 'group arc' still outlasted HA's 10 s call."
 Single-seat whole-branch review; rebuild the scratch build; live check with the Alexa morning case (the owner says the
 command); sha and timings to House of Auto; `npm run build`, dist commit, merge, push, deploy; `CLAUDE.md`, memory,
 vault.
+
+---
+
+### Task 3 (added after House of Auto's review): a source Sonos is still releasing is not a source
+
+**Why:** after a copy counts as done, the source group keeps PLAYING until Sonos answers (≤ ~20 s). A second
+single-player `group arc` in that window would find it as a PLAYING source and copy it onto the Arc again.
+
+**Files:** `src/household/GroupingEngine.ts` (field, `copyAudio`, `resolveAudioSourceExcluding`); test file.
+
+- [ ] **Step 1: Failing test** — append inside `describe('transfer')`:
+
+```ts
+    it('skips a source Sonos is still releasing after a copy', async () => {
+      startWith(makeGroup('G_A', ['A'], 'IDLE'), makeGroup('G_B', ['B', 'C'], 'PLAYING'));
+      slowCopy('answers');
+      vi.useFakeTimers();
+      try {
+        await Promise.all([engine.group([players.get('A')!], { transfer: true }), vi.advanceTimersByTimeAsync(3000)]);
+        await engine.group([players.get('A')!], { transfer: true });
+        expect(householdGroups.createGroup.mock.calls).toEqual([[['A'], 'G_B'], [['C']]]);
+        expect(state()).toEqual(['A:PLAYING', 'B:PLAYING', 'C:IDLE']);
+        await vi.advanceTimersByTimeAsync(20000);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+```
+
+RED: the second `group()` copies B again (a second `[['A'], 'G_B']` call).
+
+- [ ] **Step 2: Implement**
+
+Field, next to the constructor's parameters' use (a private instance field with a doc comment):
+
+```ts
+  /** Coordinators of source groups whose audio already plays on a transfer's target, until Sonos answers the copy. */
+  private readonly releasing = new Set<string>();
+```
+
+In `copyAudio`, the early return becomes:
+
+```ts
+    if (playing && !answered) {
+      this.releasing.add(sourceGroup.coordinatorId);
+      answer
+        .catch((err: unknown) => this.log.warn(`Copy to "${target.name}" failed after it started playing`, err))
+        .finally(() => this.releasing.delete(sourceGroup.coordinatorId));
+      return;
+    }
+```
+
+In `resolveAudioSourceExcluding`'s auto-resolve loop, skip such groups: the condition
+`if (group.playbackState === phase)` becomes `if (group.playbackState === phase && !this.releasing.has(group.coordinatorId))`.
+(The explicit `{ id }` source and the multi-player `resolveAudioSource` are unchanged.)
+
+- [ ] **Step 3:** `npx vitest run && npx tsc --noEmit` → 206 pass.
+- [ ] **Step 4: Mutation** — drop `&& !this.releasing.has(group.coordinatorId)` → exactly the new test fails. Restore.
+- [ ] **Step 5: Commit** — `fix: a source Sonos is still releasing after a copy is not a transfer source` (body: a
+  second 'group arc' in the release window would copy the still-playing source again).
