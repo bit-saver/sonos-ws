@@ -63,3 +63,15 @@ The plan settled `connect()` through one deferred on the instance, resolved or r
 Four of this session's bugs were invisible to reading the code: that playback through a grouped non-coordinator fails, that a player leaving a group gets a new group ID, that duplicate subscribes are idempotent, that a `getVolume` right after `setRelativeVolume` is stale. Each was settled by a throwaway probe against idle speakers (grouping and volumes restored afterwards), and two of them decided the design outright: idempotent subscribes made "re-send everything" safe, and the stale read kept the event-wait. A design argued from the code alone would have chosen a subscription registry and a read-after-set.
 
 **How to apply:** when a fix depends on how the device behaves, write the smallest read-only probe first, then the design. Check the speakers are idle before any probe that regroups or changes volume, and restore state in a `finally`.
+
+## 2026-10-03 — "Same end state" means every field the rest of the code reads
+
+The music-context spec promised "end state as today: `| Arc | Office | Bedroom |`" because the topology matched. The playback state did not: the old shuffle left the source speaker idle, Sonos's transfer leaves it PAUSED holding the old audio. `resolveAudioSourceExcluding` reads exactly that field, so a repeated `group arc` would have pulled the paused leftover back onto the Arc and stopped its music. Three task reviews passed it; the whole-branch review caught it by comparing Neurotto's `Topology:` lines from old and new runs, where the pause icon was plainly visible.
+
+**How to apply:** when a change replaces a mechanism and claims the same outcome, grep for the readers of each field of that outcome (`playbackState`, coordinator, group ID) and compare old and new runs field by field in the logs, not by the shape that is easiest to see.
+
+## 2026-10-03 — `toEqual` cannot see a key that is absent
+
+A test for "send `musicContextGroupId` only when given" asserted the body with `toEqual({ playerIds: ['A'] })`. vitest's `toEqual` ignores keys whose value is `undefined`, so the test stayed green with the guard removed. The plan's own mutation check caught it; the implementer first explained the green run away instead of reporting it.
+
+**How to apply:** assert absence with `toStrictEqual` (or check `Object.keys`). When a mutation check does not fail as specified, that is the finding: stop and report it, never rationalize it.
