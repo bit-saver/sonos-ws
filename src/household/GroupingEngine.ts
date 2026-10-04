@@ -178,14 +178,14 @@ export class GroupingEngine {
       // If a target player is in a playing group, return the coordinator of that group.
       for (const player of targetPlayers) {
         const group = snap.findGroupOf(player.id);
-        if (group?.playbackState === phase) {
+        if (group?.playbackState === phase && !this.releasing.has(group.coordinatorId)) {
           const coord = this.players.get(group.coordinatorId);
           return coord ?? player;
         }
       }
       // Then check rest of household
       for (const group of snap.groups) {
-        if (group.playbackState === phase) {
+        if (group.playbackState === phase && !this.releasing.has(group.coordinatorId)) {
           const coord = this.players.get(group.coordinatorId);
           if (coord && !targetIds.has(coord.id)) return coord;
         }
@@ -293,8 +293,9 @@ export class GroupingEngine {
         throw new SonosError(ErrorCode.GROUP_OPERATION_FAILED, `Cannot find coordinator for source "${source.name}"`);
       }
       sourceMemberIds = sourceGroup.playerIds.filter((id) => id !== targetCoordinator.id);
+      const targetPlaying = snap.findGroupOf(targetCoordinator.id)?.playbackState === 'PLAYBACK_STATE_PLAYING';
       try {
-        await this.copyAudio(targetCoordinator, sourceGroup, sourceMemberIds);
+        await this.copyAudio(targetCoordinator, sourceGroup, sourceMemberIds, targetPlaying);
       } catch (err) {
         if (!(err instanceof CommandError && err.code === 'ERROR_PLAYBACK_FAILED')) throw err;
         this.log.info(
@@ -341,13 +342,22 @@ export class GroupingEngine {
 
   /**
    * Copies a group's audio to the target. Sonos may answer only once the source group stops, so after a wait the target
-   * playing counts as done. A refusal throws; a late failure is logged.
+   * playing counts as done, unless it already played before the copy. A refusal throws; a late failure is logged.
    */
-  private async copyAudio(target: PlayerHandle, sourceGroup: Group, sourceMemberIds: string[]): Promise<void> {
+  private async copyAudio(
+    target: PlayerHandle,
+    sourceGroup: Group,
+    sourceMemberIds: string[],
+    targetPlaying: boolean,
+  ): Promise<void> {
     let answered = false;
     const answer = this.householdGroups.createGroup([target.id], sourceGroup.id).finally(() => {
       answered = true;
     });
+    if (targetPlaying) {
+      await answer;
+      return;
+    }
     let timer: ReturnType<typeof setTimeout> | undefined;
     const grace = new Promise<void>((r) => {
       timer = setTimeout(r, COPY_ANSWER_GRACE_MS);

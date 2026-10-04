@@ -375,5 +375,123 @@ describe('GroupingEngine', () => {
         vi.useRealTimers();
       }
     });
+
+    it('copies from a source again once Sonos has released it', async () => {
+      startWith(makeGroup('G_A', ['A'], 'IDLE'), makeGroup('G_B', ['B', 'C'], 'PLAYING'));
+      slowCopy('answers');
+      vi.useFakeTimers();
+      try {
+        await Promise.all([
+          engine.group([players.get('A')!], { transfer: true }),
+          vi.advanceTimersByTimeAsync(3000),
+        ]);
+        await vi.advanceTimersByTimeAsync(20000);
+        topology.groups = topology.groups.map(
+          (g) => (g.id === 'G_B' ? { ...g, playbackState: 'PLAYBACK_STATE_PLAYING' } : g));
+        await engine.group([players.get('A')!], { transfer: true });
+        expect(householdGroups.createGroup.mock.calls).toEqual([[['A'], 'G_B'], [['C']], [['A'], 'G_B']]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    // Sonos refuses the copy after a delay, without applying it.
+    function refusedCopy(afterMs: number) {
+      householdGroups.createGroup.mockImplementationOnce(() => new Promise((_, reject) => setTimeout(
+        () => reject(new CommandError('ERROR_PLAYBACK_FAILED', 'music context content cannot be copied')),
+        afterMs,
+      )));
+    }
+
+    it('moves the source group when Sonos refuses a copy while the target is watched', async () => {
+      startWith(makeGroup('G_A', ['A'], 'IDLE'), makeGroup('G_B', ['B', 'C'], 'PLAYING'));
+      refusedCopy(1500);
+      vi.useFakeTimers();
+      try {
+        await Promise.all([
+          engine.group([players.get('A')!], { transfer: true }),
+          vi.advanceTimersByTimeAsync(5000),
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+
+      expect(householdGroups.createGroup.mock.calls).toEqual([[['A'], 'G_B']]);
+      expect(players.get('B')!.groups.setGroupMembers).toHaveBeenCalledWith(['A']);
+      expect(state()).toEqual(['A:PLAYING', 'B:IDLE', 'C:IDLE']);
+    });
+
+    it('moves the source group when Sonos refuses a copy after the watch gave up', async () => {
+      startWith(makeGroup('G_A', ['A'], 'IDLE'), makeGroup('G_B', ['B', 'C'], 'PLAYING'));
+      refusedCopy(12000);
+      vi.useFakeTimers();
+      try {
+        await Promise.all([
+          engine.group([players.get('A')!], { transfer: true }),
+          vi.advanceTimersByTimeAsync(30000),
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+
+      expect(householdGroups.createGroup.mock.calls).toEqual([[['A'], 'G_B']]);
+      expect(players.get('B')!.groups.setGroupMembers).toHaveBeenCalledWith(['A']);
+      expect(state()).toEqual(['A:PLAYING', 'B:IDLE', 'C:IDLE']);
+    });
+
+    it('waits for Sonos to answer a copy onto a target that already plays', async () => {
+      startWith(makeGroup('G_A', ['A'], 'PLAYING'), makeGroup('G_B', ['B', 'C'], 'PLAYING'));
+      slowCopy('fails');
+      vi.useFakeTimers();
+      try {
+        const outcome = engine.group([players.get('A')!], { transfer: true })
+          .then(() => 'resolved', (err: CommandError) => err.code);
+        await vi.advanceTimersByTimeAsync(23000);
+        expect(await outcome).toBe('ERROR_COMMAND_FAILED');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps a releasing source's audio out of a multi-player group", async () => {
+      startWith(makeGroup('G_A', ['A'], 'IDLE'), makeGroup('G_B', ['B', 'C'], 'PLAYING'));
+      slowCopy('answers');
+      vi.useFakeTimers();
+      try {
+        await Promise.all([
+          engine.group([players.get('A')!], { transfer: true }),
+          vi.advanceTimersByTimeAsync(3000),
+        ]);
+        await engine.group([players.get('B')!, players.get('A')!], { transfer: true });
+        expect(householdGroups.createGroup.mock.calls).toEqual([[['A'], 'G_B'], [['C']]]);
+        expect(players.get('A')!.groups.modifyGroupMembers).toHaveBeenCalledWith(['B'], undefined);
+        expect(players.get('B')!.groups.modifyGroupMembers).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(20000);
+        expect(state()).toEqual(['A+B:PLAYING', 'C:IDLE']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('ignores a releasing source when a multi-player group looks for audio elsewhere', async () => {
+      startWith(makeGroup('G_A', ['A'], 'IDLE'), makeGroup('G_B', ['B', 'C'], 'PLAYING'));
+      slowCopy('answers');
+      vi.useFakeTimers();
+      try {
+        await Promise.all([
+          engine.group([players.get('A')!], { transfer: true }),
+          vi.advanceTimersByTimeAsync(3000),
+        ]);
+        // The copy is paused, so only paused audio is left on a target.
+        topology.groups = topology.groups.map(
+          (g) => (g.coordinatorId === 'A' ? { ...g, playbackState: 'PLAYBACK_STATE_PAUSED' } : g));
+        await engine.group([players.get('C')!, players.get('A')!], { transfer: true });
+        expect(players.get('A')!.groups.modifyGroupMembers).toHaveBeenCalledWith(['C'], undefined);
+        expect(players.get('C')!.groups.modifyGroupMembers).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(20000);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });
