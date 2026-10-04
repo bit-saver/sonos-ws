@@ -301,5 +301,61 @@ describe('GroupingEngine', () => {
       for (const handle of players.values()) expect(handle.groups.setGroupMembers).not.toHaveBeenCalled();
       expect(state()).toEqual(['A:PLAYING', 'B:IDLE', 'C:PAUSED']);
     });
+
+    // Sonos plays the copy at once but answers only when the source group stops, here 20 s later.
+    function slowCopy(outcome: 'answers' | 'fails') {
+      householdGroups.createGroup.mockImplementationOnce((playerIds: string[], musicContextGroupId?: string) => {
+        const source = topology.groups.find((g) => g.id === musicContextGroupId)!;
+        topology.groups = [
+          ...without(playerIds),
+          { ...solo(playerIds[0]!), playerIds, playbackState: source.playbackState },
+        ];
+        return new Promise((resolve, reject) => setTimeout(() => {
+          topology.groups = topology.groups.map(
+            (g) => (g.id === source.id ? { ...g, playbackState: 'PLAYBACK_STATE_PAUSED' } : g));
+          if (outcome === 'answers') resolve({ group: {} });
+          else reject(new CommandError('ERROR_COMMAND_FAILED', 'late failure'));
+        }, 20000));
+      });
+    }
+
+    it('counts a copy as done once the target plays it, before Sonos answers', async () => {
+      startWith(makeGroup('G_A', ['A'], 'IDLE'), makeGroup('G_B', ['B', 'C'], 'PLAYING'));
+      slowCopy('answers');
+      vi.useFakeTimers();
+      try {
+        let done = false;
+        const grouping = engine.group([players.get('A')!], { transfer: true }).then(() => { done = true; });
+        await vi.advanceTimersByTimeAsync(3000);
+        expect(done).toBe(true);
+        expect(state()).toEqual(['A:PLAYING', 'B:PLAYING', 'C:IDLE']);
+        await vi.advanceTimersByTimeAsync(20000);
+        await grouping;
+        expect(state()).toEqual(['A:PLAYING', 'B:PAUSED', 'C:IDLE']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('logs a copy that fails after the target started playing', async () => {
+      const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      engine = new GroupingEngine(householdGroups, refreshTopology, players, log);
+      startWith(makeGroup('G_A', ['A'], 'IDLE'), makeGroup('G_B', ['B', 'C'], 'PLAYING'));
+      slowCopy('fails');
+      vi.useFakeTimers();
+      try {
+        await Promise.all([
+          engine.group([players.get('A')!], { transfer: true }),
+          vi.advanceTimersByTimeAsync(3000),
+        ]);
+        await vi.advanceTimersByTimeAsync(20000);
+        expect(log.warn).toHaveBeenCalledWith(
+          expect.stringContaining('failed after it started playing'),
+          expect.anything(),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });

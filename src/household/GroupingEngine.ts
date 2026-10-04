@@ -9,6 +9,8 @@ import { TopologySnapshot } from './TopologySnapshot.js';
 
 const POLL_INTERVAL_MS = 200;
 const POLL_DEADLINE_MS = 8000;
+/** How long a copy's answer is awaited before the target's playback is watched instead. */
+const COPY_ANSWER_GRACE_MS = 1000;
 
 /**
  * Manages Sonos speaker grouping operations with robust error handling.
@@ -289,7 +291,7 @@ export class GroupingEngine {
       }
       sourceMemberIds = sourceGroup.playerIds.filter((id) => id !== targetCoordinator.id);
       try {
-        await this.householdGroups.createGroup([targetCoordinator.id], sourceGroup.id);
+        await this.copyAudio(targetCoordinator, sourceGroup, sourceMemberIds);
       } catch (err) {
         if (!(err instanceof CommandError && err.code === 'ERROR_PLAYBACK_FAILED')) throw err;
         this.log.info(
@@ -332,6 +334,38 @@ export class GroupingEngine {
     for (const group of leftovers.values()) {
       await this.ungroupMembers(group);
     }
+  }
+
+  /**
+   * Copies a group's audio to the target. Sonos plays a copy within a second but may answer only once the source group
+   * stops (about 20 s for an Alexa-started Spotify session), so after a short wait the copy counts as done once the
+   * target coordinates a playing group without the source's other players. A refusal arrives at once and is thrown;
+   * a failure after the target started playing is logged.
+   */
+  private async copyAudio(target: PlayerHandle, sourceGroup: Group, sourceMemberIds: string[]): Promise<void> {
+    let answered = false;
+    const answer = this.householdGroups.createGroup([target.id], sourceGroup.id).finally(() => {
+      answered = true;
+    });
+    const grace = new Promise<void>((r) => setTimeout(r, COPY_ANSWER_GRACE_MS));
+    await Promise.race([answer, grace]);
+    if (answered) {
+      await answer;
+      return;
+    }
+
+    const playing = await Promise.race([
+      answer.then(() => null),
+      this.pollUntil((res) => answered || res.groups.some(
+        (g) => g.coordinatorId === target.id && g.playbackState === 'PLAYBACK_STATE_PLAYING'
+          && !g.playerIds.some((id) => sourceMemberIds.includes(id)),
+      )),
+    ]);
+    if (playing && !answered) {
+      answer.catch((err: unknown) => this.log.warn(`Copy to "${target.name}" failed after it started playing`, err));
+      return;
+    }
+    await answer;
   }
 
   /**
