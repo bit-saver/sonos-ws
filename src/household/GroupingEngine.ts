@@ -273,23 +273,26 @@ export class GroupingEngine {
     targetCoordinator: PlayerHandle,
     allMemberIds: string[],
   ): Promise<void> {
-    // Step 1: the target takes over the source group's audio. Sonos moves it: the source group is left paused,
-    // its other members still grouped.
-    let sourceMemberIds: string[] = [];
+    // Step 1: move the source group itself to the target. The group keeps its session, so nothing is copied;
+    // the players it drops end up solo and idle.
+    let dropped: string[] = [];
     await this.withRetry(async () => {
       const snap = await this.refreshAndSnapshot();
       const sourceGroup = snap.findGroupOf(source.id);
       if (!sourceGroup) {
         throw new SonosError(ErrorCode.GROUP_OPERATION_FAILED, `Cannot find group for source "${source.name}"`);
       }
-      sourceMemberIds = sourceGroup.playerIds;
-      await this.householdGroups.createGroup([targetCoordinator.id], sourceGroup.id);
+      const sourceCoord = this.players.get(sourceGroup.coordinatorId);
+      if (!sourceCoord) {
+        throw new SonosError(ErrorCode.GROUP_OPERATION_FAILED, `Cannot find coordinator for source group`);
+      }
+      dropped = sourceGroup.playerIds.filter((id) => id !== targetCoordinator.id);
+      await sourceCoord.groups.setGroupMembers([targetCoordinator.id]);
     });
 
-    // Step 2: wait for the target to coordinate its new group
-    const settled = await this.pollUntil(
-      (res) => res.groups.some((g) => g.coordinatorId === targetCoordinator.id),
-    );
+    // Step 2: wait until the target coordinates a group holding none of the players it replaced
+    const settled = await this.pollUntil((res) => res.groups.some((g) =>
+      g.coordinatorId === targetCoordinator.id && !g.playerIds.some((id) => dropped.includes(id))));
     if (!settled) {
       this.log.warn(`Audio transfer did not settle within ${POLL_DEADLINE_MS}ms`);
     }
@@ -297,17 +300,6 @@ export class GroupingEngine {
     // Step 3: add the other requested members
     if (allMemberIds.length > 1) {
       await this.simpleGroup(targetCoordinator, allMemberIds);
-    }
-
-    // Step 4: split what is left of the source group, so its members end up solo
-    const snap = await this.refreshAndSnapshot();
-    const leftovers = new Map<string, Group>();
-    for (const id of sourceMemberIds) {
-      const group = snap.findGroupOf(id);
-      if (group && group.playerIds.length > 1 && !allMemberIds.includes(id)) leftovers.set(group.id, group);
-    }
-    for (const group of leftovers.values()) {
-      await this.ungroupMembers(group);
     }
   }
 

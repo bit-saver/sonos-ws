@@ -94,7 +94,7 @@ export interface GroupOptions {
    * - A player handle reference: transfer audio from that specific player.
    *   Throws if that player is not actively playing or paused.
    *
-   * Moving audio leaves the source's group paused (Sonos's behavior).
+   * Moving audio leaves the players it moves away from solo and idle.
    */
   transfer?: boolean | { readonly id: string };
 }
