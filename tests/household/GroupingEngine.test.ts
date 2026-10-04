@@ -186,12 +186,54 @@ describe('GroupingEngine', () => {
       expect(state()).toEqual(['A+C:PLAYING', 'B:IDLE']);
     });
 
+    it('waits for the move to land before adding the other requested members', async () => {
+      startWith(makeGroup('G_A', ['A'], 'IDLE'), makeGroup('G_B', ['B', 'C'], 'PLAYING'));
+      // The move first shows as ( A* + B + C ); Sonos drops B and C only on the third topology read after it.
+      let reads: number | undefined;
+      const read = () => {
+        const seen = { ...topology };
+        if (reads !== undefined && ++reads === 3) {
+          const own = topology.groups.find((g) => g.coordinatorId === 'A')!;
+          modifyGroupMembers('A', [], ['B', 'C'].filter((id) => own.playerIds.includes(id)));
+        }
+        return Promise.resolve(seen);
+      };
+      householdGroups.getGroups.mockImplementation(read);
+      refreshTopology.mockImplementation(read);
+      vi.mocked(players.get('B')!.groups.setGroupMembers).mockImplementation(() => {
+        startWith(makeGroup('G_B', ['A', 'B', 'C'], 'PLAYING'));
+        reads = 0;
+        return Promise.resolve();
+      });
+      vi.useFakeTimers();
+      try {
+        const grouping = engine.group([players.get('A')!, players.get('C')!], { transfer: { id: 'B' } });
+        await vi.advanceTimersByTimeAsync(2000);
+        await grouping;
+      } finally {
+        vi.useRealTimers();
+      }
+
+      expect(state()).toEqual(['A+C:PLAYING', 'B:IDLE']);
+    });
+
+    it("sends the move from the source group's coordinator, not the named source", async () => {
+      startWith(makeGroup('G_C', ['C', 'B'], 'PLAYING'), makeGroup('G_A', ['A'], 'IDLE'));
+
+      await engine.group([players.get('A')!], { transfer: { id: 'B' } });
+
+      expect(players.get('C')!.groups.setGroupMembers).toHaveBeenCalledWith(['A']);
+      expect(players.get('B')!.groups.setGroupMembers).not.toHaveBeenCalled();
+      expect(state()).toEqual(['A:PLAYING', 'B:IDLE', 'C:IDLE']);
+    });
+
     it('leaves a playing target alone rather than pulling in paused audio from elsewhere', async () => {
       startWith(makeGroup('G_A', ['A'], 'PLAYING'), makeGroup('G_B', ['B'], 'IDLE'), makeGroup('G_C', ['C'], 'PAUSED'));
 
       await engine.group([players.get('A')!], { transfer: true });
 
       expect(householdGroups.createGroup).not.toHaveBeenCalled();
+      for (const handle of players.values()) expect(handle.groups.setGroupMembers).not.toHaveBeenCalled();
       expect(state()).toEqual(['A:PLAYING', 'B:IDLE', 'C:PAUSED']);
     });
 
@@ -201,6 +243,7 @@ describe('GroupingEngine', () => {
       await engine.group([players.get('A')!], { transfer: true });
 
       expect(householdGroups.createGroup.mock.calls).toEqual([[['B']]]);
+      for (const handle of players.values()) expect(handle.groups.setGroupMembers).not.toHaveBeenCalled();
       expect(state()).toEqual(['A:PLAYING', 'B:IDLE', 'C:PAUSED']);
     });
   });
