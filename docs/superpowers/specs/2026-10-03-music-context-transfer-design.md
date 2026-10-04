@@ -211,3 +211,50 @@ branch, time (a) a bare Spotify Connect session on `( Office + Bedroom )` starte
 (b) a Spotify playlist started from the app; both must end with the Arc playing and Office and Bedroom IDLE; then
 confirm the Arc's home-theater state (`homeTheater` options, TV input) is unchanged. Send the sha and both timings to
 House of Auto before deploying, and the next morning's result after.
+
+## 2026-10-04 second addendum: copy first, move only when Sonos refuses
+
+**Status:** Chosen by the owner 2026-10-04 09:31 CDT ("~3 s is always preferable to ~8 s unless there's no other
+choice"). Supersedes the first addendum's "one path".
+
+### Why
+
+The live check of the move (09:24, the owner's "Liked Songs" playlist on `( Office* + Bedroom )` → Arc, through
+`household.group([arc], { transfer: true })` on the built branch) took **8.4 s**: Sonos added the Arc and removed
+Office at once (09:25:00), then took **7 s** to hand the playing group's coordinator role to the Arc (09:25:07). The
+silent probes were fast only because nothing was playing. A copy needs no handoff: 0.5–3.3 s on 10-03. So the copy
+stays the first choice, and the move covers what Sonos refuses to copy. End state and home-theater options were right.
+
+### Design
+
+`transferAudio(source, targetCoordinator, allMemberIds)`:
+
+1. Inside `withRetry`: refresh, find the source's group and its coordinator handle (throw `GROUP_OPERATION_FAILED` if
+   either is missing), then `householdGroups.createGroup([target.id], sourceGroup.id)`. If Sonos answers
+   `ERROR_PLAYBACK_FAILED` (it cannot copy the session), log at info and send `setGroupMembers([target.id])` from the
+   source coordinator's handle instead. Any other error propagates.
+2. `pollUntil` the target coordinates a group holding none of the source group's other players (unchanged).
+3. `simpleGroup(target, allMemberIds)` when there are other members (unchanged).
+4. Split what is left of the source group (`ungroupMembers`, the 10-03 Step 4): a copy leaves its other members grouped;
+   after a move they are already solo, so this finds nothing.
+
+### Behavior
+
+- Copyable audio (a playlist started from the Spotify app): about 1–3 s; the source's coordinator is left PAUSED holding
+  the old audio, its other players solo; the guard keeps that paused leftover from replacing what a target plays.
+- Audio Sonos cannot copy (a bare Spotify Connect session): about 8 s with music playing; the players it leaves end IDLE.
+- `GroupOptions.transfer`'s JSDoc says both.
+
+### Testing
+
+The fake's `createGroup` refuses a music context from a group the test marks uncopyable, with a `CommandError`
+`ERROR_PLAYBACK_FAILED`. Tests: copy (one `createGroup` with the context, then the leftover split; end
+`A:PLAYING, B:PAUSED, C:IDLE`); refused copy → move (`setGroupMembers(['A'])` from the source coordinator; end
+`A:PLAYING, B:IDLE, C:IDLE`); target inside the source group (copy); explicit transfer to two speakers (copy); the
+settle-wait and coordinator-choice tests on the move path; another `CommandError` from the copy propagates with no move;
+the two guard tests. Mutation-verify: always rethrowing the copy's error fails the refused-copy test; falling back on any
+error fails the propagation test; dropping the leftover split fails the copy test.
+
+Live: the morning's own audio — Alexa playing "Mountain Morning Chill" on Bedroom, Office grouped in — moved to the Arc,
+which shows whether Alexa's session is copyable, plus the 09:24 playlist run above. Sha and timings to House of Auto
+before deploying.
