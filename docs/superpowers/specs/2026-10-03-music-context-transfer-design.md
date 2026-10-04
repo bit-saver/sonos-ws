@@ -3,8 +3,9 @@
 **Date:** 2026-10-03
 **Status:** Approved 2026-10-03 20:31 CDT; the owner asked to go straight through plan, build and deploy. Amended the
 same evening after the whole-branch review: the source is left paused, not idle, so the single-player source search
-gained a guard (Behavior). **Superseded 2026-10-04 by the addendum at the end:** the music context failed in
-production, and transfers now move the group with `setGroupMembers`.
+gained a guard (Behavior). **Superseded 2026-10-04 by the two addenda at the end:** the music context failed in
+production for a bare Spotify Connect session; transfers now copy first and move the group with `setGroupMembers` only
+when Sonos refuses the copy (second addendum).
 
 ## Why
 
