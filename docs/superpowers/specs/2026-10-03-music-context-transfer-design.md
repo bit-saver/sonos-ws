@@ -3,7 +3,8 @@
 **Date:** 2026-10-03
 **Status:** Approved 2026-10-03 20:31 CDT; the owner asked to go straight through plan, build and deploy. Amended the
 same evening after the whole-branch review: the source is left paused, not idle, so the single-player source search
-gained a guard (Behavior).
+gained a guard (Behavior). **Superseded 2026-10-04 by the addendum at the end:** the music context failed in
+production, and transfers now move the group with `setGroupMembers`.
 
 ## Why
 
@@ -144,3 +145,69 @@ target playing in under 5 s, end state three solo groups. After deploy: the next
 
 `npm run build`, merge to `main`, message the House of Auto session with the sha, diff summary and tests, then bump
 Neurotto's pin and deploy per memory `feedback_deploy_sonos_ws_to_neurotto`.
+
+## 2026-10-04 addendum: move the group, don't copy its audio
+
+**Status:** Approved by the owner 2026-10-04 08:19 CDT. House of Auto agreed and set the live check below.
+
+### What went wrong
+
+Deployed 10-03 21:08 (pin `2d3e324`). At 10-04 06:30 the morning `group arc` failed outright: `createGroup` answered in
+11 ms, nothing moved, and `group()` rejected; HA's retry at 06:30:33 failed the same way. Neurotto returns that error
+to its caller without logging it. Reproduced at 08:04 on the paused ( Office + Bedroom ) session:
+
+    ERROR_PLAYBACK_FAILED: "musicContextGroupId music context content cannot be copied"
+
+The 10-03 probes all moved a Spotify playlist context (`playlist.spotify.connect`), which Sonos copies. The morning group
+held a bare Spotify Connect session (`spotify.connect`), which it refuses to copy. The shuffle never copied anything,
+so it worked for that content, slowly. Neurotto was rolled back to `bbdafee` at 08:06 (Neurotto commit `97f0bd9`).
+
+### What Sonos offers instead
+
+`groups:1 setGroupMembers { playerIds }` on a group "replaces the players in an existing group with a new set". The
+group keeps its own session, so nothing is copied. Silent probes 10-04 on the paused bare session:
+
+| Command | Answered | Settled | End |
+|---|---|---|---|
+| `setGroupMembers([Office])` on `( Office + Bedroom* )` — target inside | 670 ms | < 1.9 s | Office* holds the session; Bedroom IDLE |
+| `setGroupMembers([Bedroom])` on solo Office — target outside | 283 ms | 0.72 s | Bedroom* holds the session; Office IDLE |
+
+The answer arrives once Sonos has added the target; it removes the others just after (a read at 0.51 s showed
+`( Office* + Bedroom )`). The players removed end IDLE — the end state the shuffle used to leave.
+
+### Design
+
+`transferAudio(source, targetCoordinator, allMemberIds)`:
+
+1. Inside `withRetry`: refresh, find the source's group (throw `GROUP_OPERATION_FAILED` if none), then the group's
+   coordinator handle sends `setGroupMembers([target.id])`.
+2. `pollUntil` the target coordinates a group holding none of the source group's other members; warn on timeout and
+   continue, as before.
+3. `simpleGroup(target, allMemberIds)` adds the other requested members, only when there are any.
+
+Removed: the music-context `createGroup` call and Step 4's leftover split — the players `setGroupMembers` removes end up
+solo and IDLE. Kept: `GroupsNamespace.createGroup`'s optional `musicContextGroupId` (a faithful wrapper of Sonos's field,
+unused by the engine); `ungroupMembers()` (still used by `ungroupAll()` and `group()`); the guard that paused audio
+elsewhere never replaces what the target already plays (paused groups also come from moves made in the Spotify app).
+The `GroupOptions.transfer` JSDoc line "moving audio leaves the source's group paused" becomes "the players the audio
+leaves end up idle".
+
+### Behavior
+
+- `group arc` from `( Office + Bedroom )`, any content: one command; end state `| Arc | Office | Bedroom |` with the Arc
+  playing and Office and Bedroom IDLE, as before 10-03.
+- Unchanged from the 10-03 design: which calls move audio, explicit-source validation, `ERROR_NO_CONTENT`.
+
+### Testing
+
+The fake topology in `tests/household/GroupingEngine.test.ts` gains `setGroupMembers` on each handle: the handle's group
+keeps its playback state and becomes exactly the named players, coordinated by the first; every player removed becomes
+a solo IDLE group. Transfer tests 1–3 expect one `setGroupMembers(['A'])` from the source coordinator, no `createGroup`,
+and IDLE leftovers; tests 5–6 (the guard) are unchanged. Mutation-verify: sending the move from the target's handle
+instead of the source coordinator's fails tests 1–3.
+
+Live, before deploying (House of Auto's conditions): through `household.group([Arc], { transfer: true })` on the built
+branch, time (a) a bare Spotify Connect session on `( Office + Bedroom )` started the way the morning music starts and
+(b) a Spotify playlist started from the app; both must end with the Arc playing and Office and Bedroom IDLE; then
+confirm the Arc's home-theater state (`homeTheater` options, TV input) is unchanged. Send the sha and both timings to
+House of Auto before deploying, and the next morning's result after.
