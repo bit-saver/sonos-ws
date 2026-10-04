@@ -4,7 +4,6 @@ import type { PlayerHandle } from '../player/PlayerHandle.js';
 import type { Logger } from '../util/logger.js';
 import { SonosError } from '../errors/SonosError.js';
 import { CommandError } from '../errors/CommandError.js';
-import { TimeoutError } from '../errors/TimeoutError.js';
 import { ErrorCode } from '../types/errors.js';
 import { TopologySnapshot } from './TopologySnapshot.js';
 
@@ -90,23 +89,20 @@ export class GroupingEngine {
     // 1. Source IS the desired coordinator → simpleGroup (audio preserved naturally)
     // 2. Source is a target member but not coordinator → make source the coordinator
     //    (overrides user preference to preserve audio)
-    // 3. Source is OUTSIDE the target group → transferAudio (shuffle to pull it in)
-    //    BUT: only if the source will end up in the final group. If the source
-    //    is not in memberIds, the shuffle would remove it entirely — which doesn't
-    //    reliably transfer audio (especially for the connected speaker). In that
-    //    case, just do simpleGroup without transfer.
+    // 3. Source is OUTSIDE the target group → transferAudio, but only for an explicit
+    //    source; audio that auto-resolve finds outside the group stays where it is.
     if (audioSource && audioSource.id !== coordinator.id) {
       if (memberIds.includes(audioSource.id)) {
         // Audio source is a target member — make it the coordinator to preserve audio.
         this.log.info(`Audio source "${audioSource.name}" is in target group — using as coordinator to preserve audio`);
         await this.simpleGroup(audioSource, memberIds);
       } else if (typeof options?.transfer === 'object') {
-        // Explicit transfer source outside the target group — shuffle to pull audio in.
+        // Explicit transfer source outside the target group — move its audio to the coordinator.
         this.log.info(`Transferring audio from "${audioSource.name}" to "${coordinator.name}"`);
         await this.transferAudio(audioSource, coordinator, memberIds);
       } else {
         // Auto-resolve found audio outside the target group.
-        // Don't shuffle — just group the requested speakers. Audio stays where it is.
+        // Don't transfer — just group the requested speakers. Audio stays where it is.
         this.log.info(`Audio on "${audioSource.name}" (not in target group) — grouping without transfer`);
         await this.simpleGroup(coordinator, memberIds);
       }
@@ -130,11 +126,7 @@ export class GroupingEngine {
     const snap = await this.refreshAndSnapshot();
     const multiPlayerGroups = snap.groups.filter((g) => g.playerIds.length > 1);
     for (const group of multiPlayerGroups) {
-      for (const playerId of group.playerIds) {
-        if (playerId !== group.coordinatorId) {
-          await this.householdGroups.createGroup([playerId]);
-        }
-      }
+      await this.ungroupMembers(group);
     }
     if (multiPlayerGroups.length > 0) {
       await this.refreshAndSnapshot();
@@ -281,60 +273,42 @@ export class GroupingEngine {
     targetCoordinator: PlayerHandle,
     allMemberIds: string[],
   ): Promise<void> {
-    // Step 1: Resolve the source group's actual coordinator
-    let snap = await this.refreshAndSnapshot();
-    const sourceGroup = snap.findGroupOf(source.id);
-    if (!sourceGroup) {
-      throw new SonosError(ErrorCode.GROUP_OPERATION_FAILED, `Cannot find group for source "${source.name}"`);
-    }
-
-    const sourceCoord = this.players.get(sourceGroup.coordinatorId);
-    if (!sourceCoord) {
-      throw new SonosError(ErrorCode.GROUP_OPERATION_FAILED, `Cannot find coordinator for source group`);
-    }
-
-    // Step 2: Add target to source's group
-    if (!sourceGroup.playerIds.includes(targetCoordinator.id)) {
-      await this.withRetry(async () => {
-        await sourceCoord.groups.modifyGroupMembers([targetCoordinator.id]);
-      });
-    }
-
-    // Step 3: Remove source coordinator (the shuffle) — always "fails"
-    try {
-      await sourceCoord.groups.modifyGroupMembers([], [sourceCoord.id]);
-    } catch (err) {
-      if (this.isExpectedShuffleError(err)) {
-        this.log.debug('Coordinator shuffle initiated (expected error)');
-      } else {
-        throw err;
+    // Step 1: the target takes over the source group's audio. Sonos moves it: the source group is left paused,
+    // its other members still grouped.
+    let sourceMemberIds: string[] = [];
+    await this.withRetry(async () => {
+      const snap = await this.refreshAndSnapshot();
+      const sourceGroup = snap.findGroupOf(source.id);
+      if (!sourceGroup) {
+        throw new SonosError(ErrorCode.GROUP_OPERATION_FAILED, `Cannot find group for source "${source.name}"`);
       }
-    }
+      sourceMemberIds = sourceGroup.playerIds;
+      await this.householdGroups.createGroup([targetCoordinator.id], sourceGroup.id);
+    });
 
-    // Step 4: Poll until target becomes coordinator
+    // Step 2: wait for the target to coordinate its new group
     const settled = await this.pollUntil(
       (res) => res.groups.some((g) => g.coordinatorId === targetCoordinator.id),
     );
     if (!settled) {
-      this.log.warn(`Coordinator shuffle did not settle within ${POLL_DEADLINE_MS}ms`);
+      this.log.warn(`Audio transfer did not settle within ${POLL_DEADLINE_MS}ms`);
     }
 
-    // Step 5: Refresh and add remaining members / remove bystanders
-    await this.withRetry(async () => {
-      const freshSnap = await this.refreshAndSnapshot();
-      const targetGroup = freshSnap.findGroupOf(targetCoordinator.id);
-      if (!targetGroup) return;
+    // Step 3: add the other requested members
+    if (allMemberIds.length > 1) {
+      await this.simpleGroup(targetCoordinator, allMemberIds);
+    }
 
-      const toAdd = allMemberIds.filter((id) => id !== targetCoordinator.id && !targetGroup.playerIds.includes(id));
-      const toRemove = targetGroup.playerIds.filter((id) => id !== targetCoordinator.id && !allMemberIds.includes(id));
-
-      if (toAdd.length > 0 || toRemove.length > 0) {
-        await targetCoordinator.groups.modifyGroupMembers(
-          toAdd.length > 0 ? toAdd : undefined,
-          toRemove.length > 0 ? toRemove : undefined,
-        );
-      }
-    });
+    // Step 4: split what is left of the source group, so its members end up solo
+    const snap = await this.refreshAndSnapshot();
+    const leftovers = new Map<string, Group>();
+    for (const id of sourceMemberIds) {
+      const group = snap.findGroupOf(id);
+      if (group && group.playerIds.length > 1 && !allMemberIds.includes(id)) leftovers.set(group.id, group);
+    }
+    for (const group of leftovers.values()) {
+      await this.ungroupMembers(group);
+    }
   }
 
   /**
@@ -380,11 +354,13 @@ export class GroupingEngine {
     }
   }
 
-  private isExpectedShuffleError(err: unknown): boolean {
-    return (
-      (err instanceof CommandError && err.code === 'groupCoordinatorChanged')
-      || err instanceof TimeoutError
-    );
+  /** Splits a group so every member is solo; the coordinator keeps the group and its audio. */
+  private async ungroupMembers(group: Group): Promise<void> {
+    for (const playerId of group.playerIds) {
+      if (playerId !== group.coordinatorId) {
+        await this.householdGroups.createGroup([playerId]);
+      }
+    }
   }
 
   private async refreshAndSnapshot(): Promise<TopologySnapshot> {

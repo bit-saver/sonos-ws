@@ -94,4 +94,87 @@ describe('GroupingEngine', () => {
     // Should call modifyGroupMembers on A's handle to add B
     expect(a.groups.modifyGroupMembers).toHaveBeenCalled();
   });
+
+  describe('transfer', () => {
+    // Sonos's grouping as a live probe observed it: createGroup with a music context moves the
+    // source group's audio to the new group and leaves the source group paused, its other members still grouped.
+    let nextGroup = 0;
+
+    function without(ids: string[]): Group[] {
+      return topology.groups
+        .map((g) => {
+          const rest = g.playerIds.filter((id) => !ids.includes(id));
+          return { ...g, playerIds: rest, coordinatorId: rest.includes(g.coordinatorId) ? g.coordinatorId : rest[0]! };
+        })
+        .filter((g) => g.playerIds.length > 0);
+    }
+
+    function createGroup(playerIds: string[], musicContextGroupId?: string) {
+      const source = topology.groups.find((g) => g.id === musicContextGroupId);
+      const rest = without(playerIds).map((g) =>
+        (g.id === source?.id ? { ...g, playbackState: 'PLAYBACK_STATE_PAUSED' } : g));
+      const playbackState = source?.playbackState ?? 'PLAYBACK_STATE_IDLE';
+      const created = { id: `G_new${++nextGroup}`, name: '', coordinatorId: playerIds[0]!, playerIds, playbackState };
+      topology.groups = [...rest, created];
+      return Promise.resolve({ group: {} });
+    }
+
+    function modifyGroupMembers(coordinatorId: string, add: string[] = [], remove: string[] = []) {
+      const groups = without(add);
+      const own = groups.find((g) => g.coordinatorId === coordinatorId)!;
+      own.playerIds = [...own.playerIds.filter((id) => !remove.includes(id)), ...add];
+      const solos = remove.map((id) => ({ id: `G_new${++nextGroup}`, name: '', coordinatorId: id, playerIds: [id],
+        playbackState: 'PLAYBACK_STATE_IDLE' }));
+      topology.groups = [...groups, ...solos];
+      return Promise.resolve({ group: {} });
+    }
+
+    const state = () => topology.groups
+      .map((g) => `${g.playerIds.join('+')}:${g.playbackState!.replace('PLAYBACK_STATE_', '')}`)
+      .sort();
+
+    const makeGroup = (id: string, playerIds: string[], playback: string): Group =>
+      ({ id, name: '', coordinatorId: playerIds[0]!, playerIds, playbackState: `PLAYBACK_STATE_${playback}` });
+
+    function startWith(...groups: Group[]) {
+      topology.groups = groups;
+    }
+
+    beforeEach(() => {
+      householdGroups.createGroup.mockImplementation(createGroup);
+      for (const [id, handle] of players) {
+        vi.mocked(handle.groups.modifyGroupMembers).mockImplementation(
+          (add?: string[], remove?: string[]) => modifyGroupMembers(id, add, remove) as any);
+      }
+    });
+
+    it('moves the audio to the target in one command and splits the source group it leaves behind', async () => {
+      startWith(makeGroup('G_A', ['A'], 'IDLE'), makeGroup('G_B', ['B', 'C'], 'PLAYING'));
+
+      await engine.group([players.get('A')!], { transfer: true });
+
+      expect(householdGroups.createGroup.mock.calls).toEqual([[['A'], 'G_B'], [['C']]]);
+      expect(players.get('B')!.groups.modifyGroupMembers).not.toHaveBeenCalled();
+      expect(state()).toEqual(['A:PLAYING', 'B:PAUSED', 'C:IDLE']);
+    });
+
+    it('pulls a target out of the playing group it belongs to', async () => {
+      startWith(makeGroup('G_B', ['B', 'A'], 'PLAYING'), makeGroup('G_C', ['C'], 'IDLE'));
+
+      await engine.group([players.get('A')!], { transfer: true });
+
+      expect(householdGroups.createGroup.mock.calls).toEqual([[['A'], 'G_B']]);
+      expect(state()).toEqual(['A:PLAYING', 'B:PAUSED', 'C:IDLE']);
+    });
+
+    it('adds the other requested members after an explicit transfer', async () => {
+      startWith(makeGroup('G_A', ['A'], 'IDLE'), makeGroup('G_B', ['B', 'C'], 'PLAYING'));
+
+      await engine.group([players.get('A')!, players.get('C')!], { transfer: { id: 'B' } });
+
+      expect(householdGroups.createGroup.mock.calls).toEqual([[['A'], 'G_B']]);
+      expect(players.get('A')!.groups.modifyGroupMembers).toHaveBeenCalledWith(['C'], undefined);
+      expect(state()).toEqual(['A+C:PLAYING', 'B:PAUSED']);
+    });
+  });
 });
