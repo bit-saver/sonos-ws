@@ -259,3 +259,46 @@ error fails the propagation test; dropping the leftover split fails the copy tes
 Live: the morning's own audio — Alexa playing "Mountain Morning Chill" on Bedroom, Office grouped in — moved to the Arc,
 which shows whether Alexa's session is copyable, plus the 09:24 playlist run above. Sha and timings to House of Auto
 before deploying.
+
+## 2026-10-04 third addendum: a copy counts as done once the target plays it
+
+**Status:** Chosen by the owner 2026-10-04 17:45 CDT (option A, over move-only).
+
+### Why
+
+The live check of the morning's own audio (12:24: Alexa playing "Mountain Morning Chill" on Bedroom, Office grouped in,
+`group([Arc], { transfer: true })` through the built branch) was copied, not refused — and took **20.7 s**. Neurotto's
+log: the Arc played at 12:24:32, a second after the command, but Sonos kept `( Office + Bedroom )` playing beside it and
+answered `createGroup` only when they paused at 12:24:52. The library waited for that answer. The 10-03 21 s outlier
+had the same shape. Copies of app-started playlists were answered in 0.5–3.3 s; the move took 8.4 s.
+
+### Design
+
+Step 1's copy (`copyAudio(target, sourceGroup, sourceMemberIds)`, a private helper of `GroupingEngine`):
+
+1. Send `createGroup([target], sourceGroup.id)` and wait up to `COPY_ANSWER_GRACE_MS` (1 s) for the answer. An answer —
+   success or refusal — ends the step as before (a refusal still falls back to the move).
+2. Without an answer by then, race it against `pollUntil` the target coordinates a PLAYING group holding none of the
+   source group's other players (the poll also ends when the answer arrives). If the target plays first, the copy is
+   done: Step 1 returns, and a later failure of the pending command is logged at warn, never thrown. If the poll gives
+   up first, wait for the answer.
+
+Steps 2–4 are unchanged; Step 4 now splits off the source group's other players while Sonos is still releasing the
+source group's coordinator.
+
+### Behavior
+
+- Morning `group arc` (Alexa session, copied): returns in about 1–2 s with the Arc playing and Office split off;
+  Bedroom keeps playing until Sonos releases it (up to ~20 s), then ends PAUSED.
+- A copy Sonos answers within 1 s, a refused copy, and the move: unchanged.
+- Edge: a target already PLAYING its own audio satisfies the poll at once, so Step 1 returns before the copy lands; Sonos
+  still completes it.
+
+### Testing
+
+Fake `createGroup` variants: one that applies the copy at once but answers 20 s later (the source still PLAYING until
+then); one that applies it and rejects 20 s later. Tests: `group()` resolves within 3 s of fake time with
+`A:PLAYING, B:PLAYING, C:IDLE`, and after the answer `B:PAUSED`; a late rejection is logged at warn and does not reject
+`group()`. Mutation: awaiting the answer instead of racing it fails the first test.
+
+Live: the Alexa morning case again → Arc, timed; House of Auto gets the timings and the sha before deploying.
