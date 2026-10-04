@@ -291,8 +291,11 @@ source group's coordinator.
 - Morning `group arc` (Alexa session, copied): returns in about 1–2 s with the Arc playing and Office split off;
   Bedroom keeps playing until Sonos releases it (up to ~20 s), then ends PAUSED.
 - A copy Sonos answers within 1 s, a refused copy, and the move: unchanged.
-- Edge: a target already PLAYING its own audio satisfies the poll at once, so Step 1 returns before the copy lands; Sonos
-  still completes it.
+- A target whose group is already PLAYING (the Arc on TV audio) skips the race and waits for Sonos's answer, as before:
+  the poll would be satisfied at once and could hide a late refusal. Mornings start with the Arc not playing.
+- While a copy's source is still being released, its coordinator is in a `releasing` set that both source searches skip,
+  so a second `group arc` in that window is a no-op instead of a second copy. The entry clears when Sonos answers (every
+  request settles within the 120 s request timeout).
 
 ### Testing
 
