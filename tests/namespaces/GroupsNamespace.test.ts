@@ -20,7 +20,7 @@ describe('GroupsNamespace.createGroup', () => {
 
     await new GroupsNamespace(contextWith(send)).createGroup(['A']);
 
-    expect(bodyOf(send)).toEqual({ playerIds: ['A'] });
+    expect(bodyOf(send)).toStrictEqual({ playerIds: ['A'] });
   });
 
   it('sends the group whose audio the new group takes over', async () => {
@@ -28,6 +28,6 @@ describe('GroupsNamespace.createGroup', () => {
 
     await new GroupsNamespace(contextWith(send)).createGroup(['A'], 'G_B');
 
-    expect(bodyOf(send)).toEqual({ playerIds: ['A'], musicContextGroupId: 'G_B' });
+    expect(bodyOf(send)).toStrictEqual({ playerIds: ['A'], musicContextGroupId: 'G_B' });
   });
 });
