@@ -914,10 +914,14 @@ var GroupsNamespace = class extends BaseNamespace {
    * Creates a new group from the specified player IDs.
    *
    * @param playerIds - The IDs of the players to include in the new group.
+   * @param musicContextGroupId - The group whose audio the new group takes over. Sonos moves it: that group is left
+   *   paused, its other members still grouped. Omitted, the new group has no audio.
    * @returns The newly created group's details.
    */
-  async createGroup(playerIds) {
-    const response = await this.send("createGroup", { playerIds });
+  async createGroup(playerIds, musicContextGroupId) {
+    const body = { playerIds };
+    if (musicContextGroupId) body.musicContextGroupId = musicContextGroupId;
+    const response = await this.send("createGroup", body);
     return this.body(response);
   }
   /**
@@ -1796,10 +1800,7 @@ var GroupingEngine = class {
       if (snap.isAloneInGroup(player.id)) return;
       const playerGroup = snap.findGroupOf(player.id);
       if (playerGroup && playerGroup.coordinatorId === player.id && playerGroup.playerIds.length > 1) {
-        const othersToRemove = playerGroup.playerIds.filter((id) => id !== player.id);
-        for (const otherId of othersToRemove) {
-          await this.householdGroups.createGroup([otherId]);
-        }
+        await this.ungroupMembers(playerGroup);
       } else {
         await this.householdGroups.createGroup([player.id]);
       }
@@ -1843,11 +1844,7 @@ var GroupingEngine = class {
     const snap = await this.refreshAndSnapshot();
     const multiPlayerGroups = snap.groups.filter((g) => g.playerIds.length > 1);
     for (const group of multiPlayerGroups) {
-      for (const playerId of group.playerIds) {
-        if (playerId !== group.coordinatorId) {
-          await this.householdGroups.createGroup([playerId]);
-        }
-      }
+      await this.ungroupMembers(group);
     }
     if (multiPlayerGroups.length > 0) {
       await this.refreshAndSnapshot();
@@ -1905,7 +1902,9 @@ var GroupingEngine = class {
       }
       return source;
     }
+    const ownState = snap.findGroupOf(excludePlayerId)?.playbackState;
     for (const phase of ["PLAYBACK_STATE_PLAYING", "PLAYBACK_STATE_PAUSED"]) {
+      if (phase === "PLAYBACK_STATE_PAUSED" && ownState === "PLAYBACK_STATE_PLAYING") break;
       for (const group of snap.groups) {
         if (group.playbackState === phase) {
           const coord = this.players.get(group.coordinatorId);
@@ -1941,48 +1940,34 @@ var GroupingEngine = class {
     });
   }
   async transferAudio(source, targetCoordinator, allMemberIds) {
-    let snap = await this.refreshAndSnapshot();
-    const sourceGroup = snap.findGroupOf(source.id);
-    if (!sourceGroup) {
-      throw new SonosError("GROUP_OPERATION_FAILED" /* GROUP_OPERATION_FAILED */, `Cannot find group for source "${source.name}"`);
-    }
-    const sourceCoord = this.players.get(sourceGroup.coordinatorId);
-    if (!sourceCoord) {
-      throw new SonosError("GROUP_OPERATION_FAILED" /* GROUP_OPERATION_FAILED */, `Cannot find coordinator for source group`);
-    }
-    if (!sourceGroup.playerIds.includes(targetCoordinator.id)) {
-      await this.withRetry(async () => {
-        await sourceCoord.groups.modifyGroupMembers([targetCoordinator.id]);
-      });
-    }
-    try {
-      await sourceCoord.groups.modifyGroupMembers([], [sourceCoord.id]);
-    } catch (err) {
-      if (this.isExpectedShuffleError(err)) {
-        this.log.debug("Coordinator shuffle initiated (expected error)");
-      } else {
-        throw err;
+    let sourceMemberIds = [];
+    await this.withRetry(async () => {
+      const snap2 = await this.refreshAndSnapshot();
+      const sourceGroup = snap2.findGroupOf(source.id);
+      if (!sourceGroup) {
+        throw new SonosError("GROUP_OPERATION_FAILED" /* GROUP_OPERATION_FAILED */, `Cannot find group for source "${source.name}"`);
       }
-    }
+      sourceMemberIds = sourceGroup.playerIds;
+      await this.householdGroups.createGroup([targetCoordinator.id], sourceGroup.id);
+    });
     const settled = await this.pollUntil(
       (res) => res.groups.some((g) => g.coordinatorId === targetCoordinator.id)
     );
     if (!settled) {
-      this.log.warn(`Coordinator shuffle did not settle within ${POLL_DEADLINE_MS}ms`);
+      this.log.warn(`Audio transfer did not settle within ${POLL_DEADLINE_MS}ms`);
     }
-    await this.withRetry(async () => {
-      const freshSnap = await this.refreshAndSnapshot();
-      const targetGroup = freshSnap.findGroupOf(targetCoordinator.id);
-      if (!targetGroup) return;
-      const toAdd = allMemberIds.filter((id) => id !== targetCoordinator.id && !targetGroup.playerIds.includes(id));
-      const toRemove = targetGroup.playerIds.filter((id) => id !== targetCoordinator.id && !allMemberIds.includes(id));
-      if (toAdd.length > 0 || toRemove.length > 0) {
-        await targetCoordinator.groups.modifyGroupMembers(
-          toAdd.length > 0 ? toAdd : void 0,
-          toRemove.length > 0 ? toRemove : void 0
-        );
-      }
-    });
+    if (allMemberIds.length > 1) {
+      await this.simpleGroup(targetCoordinator, allMemberIds);
+    }
+    const snap = await this.refreshAndSnapshot();
+    const leftovers = /* @__PURE__ */ new Map();
+    for (const id of sourceMemberIds) {
+      const group = snap.findGroupOf(id);
+      if (group && group.playerIds.length > 1 && !allMemberIds.includes(id)) leftovers.set(group.id, group);
+    }
+    for (const group of leftovers.values()) {
+      await this.ungroupMembers(group);
+    }
   }
   /**
    * Polls getGroups until a condition is met or the deadline passes.
@@ -2020,8 +2005,13 @@ var GroupingEngine = class {
       }
     }
   }
-  isExpectedShuffleError(err) {
-    return err instanceof CommandError && err.code === "groupCoordinatorChanged" || err instanceof TimeoutError;
+  /** Splits a group so every member is solo; the coordinator keeps the group and its audio. */
+  async ungroupMembers(group) {
+    for (const playerId of group.playerIds) {
+      if (playerId !== group.coordinatorId) {
+        await this.householdGroups.createGroup([playerId]);
+      }
+    }
   }
   async refreshAndSnapshot() {
     const response = await this.refreshTopology();
