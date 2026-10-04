@@ -9,7 +9,7 @@ import { TopologySnapshot } from './TopologySnapshot.js';
 
 const POLL_INTERVAL_MS = 200;
 const POLL_DEADLINE_MS = 8000;
-/** How long a copy's answer is awaited before the target's playback is watched instead. */
+/** How long a copy's answer is awaited before the target's playback is watched. */
 const COPY_ANSWER_GRACE_MS = 1000;
 
 /**
@@ -337,18 +337,19 @@ export class GroupingEngine {
   }
 
   /**
-   * Copies a group's audio to the target. Sonos plays a copy within a second but may answer only once the source group
-   * stops (about 20 s for an Alexa-started Spotify session), so after a short wait the copy counts as done once the
-   * target coordinates a playing group without the source's other players. A refusal arrives at once and is thrown;
-   * a failure after the target started playing is logged.
+   * Copies a group's audio to the target. Sonos may answer only once the source group stops, so after a wait the target
+   * playing counts as done. A refusal throws; a late failure is logged.
    */
   private async copyAudio(target: PlayerHandle, sourceGroup: Group, sourceMemberIds: string[]): Promise<void> {
     let answered = false;
     const answer = this.householdGroups.createGroup([target.id], sourceGroup.id).finally(() => {
       answered = true;
     });
-    const grace = new Promise<void>((r) => setTimeout(r, COPY_ANSWER_GRACE_MS));
-    await Promise.race([answer, grace]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const grace = new Promise<void>((r) => {
+      timer = setTimeout(r, COPY_ANSWER_GRACE_MS);
+    });
+    await Promise.race([answer, grace]).finally(() => clearTimeout(timer));
     if (answered) {
       await answer;
       return;
@@ -356,10 +357,13 @@ export class GroupingEngine {
 
     const playing = await Promise.race([
       answer.then(() => null),
-      this.pollUntil((res) => answered || res.groups.some(
-        (g) => g.coordinatorId === target.id && g.playbackState === 'PLAYBACK_STATE_PLAYING'
-          && !g.playerIds.some((id) => sourceMemberIds.includes(id)),
-      )),
+      this.pollUntil(
+        (res) => answered || res.groups.some(
+          (g) => g.coordinatorId === target.id
+            && g.playbackState === 'PLAYBACK_STATE_PLAYING'
+            && !g.playerIds.some((id) => sourceMemberIds.includes(id)),
+        ),
+      ),
     ]);
     if (playing && !answered) {
       answer.catch((err: unknown) => this.log.warn(`Copy to "${target.name}" failed after it started playing`, err));
