@@ -273,9 +273,10 @@ export class GroupingEngine {
     targetCoordinator: PlayerHandle,
     allMemberIds: string[],
   ): Promise<void> {
-    // Step 1: move the source group itself to the target. The group keeps its session, so nothing is copied;
-    // the players it removes end up solo and idle.
-    let removed: string[] = [];
+    // Step 1: the target takes over the source group's audio. A copy is fastest and leaves the source group paused;
+    // Sonos cannot copy some sessions (a bare Spotify Connect one), and then the group itself moves to the target,
+    // leaving the players it removes idle.
+    let sourceMembers: string[] = [];
     await this.withRetry(async () => {
       const snap = await this.refreshAndSnapshot();
       const sourceGroup = snap.findGroupOf(source.id);
@@ -286,14 +287,22 @@ export class GroupingEngine {
       if (!sourceCoord) {
         throw new SonosError(ErrorCode.GROUP_OPERATION_FAILED, `Cannot find coordinator for source "${source.name}"`);
       }
-      removed = sourceGroup.playerIds.filter((id) => id !== targetCoordinator.id);
-      await sourceCoord.groups.setGroupMembers([targetCoordinator.id]);
+      sourceMembers = sourceGroup.playerIds.filter((id) => id !== targetCoordinator.id);
+      try {
+        await this.householdGroups.createGroup([targetCoordinator.id], sourceGroup.id);
+      } catch (err) {
+        if (!(err instanceof CommandError && err.code === 'ERROR_PLAYBACK_FAILED')) throw err;
+        this.log.info(
+          `Sonos cannot copy the audio of "${source.name}"; moving its group to "${targetCoordinator.name}"`,
+        );
+        await sourceCoord.groups.setGroupMembers([targetCoordinator.id]);
+      }
     });
 
-    // Step 2: wait until the target coordinates a group holding none of the removed players
+    // Step 2: wait until the target coordinates a group holding none of the source group's other players
     const settled = await this.pollUntil(
       (res) => res.groups.some(
-        (g) => g.coordinatorId === targetCoordinator.id && !g.playerIds.some((id) => removed.includes(id)),
+        (g) => g.coordinatorId === targetCoordinator.id && !g.playerIds.some((id) => sourceMembers.includes(id)),
       ),
     );
     if (!settled) {
@@ -303,6 +312,17 @@ export class GroupingEngine {
     // Step 3: add the other requested members
     if (allMemberIds.length > 1) {
       await this.simpleGroup(targetCoordinator, allMemberIds);
+    }
+
+    // Step 4: split what is left of the source group; a copy leaves its other players grouped, a move leaves them solo
+    const snap = await this.refreshAndSnapshot();
+    const leftovers = new Map<string, Group>();
+    for (const id of sourceMembers) {
+      const group = snap.findGroupOf(id);
+      if (group && group.playerIds.length > 1 && !allMemberIds.includes(id)) leftovers.set(group.id, group);
+    }
+    for (const group of leftovers.values()) {
+      await this.ungroupMembers(group);
     }
   }
 

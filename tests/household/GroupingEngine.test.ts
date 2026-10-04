@@ -6,6 +6,7 @@ import type { PlayerHandle } from '../../src/player/PlayerHandle.js';
 import type { Logger } from '../../src/util/logger.js';
 import { noopLogger } from '../../src/util/logger.js';
 import { SonosError } from '../../src/errors/SonosError.js';
+import { CommandError } from '../../src/errors/CommandError.js';
 
 function makeTopology(groups: Group[], players: Player[]): GroupsResponse {
   return { groups, players };
@@ -97,9 +98,13 @@ describe('GroupingEngine', () => {
   });
 
   describe('transfer', () => {
-    // Sonos's grouping as live probes observed it: setGroupMembers keeps the group's session and makes the group
-    // exactly the named players, coordinated by the first; every player it removes ends up solo and idle.
+    // Sonos's grouping as live probes observed it: createGroup with a music context copies the source group's audio
+    // into the new group and leaves the source group paused, its other players still grouped — unless Sonos cannot
+    // copy that session, which it refuses with ERROR_PLAYBACK_FAILED. setGroupMembers keeps the group's session and
+    // makes the group exactly the named players, coordinated by the first; every player it removes ends up solo, idle.
     let nextGroup = 0;
+    // Groups whose audio Sonos cannot copy (a bare Spotify Connect session).
+    let uncopyable: string[] = [];
 
     function without(ids: string[]): Group[] {
       return topology.groups
@@ -114,8 +119,15 @@ describe('GroupingEngine', () => {
       id: `G_new${++nextGroup}`, name: '', coordinatorId: id, playerIds: [id], playbackState: 'PLAYBACK_STATE_IDLE',
     });
 
-    function createGroup(playerIds: string[]) {
-      topology.groups = [...without(playerIds), { ...solo(playerIds[0]!), playerIds }];
+    function createGroup(playerIds: string[], musicContextGroupId?: string) {
+      const source = topology.groups.find((g) => g.id === musicContextGroupId);
+      if (source && uncopyable.includes(source.id)) {
+        return Promise.reject(new CommandError('ERROR_PLAYBACK_FAILED', 'music context content cannot be copied'));
+      }
+      const rest = without(playerIds)
+        .map((g) => (g.id === source?.id ? { ...g, playbackState: 'PLAYBACK_STATE_PAUSED' } : g));
+      const playbackState = source?.playbackState ?? 'PLAYBACK_STATE_IDLE';
+      topology.groups = [...rest, { ...solo(playerIds[0]!), playerIds, playbackState }];
       return Promise.resolve({ group: {} });
     }
 
@@ -147,6 +159,7 @@ describe('GroupingEngine', () => {
     }
 
     beforeEach(() => {
+      uncopyable = [];
       householdGroups.createGroup.mockImplementation(createGroup);
       for (const [id, handle] of players) {
         vi.mocked(handle.groups.modifyGroupMembers).mockImplementation(
@@ -156,14 +169,35 @@ describe('GroupingEngine', () => {
       }
     });
 
-    it('moves the source group to the target in one command, leaving the players it removes idle', async () => {
+    it('copies the audio to the target and splits the source group it leaves behind', async () => {
       startWith(makeGroup('G_A', ['A'], 'IDLE'), makeGroup('G_B', ['B', 'C'], 'PLAYING'));
 
       await engine.group([players.get('A')!], { transfer: true });
 
+      expect(householdGroups.createGroup.mock.calls).toEqual([[['A'], 'G_B'], [['C']]]);
+      for (const handle of players.values()) expect(handle.groups.setGroupMembers).not.toHaveBeenCalled();
+      expect(state()).toEqual(['A:PLAYING', 'B:PAUSED', 'C:IDLE']);
+    });
+
+    it('moves the source group when Sonos cannot copy its audio', async () => {
+      startWith(makeGroup('G_A', ['A'], 'IDLE'), makeGroup('G_B', ['B', 'C'], 'PLAYING'));
+      uncopyable = ['G_B'];
+
+      await engine.group([players.get('A')!], { transfer: true });
+
+      expect(householdGroups.createGroup.mock.calls).toEqual([[['A'], 'G_B']]);
       expect(players.get('B')!.groups.setGroupMembers).toHaveBeenCalledWith(['A']);
-      expect(householdGroups.createGroup).not.toHaveBeenCalled();
       expect(state()).toEqual(['A:PLAYING', 'B:IDLE', 'C:IDLE']);
+    });
+
+    it('lets any other error from the copy through, without moving', async () => {
+      startWith(makeGroup('G_A', ['A'], 'IDLE'), makeGroup('G_B', ['B', 'C'], 'PLAYING'));
+      householdGroups.createGroup.mockRejectedValueOnce(new CommandError('ERROR_INVALID_PARAMETER', 'bad group'));
+
+      await expect(engine.group([players.get('A')!], { transfer: true })).rejects.toMatchObject({
+        code: 'ERROR_INVALID_PARAMETER',
+      });
+      for (const handle of players.values()) expect(handle.groups.setGroupMembers).not.toHaveBeenCalled();
     });
 
     it('pulls a target out of the playing group it belongs to', async () => {
@@ -171,9 +205,8 @@ describe('GroupingEngine', () => {
 
       await engine.group([players.get('A')!], { transfer: true });
 
-      expect(players.get('B')!.groups.setGroupMembers).toHaveBeenCalledWith(['A']);
-      expect(householdGroups.createGroup).not.toHaveBeenCalled();
-      expect(state()).toEqual(['A:PLAYING', 'B:IDLE', 'C:IDLE']);
+      expect(householdGroups.createGroup.mock.calls).toEqual([[['A'], 'G_B']]);
+      expect(state()).toEqual(['A:PLAYING', 'B:PAUSED', 'C:IDLE']);
     });
 
     it('adds the other requested members after an explicit transfer', async () => {
@@ -181,13 +214,14 @@ describe('GroupingEngine', () => {
 
       await engine.group([players.get('A')!, players.get('C')!], { transfer: { id: 'B' } });
 
-      expect(players.get('B')!.groups.setGroupMembers).toHaveBeenCalledWith(['A']);
+      expect(householdGroups.createGroup.mock.calls).toEqual([[['A'], 'G_B']]);
       expect(players.get('A')!.groups.modifyGroupMembers).toHaveBeenCalledWith(['C'], undefined);
-      expect(state()).toEqual(['A+C:PLAYING', 'B:IDLE']);
+      expect(state()).toEqual(['A+C:PLAYING', 'B:PAUSED']);
     });
 
     it('waits for the move to land before adding the other requested members', async () => {
       startWith(makeGroup('G_A', ['A'], 'IDLE'), makeGroup('G_B', ['B', 'C'], 'PLAYING'));
+      uncopyable = ['G_B'];
       // The move first shows as ( A* + B + C ); Sonos drops B and C only on the third topology read after it.
       let reads: number | undefined;
       const read = () => {
@@ -219,6 +253,7 @@ describe('GroupingEngine', () => {
 
     it("sends the move from the source group's coordinator, not the named source", async () => {
       startWith(makeGroup('G_C', ['C', 'B'], 'PLAYING'), makeGroup('G_A', ['A'], 'IDLE'));
+      uncopyable = ['G_C'];
 
       await engine.group([players.get('A')!], { transfer: { id: 'B' } });
 
