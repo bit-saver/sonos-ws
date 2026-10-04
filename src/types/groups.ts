@@ -87,7 +87,7 @@ export interface GroupOptions {
   /**
    * Audio transfer behavior:
    * - `undefined` (default): just group; if a target player is playing, its audio continues.
-   * - `true`: find the active audio and move it, preferring `PLAYING` over `PAUSED`.
+   * - `true`: find the active audio and transfer it, preferring `PLAYING` over `PAUSED`.
    *   For one player, looks on the other speakers; paused audio never replaces what that player is already playing.
    *   For several players, checks them first (by array order), then the rest of the household;
    *   audio found outside them stays where it is. If nothing is playing anywhere, groups silently.

@@ -39,7 +39,7 @@ export class GroupingEngine {
     if (playerHandles.length === 1) {
       const player = playerHandles[0]!;
 
-      // With transfer: find audio elsewhere and move it to this player
+      // With transfer: find audio elsewhere and transfer it to this player
       if (options?.transfer) {
         // For single-player transfer, look for audio on OTHER speakers.
         // Skip the target player itself — if it's already playing, that's
@@ -94,7 +94,7 @@ export class GroupingEngine {
         this.log.info(`Audio source "${audioSource.name}" is in target group — using as coordinator to preserve audio`);
         await this.simpleGroup(audioSource, memberIds);
       } else if (typeof options?.transfer === 'object') {
-        // Explicit transfer source outside the target group — move its audio to the coordinator.
+        // Explicit transfer source outside the target group — transfer its audio to the coordinator.
         this.log.info(`Transferring audio from "${audioSource.name}" to "${coordinator.name}"`);
         await this.transferAudio(audioSource, coordinator, memberIds);
       } else {
@@ -293,7 +293,7 @@ export class GroupingEngine {
       } catch (err) {
         if (!(err instanceof CommandError && err.code === 'ERROR_PLAYBACK_FAILED')) throw err;
         this.log.info(
-          `Sonos cannot copy the audio of "${source.name}"; moving its group to "${targetCoordinator.name}"`,
+          `Sonos cannot copy "${source.name}" (${err.message}); moving its group to "${targetCoordinator.name}"`,
         );
         await sourceCoord.groups.setGroupMembers([targetCoordinator.id]);
       }
@@ -314,12 +314,20 @@ export class GroupingEngine {
       await this.simpleGroup(targetCoordinator, allMemberIds);
     }
 
-    // Step 4: split what is left of the source group; a copy leaves its other players grouped, a move leaves them solo
+    // Step 4: split what is left of the source group; a copy leaves its other players grouped, a move leaves them solo.
+    // A move still handing over its coordinator role shows the source group holding the target: leave it to finish.
     const snap = await this.refreshAndSnapshot();
     const leftovers = new Map<string, Group>();
     for (const id of sourceMemberIds) {
       const group = snap.findGroupOf(id);
-      if (group && group.playerIds.length > 1 && !allMemberIds.includes(id)) leftovers.set(group.id, group);
+      if (
+        group
+        && group.playerIds.length > 1
+        && !allMemberIds.includes(id)
+        && !group.playerIds.includes(targetCoordinator.id)
+      ) {
+        leftovers.set(group.id, group);
+      }
     }
     for (const group of leftovers.values()) {
       await this.ungroupMembers(group);

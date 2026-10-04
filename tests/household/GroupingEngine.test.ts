@@ -261,6 +261,27 @@ describe('GroupingEngine', () => {
       expect(state()).toEqual(['A:PLAYING', 'B:IDLE', 'C:IDLE']);
     });
 
+    it('leaves a move that outlasts the settle wait alone', async () => {
+      startWith(makeGroup('G_A', ['A'], 'IDLE'), makeGroup('G_B', ['B', 'C'], 'PLAYING'));
+      uncopyable = ['G_B'];
+      // The move is still handing the coordinator role over: B coordinates ( B + A ), C is already out.
+      vi.mocked(players.get('B')!.groups.setGroupMembers).mockImplementation(() => {
+        startWith(makeGroup('G_B', ['B', 'A'], 'PLAYING'), makeGroup('G_C', ['C'], 'IDLE'));
+        return Promise.resolve();
+      });
+      vi.useFakeTimers();
+      try {
+        const grouping = engine.group([players.get('A')!], { transfer: true });
+        await vi.advanceTimersByTimeAsync(9000);
+        await grouping;
+      } finally {
+        vi.useRealTimers();
+      }
+
+      expect(householdGroups.createGroup.mock.calls).toEqual([[['A'], 'G_B']]);
+      expect(state()).toEqual(['B+A:PLAYING', 'C:IDLE']);
+    });
+
     it('leaves a playing target alone rather than pulling in paused audio from elsewhere', async () => {
       startWith(makeGroup('G_A', ['A'], 'PLAYING'), makeGroup('G_B', ['B'], 'IDLE'), makeGroup('G_C', ['C'], 'PAUSED'));
 
