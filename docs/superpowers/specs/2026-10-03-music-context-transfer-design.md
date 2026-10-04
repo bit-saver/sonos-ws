@@ -1,7 +1,9 @@
 # Audio Transfer by Music Context — Design
 
 **Date:** 2026-10-03
-**Status:** Approved 2026-10-03 20:31 CDT; the owner asked to go straight through plan, build and deploy.
+**Status:** Approved 2026-10-03 20:31 CDT; the owner asked to go straight through plan, build and deploy. Amended the
+same evening after the whole-branch review: the source is left paused, not idle, so the single-player source search
+gained a guard (Behavior).
 
 ## Why
 
@@ -90,7 +92,17 @@ The case-3 comment in `group()` loses its shuffle rationale; the behavior it des
 ## Behavior
 
 - `group arc` from `( Office + Bedroom )`: about 3.3 s for the transfer plus one `createGroup` to split the leftovers
-  (0.3–0.6 s per command in the probe). End state as today: `| Arc | Office | Bedroom |`, the Arc playing.
+  (0.3–0.6 s per command in the probe). Through the library on the built branch: 913 ms, 530 ms (paused audio) and
+  once 21 s — the Arc played within a second, but Sonos held the `createGroup` answer until the old group paused 20 s
+  later; the next run was 913 ms.
+- End state: `| Arc | Office | Bedroom |`, the Arc playing, as today — except that the source group's coordinator is
+  left PAUSED holding the old audio, where the shuffle left it idle (`| 󰐊 Arc | 󰏤 Office | Bedroom |` in Neurotto's
+  log). Home Assistant's player for that speaker reads paused.
+- So that a paused leftover never undoes a transfer, the single-player source search skips PAUSED groups when the
+  target is already PLAYING: a repeated `group arc` is a no-op, and `group arc` from a playing `( Arc* + Bedroom )`
+  only splits Bedroom off. Before, both would have moved the paused audio onto the Arc and stopped its music.
+- A paused leftover can still be chosen when nothing plays: `group eras` with both idle except a paused Office makes
+  Office its coordinator, carrying the old audio (case 2), where Bedroom used to coordinate.
 - Unchanged: which calls move audio. `group eras` while the Arc plays still groups without moving the audio (case 3);
   `group arc`, `group office`, `group bedroom` move it. Explicit-source validation and `ERROR_NO_CONTENT` are unchanged.
 - If Sonos refuses a `createGroup` with a music context, `group()` rejects with Sonos's `CommandError`.
@@ -118,8 +130,12 @@ state, and the source group keeps the rest, PAUSED.
 3. Explicit transfer to two speakers, `group([Arc, Office], { transfer: { id: Bedroom } })` from
    `( Bedroom* + Office )`: `createGroup(['Arc'], <id>)`, then the Arc's group adds Office; no leftover split.
 4. `GroupsNamespace.createGroup` sends `musicContextGroupId` only when given.
+5. A playing target with only paused audio elsewhere: no command.
+6. A playing `( Arc* + Bedroom )` with Office paused, `group([Arc], { transfer: true })`: only
+   `createGroup(['Bedroom'])`.
 
-Mutation-verify: dropping the music context fails test 1; skipping the leftover split fails test 1.
+Mutation-verify: dropping the music context fails tests 1–3; skipping the leftover split fails test 1; dropping the
+guard fails tests 5 and 6.
 
 Live, before deploy: time the built library's `group([Arc], { transfer: true })` from a playing `( Office + Bedroom )` —
 target playing in under 5 s, end state three solo groups. After deploy: the next morning `group arc` in Neurotto's log.
