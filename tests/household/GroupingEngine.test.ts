@@ -99,11 +99,10 @@ describe('GroupingEngine', () => {
 
   describe('transfer', () => {
     // Sonos's grouping as live probes observed it: createGroup with a music context copies the source group's audio
-    // into the new group and leaves the source group paused, its other players still grouped — unless Sonos cannot
-    // copy that session, which it refuses with ERROR_PLAYBACK_FAILED. setGroupMembers keeps the group's session and
-    // makes the group exactly the named players, coordinated by the first; every player it removes ends up solo, idle.
+    // and pauses that group; setGroupMembers makes the group exactly the named players, and each one it removes
+    // ends up solo and idle.
     let nextGroup = 0;
-    // Groups whose audio Sonos cannot copy (a bare Spotify Connect session).
+    // Groups whose audio Sonos cannot copy (a bare Spotify Connect session); createGroup refuses them.
     let uncopyable: string[] = [];
 
     function without(ids: string[]): Group[] {
