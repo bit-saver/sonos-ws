@@ -24,7 +24,9 @@ export class GroupsNamespace extends BaseNamespace {
    *
    * @param playerIds - The IDs of the players to include in the new group.
    * @param musicContextGroupId - The group whose audio the new group takes over. Sonos moves it: that group is left
-   *   paused, its other members still grouped. Omitted, the new group has no audio.
+   *   paused, its other members still grouped. Omitted, the new group has no audio. Sonos refuses content it cannot
+   *   copy: a bare Spotify Connect session answers `ERROR_PLAYBACK_FAILED` ("music context content cannot be copied").
+   *   `setGroupMembers` moves a group's audio whatever it holds.
    * @returns The newly created group's details.
    */
   async createGroup(playerIds: string[], musicContextGroupId?: string): Promise<CreateGroupResponse> {
@@ -53,7 +55,8 @@ export class GroupsNamespace extends BaseNamespace {
   }
 
   /**
-   * Replaces all members of the current group with the specified players.
+   * Replaces all members of the current group with the specified players. The group keeps its own audio; the players
+   * left out end up solo and idle.
    *
    * @param playerIds - The player IDs that should form the new membership of the group.
    */
