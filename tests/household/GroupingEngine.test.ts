@@ -98,7 +98,7 @@ describe('GroupingEngine', () => {
 
   describe('transfer', () => {
     // Sonos's grouping as live probes observed it: setGroupMembers keeps the group's session and makes the group
-    // exactly the named players, coordinated by the first; every player it drops ends up solo and idle.
+    // exactly the named players, coordinated by the first; every player it removes ends up solo and idle.
     let nextGroup = 0;
 
     function without(ids: string[]): Group[] {
@@ -129,9 +129,9 @@ describe('GroupingEngine', () => {
 
     function setGroupMembers(coordinatorId: string, playerIds: string[]) {
       const own = topology.groups.find((g) => g.coordinatorId === coordinatorId)!;
-      const dropped = own.playerIds.filter((id) => !playerIds.includes(id));
+      const removed = own.playerIds.filter((id) => !playerIds.includes(id));
       const moved = { ...own, coordinatorId: playerIds[0]!, playerIds };
-      topology.groups = [...without(playerIds).filter((g) => g.id !== own.id), moved, ...dropped.map(solo)];
+      topology.groups = [...without(playerIds).filter((g) => g.id !== own.id), moved, ...removed.map(solo)];
       return Promise.resolve();
     }
 
@@ -156,7 +156,7 @@ describe('GroupingEngine', () => {
       }
     });
 
-    it('moves the source group to the target in one command, leaving the players it drops idle', async () => {
+    it('moves the source group to the target in one command, leaving the players it removes idle', async () => {
       startWith(makeGroup('G_A', ['A'], 'IDLE'), makeGroup('G_B', ['B', 'C'], 'PLAYING'));
 
       await engine.group([players.get('A')!], { transfer: true });

@@ -274,8 +274,8 @@ export class GroupingEngine {
     allMemberIds: string[],
   ): Promise<void> {
     // Step 1: move the source group itself to the target. The group keeps its session, so nothing is copied;
-    // the players it drops end up solo and idle.
-    let dropped: string[] = [];
+    // the players it removes end up solo and idle.
+    let removed: string[] = [];
     await this.withRetry(async () => {
       const snap = await this.refreshAndSnapshot();
       const sourceGroup = snap.findGroupOf(source.id);
@@ -284,15 +284,18 @@ export class GroupingEngine {
       }
       const sourceCoord = this.players.get(sourceGroup.coordinatorId);
       if (!sourceCoord) {
-        throw new SonosError(ErrorCode.GROUP_OPERATION_FAILED, `Cannot find coordinator for source group`);
+        throw new SonosError(ErrorCode.GROUP_OPERATION_FAILED, `Cannot find coordinator for source "${source.name}"`);
       }
-      dropped = sourceGroup.playerIds.filter((id) => id !== targetCoordinator.id);
+      removed = sourceGroup.playerIds.filter((id) => id !== targetCoordinator.id);
       await sourceCoord.groups.setGroupMembers([targetCoordinator.id]);
     });
 
-    // Step 2: wait until the target coordinates a group holding none of the players it replaced
-    const settled = await this.pollUntil((res) => res.groups.some((g) =>
-      g.coordinatorId === targetCoordinator.id && !g.playerIds.some((id) => dropped.includes(id))));
+    // Step 2: wait until the target coordinates a group holding none of the removed players
+    const settled = await this.pollUntil(
+      (res) => res.groups.some(
+        (g) => g.coordinatorId === targetCoordinator.id && !g.playerIds.some((id) => removed.includes(id)),
+      ),
+    );
     if (!settled) {
       this.log.warn(`Audio transfer did not settle within ${POLL_DEADLINE_MS}ms`);
     }
