@@ -23,10 +23,14 @@ export class GroupsNamespace extends BaseNamespace {
    * Creates a new group from the specified player IDs.
    *
    * @param playerIds - The IDs of the players to include in the new group.
+   * @param musicContextGroupId - The group whose audio the new group takes over. Sonos moves it: that group is left
+   *   paused, its other members still grouped. Omitted, the new group has no audio.
    * @returns The newly created group's details.
    */
-  async createGroup(playerIds: string[]): Promise<CreateGroupResponse> {
-    const response = await this.send('createGroup', { playerIds });
+  async createGroup(playerIds: string[], musicContextGroupId?: string): Promise<CreateGroupResponse> {
+    const body: Record<string, unknown> = { playerIds };
+    if (musicContextGroupId) body.musicContextGroupId = musicContextGroupId;
+    const response = await this.send('createGroup', body);
     return this.body(response) as unknown as CreateGroupResponse;
   }
 
