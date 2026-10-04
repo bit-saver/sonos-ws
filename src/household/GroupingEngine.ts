@@ -218,7 +218,10 @@ export class GroupingEngine {
     }
 
     // Auto-resolve — scan all groups, skipping the excluded player's group
+    const ownState = snap.findGroupOf(excludePlayerId)?.playbackState;
     for (const phase of ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_PAUSED'] as const) {
+      // Paused audio elsewhere never replaces what the player is already playing.
+      if (phase === 'PLAYBACK_STATE_PAUSED' && ownState === 'PLAYBACK_STATE_PLAYING') break;
       for (const group of snap.groups) {
         if (group.playbackState === phase) {
           const coord = this.players.get(group.coordinatorId);

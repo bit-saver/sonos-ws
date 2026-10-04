@@ -176,5 +176,23 @@ describe('GroupingEngine', () => {
       expect(players.get('A')!.groups.modifyGroupMembers).toHaveBeenCalledWith(['C'], undefined);
       expect(state()).toEqual(['A+C:PLAYING', 'B:PAUSED']);
     });
+
+    it('leaves a playing target alone rather than pulling in paused audio from elsewhere', async () => {
+      startWith(makeGroup('G_A', ['A'], 'PLAYING'), makeGroup('G_B', ['B'], 'IDLE'), makeGroup('G_C', ['C'], 'PAUSED'));
+
+      await engine.group([players.get('A')!], { transfer: true });
+
+      expect(householdGroups.createGroup).not.toHaveBeenCalled();
+      expect(state()).toEqual(['A:PLAYING', 'B:IDLE', 'C:PAUSED']);
+    });
+
+    it("splits a playing target's own group instead of pulling in paused audio", async () => {
+      startWith(makeGroup('G_A', ['A', 'B'], 'PLAYING'), makeGroup('G_C', ['C'], 'PAUSED'));
+
+      await engine.group([players.get('A')!], { transfer: true });
+
+      expect(householdGroups.createGroup.mock.calls).toEqual([[['B']]]);
+      expect(state()).toEqual(['A:PLAYING', 'B:IDLE', 'C:PAUSED']);
+    });
   });
 });

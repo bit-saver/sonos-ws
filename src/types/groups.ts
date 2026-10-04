@@ -87,11 +87,14 @@ export interface GroupOptions {
   /**
    * Audio transfer behavior:
    * - `undefined` (default): just group; if a target player is playing, its audio continues.
-   * - `true`: automatically find the active audio source and transfer it.
-   *   Checks target players first (by array order), then the rest of the household.
-   *   Prefers `PLAYING` over `PAUSED`. If nothing is playing anywhere, groups silently.
+   * - `true`: find the active audio and move it, preferring `PLAYING` over `PAUSED`.
+   *   For one player, looks on the other speakers; paused audio never replaces what that player is already playing.
+   *   For several players, checks them first (by array order), then the rest of the household;
+   *   audio found outside them stays where it is. If nothing is playing anywhere, groups silently.
    * - A player handle reference: transfer audio from that specific player.
    *   Throws if that player is not actively playing or paused.
+   *
+   * Moving audio leaves the source's group paused (Sonos's behavior).
    */
   transfer?: boolean | { readonly id: string };
 }
