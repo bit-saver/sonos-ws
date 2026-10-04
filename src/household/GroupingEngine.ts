@@ -60,10 +60,7 @@ export class GroupingEngine {
       // createGroup causes the remaining members to inherit the audio source.
       const playerGroup = snap.findGroupOf(player.id);
       if (playerGroup && playerGroup.coordinatorId === player.id && playerGroup.playerIds.length > 1) {
-        const othersToRemove = playerGroup.playerIds.filter((id) => id !== player.id);
-        for (const otherId of othersToRemove) {
-          await this.householdGroups.createGroup([otherId]);
-        }
+        await this.ungroupMembers(playerGroup);
       } else {
         await this.householdGroups.createGroup([player.id]);
       }
