@@ -357,5 +357,23 @@ describe('GroupingEngine', () => {
         vi.useRealTimers();
       }
     });
+
+    it('skips a source Sonos is still releasing after a copy', async () => {
+      startWith(makeGroup('G_A', ['A'], 'IDLE'), makeGroup('G_B', ['B', 'C'], 'PLAYING'));
+      slowCopy('answers');
+      vi.useFakeTimers();
+      try {
+        await Promise.all([
+          engine.group([players.get('A')!], { transfer: true }),
+          vi.advanceTimersByTimeAsync(3000),
+        ]);
+        await engine.group([players.get('A')!], { transfer: true });
+        expect(householdGroups.createGroup.mock.calls).toEqual([[['A'], 'G_B'], [['C']]]);
+        expect(state()).toEqual(['A:PLAYING', 'B:PLAYING', 'C:IDLE']);
+        await vi.advanceTimersByTimeAsync(20000);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });

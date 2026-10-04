@@ -20,6 +20,9 @@ const COPY_ANSWER_GRACE_MS = 1000;
  * {@link withRetry} for automatic recovery from stale-groupId errors.
  */
 export class GroupingEngine {
+  /** Coordinators of source groups whose audio already plays on a transfer's target, until Sonos answers the copy. */
+  private readonly releasing = new Set<string>();
+
   constructor(
     private readonly householdGroups: GroupsNamespace,
     private readonly refreshTopology: () => Promise<GroupsResponse>,
@@ -225,7 +228,7 @@ export class GroupingEngine {
       // Paused audio elsewhere never replaces what the player is already playing.
       if (phase === 'PLAYBACK_STATE_PAUSED' && ownState === 'PLAYBACK_STATE_PLAYING') break;
       for (const group of snap.groups) {
-        if (group.playbackState === phase) {
+        if (group.playbackState === phase && !this.releasing.has(group.coordinatorId)) {
           const coord = this.players.get(group.coordinatorId);
           if (coord && coord.id !== excludePlayerId) return coord;
         }
@@ -366,7 +369,10 @@ export class GroupingEngine {
       ),
     ]);
     if (playing && !answered) {
-      answer.catch((err: unknown) => this.log.warn(`Copy to "${target.name}" failed after it started playing`, err));
+      this.releasing.add(sourceGroup.coordinatorId);
+      answer
+        .catch((err: unknown) => this.log.warn(`Copy to "${target.name}" failed after it started playing`, err))
+        .finally(() => this.releasing.delete(sourceGroup.coordinatorId));
       return;
     }
     await answer;
