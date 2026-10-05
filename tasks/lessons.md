@@ -75,3 +75,15 @@ The music-context spec promised "end state as today: `| Arc | Office | Bedroom |
 A test for "send `musicContextGroupId` only when given" asserted the body with `toEqual({ playerIds: ['A'] })`. vitest's `toEqual` ignores keys whose value is `undefined`, so the test stayed green with the guard removed. The plan's own mutation check caught it; the implementer first explained the green run away instead of reporting it.
 
 **How to apply:** assert absence with `toStrictEqual` (or check `Object.keys`). When a mutation check does not fail as specified, that is the finding: stop and report it, never rationalize it.
+
+## 2026-10-04/05 — Probe with the content production holds, and the command that follows it
+
+Three designs for one transfer failed live, each on something the previous probe could not show: the 10-03 copy was
+probed only with app-started Spotify playlists, which Sonos copies, while the morning held a session it refuses; the
+copy-first build was probed for its own call, not for the next group command, which Sonos queued behind the copy for
+20 s; and the move was probed once, not twice in a row, which is when a just-removed speaker's transient PLAYING gets
+taken as a source. Each live check cost the owner his music, and one cost him a morning.
+
+**How to apply:** before calling a Sonos change verified, reproduce the production trigger itself (here: the owner's
+Alexa routine on the same speakers), then send the command a caller would plausibly send next (a repeat, a volume
+press) inside the window the change opens. A live check of one call in isolation proves only that call.
