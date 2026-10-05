@@ -94,8 +94,8 @@ export interface GroupOptions {
    * - A player handle reference: transfer audio from that specific player.
    *   Throws if that player is not actively playing or paused.
    *
-   * Audio Sonos can copy leaves the source's group paused; audio it cannot copy (a bare Spotify Connect session)
-   * moves with its group, leaving those players idle.
+   * Transferring moves the source group itself to the target; the call returns once Sonos has added the target, and
+   * the players the audio leaves end up solo and idle when Sonos finishes the handoff a few seconds later.
    */
   transfer?: boolean | { readonly id: string };
 }

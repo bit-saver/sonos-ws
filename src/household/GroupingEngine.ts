@@ -9,8 +9,6 @@ import { TopologySnapshot } from './TopologySnapshot.js';
 
 const POLL_INTERVAL_MS = 200;
 const POLL_DEADLINE_MS = 8000;
-/** How long a copy's answer is awaited before the target's playback is watched. */
-const COPY_ANSWER_GRACE_MS = 1000;
 
 /**
  * Manages Sonos speaker grouping operations with robust error handling.
@@ -20,9 +18,6 @@ const COPY_ANSWER_GRACE_MS = 1000;
  * {@link withRetry} for automatic recovery from stale-groupId errors.
  */
 export class GroupingEngine {
-  /** Coordinators of source groups whose audio already plays on a transfer's target, until Sonos answers the copy. */
-  private readonly releasing = new Set<string>();
-
   constructor(
     private readonly householdGroups: GroupsNamespace,
     private readonly refreshTopology: () => Promise<GroupsResponse>,
@@ -178,14 +173,14 @@ export class GroupingEngine {
       // If a target player is in a playing group, return the coordinator of that group.
       for (const player of targetPlayers) {
         const group = snap.findGroupOf(player.id);
-        if (group?.playbackState === phase && !this.releasing.has(group.coordinatorId)) {
+        if (group?.playbackState === phase) {
           const coord = this.players.get(group.coordinatorId);
           return coord ?? player;
         }
       }
       // Then check rest of household
       for (const group of snap.groups) {
-        if (group.playbackState === phase && !this.releasing.has(group.coordinatorId)) {
+        if (group.playbackState === phase) {
           const coord = this.players.get(group.coordinatorId);
           if (coord && !targetIds.has(coord.id)) return coord;
         }
@@ -228,7 +223,7 @@ export class GroupingEngine {
       // Paused audio elsewhere never replaces what the player is already playing.
       if (phase === 'PLAYBACK_STATE_PAUSED' && ownState === 'PLAYBACK_STATE_PLAYING') break;
       for (const group of snap.groups) {
-        if (group.playbackState === phase && !this.releasing.has(group.coordinatorId)) {
+        if (group.playbackState === phase) {
           const coord = this.players.get(group.coordinatorId);
           if (coord && coord.id !== excludePlayerId) return coord;
         }
@@ -278,10 +273,9 @@ export class GroupingEngine {
     targetCoordinator: PlayerHandle,
     allMemberIds: string[],
   ): Promise<void> {
-    // Step 1: the target takes over the source group's audio. A copy is fastest and leaves the source group paused;
-    // Sonos cannot copy some sessions (a bare Spotify Connect one), and then the group itself moves to the target,
-    // leaving the players it removes idle.
-    let sourceMemberIds: string[] = [];
+    // Step 1: move the source group itself to the target. The group keeps its session, so nothing is copied. Sonos
+    // adds the target at once and hands it the coordinator role seconds later; the players it removes end up idle.
+    let removed: string[] = [];
     await this.withRetry(async () => {
       const snap = await this.refreshAndSnapshot();
       const sourceGroup = snap.findGroupOf(source.id);
@@ -292,23 +286,18 @@ export class GroupingEngine {
       if (!sourceCoord) {
         throw new SonosError(ErrorCode.GROUP_OPERATION_FAILED, `Cannot find coordinator for source "${source.name}"`);
       }
-      sourceMemberIds = sourceGroup.playerIds.filter((id) => id !== targetCoordinator.id);
-      const targetPlaying = snap.findGroupOf(targetCoordinator.id)?.playbackState === 'PLAYBACK_STATE_PLAYING';
-      try {
-        await this.copyAudio(targetCoordinator, sourceGroup, sourceMemberIds, targetPlaying);
-      } catch (err) {
-        if (!(err instanceof CommandError && err.code === 'ERROR_PLAYBACK_FAILED')) throw err;
-        this.log.info(
-          `Sonos cannot copy "${source.name}" (${err.message}); moving its group to "${targetCoordinator.name}"`,
-        );
-        await sourceCoord.groups.setGroupMembers([targetCoordinator.id]);
-      }
+      removed = sourceGroup.playerIds.filter((id) => id !== targetCoordinator.id);
+      await sourceCoord.groups.setGroupMembers([targetCoordinator.id]);
     });
 
-    // Step 2: wait until the target coordinates a group holding none of the source group's other players
+    // A single target already plays in sync; the handoff finishes on Sonos's side.
+    if (allMemberIds.length === 1) return;
+
+    // Step 2: before adding the other requested members, wait until the target coordinates a group holding none of
+    // the removed players
     const settled = await this.pollUntil(
       (res) => res.groups.some(
-        (g) => g.coordinatorId === targetCoordinator.id && !g.playerIds.some((id) => sourceMemberIds.includes(id)),
+        (g) => g.coordinatorId === targetCoordinator.id && !g.playerIds.some((id) => removed.includes(id)),
       ),
     );
     if (!settled) {
@@ -316,76 +305,7 @@ export class GroupingEngine {
     }
 
     // Step 3: add the other requested members
-    if (allMemberIds.length > 1) {
-      await this.simpleGroup(targetCoordinator, allMemberIds);
-    }
-
-    // Step 4: split what is left of the source group; a copy leaves its other players grouped, a move leaves them solo.
-    // A move still handing over its coordinator role shows the source group holding the target: leave it to finish.
-    const snap = await this.refreshAndSnapshot();
-    const leftovers = new Map<string, Group>();
-    for (const id of sourceMemberIds) {
-      const group = snap.findGroupOf(id);
-      if (
-        group
-        && group.playerIds.length > 1
-        && !allMemberIds.includes(id)
-        && !group.playerIds.includes(targetCoordinator.id)
-      ) {
-        leftovers.set(group.id, group);
-      }
-    }
-    for (const group of leftovers.values()) {
-      await this.ungroupMembers(group);
-    }
-  }
-
-  /**
-   * Copies a group's audio to the target. Sonos may answer only once the source group stops, so after a wait the target
-   * playing counts as done, unless it already played before the copy. A refusal throws; a late failure is logged.
-   */
-  private async copyAudio(
-    target: PlayerHandle,
-    sourceGroup: Group,
-    sourceMemberIds: string[],
-    targetPlaying: boolean,
-  ): Promise<void> {
-    let answered = false;
-    const answer = this.householdGroups.createGroup([target.id], sourceGroup.id).finally(() => {
-      answered = true;
-    });
-    if (targetPlaying) {
-      await answer;
-      return;
-    }
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const grace = new Promise<void>((r) => {
-      timer = setTimeout(r, COPY_ANSWER_GRACE_MS);
-    });
-    await Promise.race([answer, grace]).finally(() => clearTimeout(timer));
-    if (answered) {
-      await answer;
-      return;
-    }
-
-    const playing = await Promise.race([
-      answer.then(() => null),
-      this.pollUntil(
-        (res) => answered || res.groups.some(
-          (g) => g.coordinatorId === target.id
-            && g.playbackState === 'PLAYBACK_STATE_PLAYING'
-            && !g.playerIds.some((id) => sourceMemberIds.includes(id)),
-        ),
-      ),
-    ]);
-    if (playing && !answered) {
-      this.releasing.add(sourceGroup.coordinatorId);
-      answer
-        .catch((err: unknown) => this.log.warn(`Copy to "${target.name}" failed after it started playing`, err))
-        .finally(() => this.releasing.delete(sourceGroup.coordinatorId));
-      return;
-    }
-    await answer;
+    await this.simpleGroup(targetCoordinator, allMemberIds);
   }
 
   /**
