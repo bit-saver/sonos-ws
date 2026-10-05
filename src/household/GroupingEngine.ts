@@ -273,8 +273,8 @@ export class GroupingEngine {
     targetCoordinator: PlayerHandle,
     allMemberIds: string[],
   ): Promise<void> {
-    // Step 1: move the source group itself to the target. The group keeps its session, so nothing is copied. Sonos
-    // adds the target at once and hands it the coordinator role seconds later; the players it removes end up idle.
+    // Step 1: move the source group itself to the target. Sonos adds the target at once and hands it the coordinator
+    // role seconds later; the players it removes end up idle.
     let removed: string[] = [];
     await this.withRetry(async () => {
       const snap = await this.refreshAndSnapshot();
@@ -293,8 +293,7 @@ export class GroupingEngine {
     // A single target already plays in sync; the handoff finishes on Sonos's side.
     if (allMemberIds.length === 1) return;
 
-    // Step 2: before adding the other requested members, wait until the target coordinates a group holding none of
-    // the removed players
+    // Step 2: wait until the target coordinates a group holding none of the removed players
     const settled = await this.pollUntil(
       (res) => res.groups.some(
         (g) => g.coordinatorId === targetCoordinator.id && !g.playerIds.some((id) => removed.includes(id)),
