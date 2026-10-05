@@ -972,8 +972,10 @@ var GroupsNamespace = class extends BaseNamespace {
    * Creates a new group from the specified player IDs.
    *
    * @param playerIds - The IDs of the players to include in the new group.
-   * @param musicContextGroupId - The group whose audio the new group takes over. Sonos moves it: that group is left
-   *   paused, its other members still grouped. Omitted, the new group has no audio.
+   * @param musicContextGroupId - The group whose audio the new group takes over. Sonos copies it: that group is left
+   *   paused, its other members still grouped. Omitted, the new group has no audio. Sonos refuses content it cannot
+   *   copy: a bare Spotify Connect session answers `ERROR_PLAYBACK_FAILED` ("music context content cannot be copied").
+   *   `setGroupMembers` moves the group itself, so its session needs no copy.
    * @returns The newly created group's details.
    */
   async createGroup(playerIds, musicContextGroupId) {
@@ -997,7 +999,8 @@ var GroupsNamespace = class extends BaseNamespace {
     return this.body(response);
   }
   /**
-   * Replaces all members of the current group with the specified players.
+   * Replaces all members of the current group with the specified players. The group keeps its own audio; the players
+   * left out end up solo and idle.
    *
    * @param playerIds - The player IDs that should form the new membership of the group.
    */
@@ -1998,34 +2001,30 @@ var GroupingEngine = class {
     });
   }
   async transferAudio(source, targetCoordinator, allMemberIds) {
-    let sourceMemberIds = [];
+    let removed = [];
     await this.withRetry(async () => {
-      const snap2 = await this.refreshAndSnapshot();
-      const sourceGroup = snap2.findGroupOf(source.id);
+      const snap = await this.refreshAndSnapshot();
+      const sourceGroup = snap.findGroupOf(source.id);
       if (!sourceGroup) {
         throw new SonosError("GROUP_OPERATION_FAILED" /* GROUP_OPERATION_FAILED */, `Cannot find group for source "${source.name}"`);
       }
-      sourceMemberIds = sourceGroup.playerIds;
-      await this.householdGroups.createGroup([targetCoordinator.id], sourceGroup.id);
+      const sourceCoord = this.players.get(sourceGroup.coordinatorId);
+      if (!sourceCoord) {
+        throw new SonosError("GROUP_OPERATION_FAILED" /* GROUP_OPERATION_FAILED */, `Cannot find coordinator for source "${source.name}"`);
+      }
+      removed = sourceGroup.playerIds.filter((id) => id !== targetCoordinator.id);
+      await sourceCoord.groups.setGroupMembers([targetCoordinator.id]);
     });
+    if (allMemberIds.length === 1) return;
     const settled = await this.pollUntil(
-      (res) => res.groups.some((g) => g.coordinatorId === targetCoordinator.id)
+      (res) => res.groups.some(
+        (g) => g.coordinatorId === targetCoordinator.id && !g.playerIds.some((id) => removed.includes(id))
+      )
     );
     if (!settled) {
       this.log.warn(`Audio transfer did not settle within ${POLL_DEADLINE_MS}ms`);
     }
-    if (allMemberIds.length > 1) {
-      await this.simpleGroup(targetCoordinator, allMemberIds);
-    }
-    const snap = await this.refreshAndSnapshot();
-    const leftovers = /* @__PURE__ */ new Map();
-    for (const id of sourceMemberIds) {
-      const group = snap.findGroupOf(id);
-      if (group && group.playerIds.length > 1 && !allMemberIds.includes(id)) leftovers.set(group.id, group);
-    }
-    for (const group of leftovers.values()) {
-      await this.ungroupMembers(group);
-    }
+    await this.simpleGroup(targetCoordinator, allMemberIds);
   }
   /**
    * Polls getGroups until a condition is met or the deadline passes.

@@ -360,14 +360,15 @@ interface GroupOptions {
     /**
      * Audio transfer behavior:
      * - `undefined` (default): just group; if a target player is playing, its audio continues.
-     * - `true`: find the active audio and move it, preferring `PLAYING` over `PAUSED`.
+     * - `true`: find the active audio and transfer it, preferring `PLAYING` over `PAUSED`.
      *   For one player, looks on the other speakers; paused audio never replaces what that player is already playing.
      *   For several players, checks them first (by array order), then the rest of the household;
      *   audio found outside them stays where it is. If nothing is playing anywhere, groups silently.
      * - A player handle reference: transfer audio from that specific player.
      *   Throws if that player is not actively playing or paused.
      *
-     * Moving audio leaves the source's group paused (Sonos's behavior).
+     * Transferring moves the source group itself to the target; the call returns once Sonos has added the target, and
+     * the players the audio leaves end up solo and idle when Sonos finishes the handoff a few seconds later.
      */
     transfer?: boolean | {
         readonly id: string;
@@ -857,8 +858,10 @@ declare class GroupsNamespace extends BaseNamespace {
      * Creates a new group from the specified player IDs.
      *
      * @param playerIds - The IDs of the players to include in the new group.
-     * @param musicContextGroupId - The group whose audio the new group takes over. Sonos moves it: that group is left
-     *   paused, its other members still grouped. Omitted, the new group has no audio.
+     * @param musicContextGroupId - The group whose audio the new group takes over. Sonos copies it: that group is left
+     *   paused, its other members still grouped. Omitted, the new group has no audio. Sonos refuses content it cannot
+     *   copy: a bare Spotify Connect session answers `ERROR_PLAYBACK_FAILED` ("music context content cannot be copied").
+     *   `setGroupMembers` moves the group itself, so its session needs no copy.
      * @returns The newly created group's details.
      */
     createGroup(playerIds: string[], musicContextGroupId?: string): Promise<CreateGroupResponse>;
@@ -871,7 +874,8 @@ declare class GroupsNamespace extends BaseNamespace {
      */
     modifyGroupMembers(playerIdsToAdd?: string[], playerIdsToRemove?: string[]): Promise<ModifyGroupResponse>;
     /**
-     * Replaces all members of the current group with the specified players.
+     * Replaces all members of the current group with the specified players. The group keeps its own audio; the players
+     * left out end up solo and idle.
      *
      * @param playerIds - The player IDs that should form the new membership of the group.
      */
