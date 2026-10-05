@@ -3,9 +3,9 @@
 **Date:** 2026-10-03
 **Status:** Approved 2026-10-03 20:31 CDT; the owner asked to go straight through plan, build and deploy. Amended the
 same evening after the whole-branch review: the source is left paused, not idle, so the single-player source search
-gained a guard (Behavior). **Superseded 2026-10-04 by the two addenda at the end:** the music context failed in
-production for a bare Spotify Connect session; transfers now copy first and move the group with `setGroupMembers` only
-when Sonos refuses the copy (second addendum).
+gained a guard (Behavior). **Superseded by the 2026-10-05 fourth addendum at the end:** transfers only move the source
+group with `setGroupMembers`; the copy failed in production and in later live checks (the addenda in between are the
+history).
 
 ## Why
 
@@ -337,7 +337,8 @@ checks of it, and the leftover split. Kept: the guard that paused audio elsewher
 
 ### Behavior
 
-- `group arc` from `( Office + Bedroom )`, any content: the call returns in about a second; the Arc plays at once,
+- `group arc` from `( Office + Bedroom )`, any content: the call returns once Sonos answers (5.5 s live on 10-05 — Sonos
+  may answer only near the end of the handoff); the Arc plays at once,
   Office goes quiet at once, Bedroom drops out when Sonos finishes the handoff (~7 s). End: `| Arc | Office | Bedroom |`,
   the Arc playing, Office and Bedroom IDLE.
 - A command during the handoff: volume goes to the group's coordinator, so it reaches the Arc's group; a second
