@@ -305,3 +305,50 @@ then); one that applies it and rejects 20 s later. Tests: `group()` resolves wit
 `group()`. Mutation: awaiting the answer instead of racing it fails the first test.
 
 Live: the Alexa morning case again → Arc, timed; House of Auto gets the timings and the sha before deploying.
+
+## 2026-10-05 fourth addendum: move only, done once Sonos has added the target
+
+**Status:** Chosen by the owner 2026-10-05 12:12 CDT. Supersedes the second and third addenda (copy first).
+
+### Why
+
+Live check 2026-10-05 12:04, the Alexa morning playlist on `( Office + Bedroom )` → Arc through the copy-first build:
+the copy played on the Arc within a second, but Sonos held every later group command behind it — Step 4's
+`createGroup([Office])`, sent at 3.9 s, was answered only when Sonos released Bedroom at 24 s, so `group()` took
+23.7 s. Splitting Office off mid-release also left Office playing a session of its own; a second `group arc` then took
+it as a source, Sonos refused to copy it, and moving Office's group onto the Arc silenced the Arc. Copying a Spotify
+Connect session has now failed live three ways (refused, ~20 s holds, odd leftovers); moving the group was clean every
+time (10-04 09:24: the Arc joined the playing group at once and played in sync, Office dropped at once, Bedroom handed
+the coordinator role over at 7 s).
+
+### Design
+
+`transferAudio(source, targetCoordinator, allMemberIds)`:
+
+1. Inside `withRetry`: refresh, find the source's group and its coordinator handle (throw `GROUP_OPERATION_FAILED` if
+   either is missing), then the coordinator sends `setGroupMembers([target.id])`.
+2. A single target is done: Sonos has added it, it plays in sync, and the coordinator handoff finishes on Sonos's side.
+3. Several targets: `pollUntil` the target coordinates a group holding none of the source group's other players, then
+   `simpleGroup(target, allMemberIds)`.
+
+Removed: the music-context copy, `copyAudio()`, `COPY_ANSWER_GRACE_MS`, the `releasing` set and both source searches'
+checks of it, and the leftover split. Kept: the guard that paused audio elsewhere never replaces what the target plays;
+`createGroup`'s optional `musicContextGroupId` (an accurate wrapper, unused by the engine).
+
+### Behavior
+
+- `group arc` from `( Office + Bedroom )`, any content: the call returns in about a second; the Arc plays at once,
+  Office goes quiet at once, Bedroom drops out when Sonos finishes the handoff (~7 s). End: `| Arc | Office | Bedroom |`,
+  the Arc playing, Office and Bedroom IDLE.
+- A command during the handoff: volume goes to the group's coordinator, so it reaches the Arc's group; a second
+  `group arc` finds the Arc inside Bedroom's playing group and sends the same `setGroupMembers([Arc])` again.
+
+### Testing
+
+Restore the move-era transfer tests (dad3c58) minus the copy-path ones: one `setGroupMembers(['A'])` from the source
+coordinator with IDLE leftovers; target inside the source group; explicit transfer to two speakers; waiting for the move
+to land before adding members; sending from the source group's coordinator; the two guard tests. New: a single-target
+transfer returns while the handoff is still in progress (`( B* + A )`), with no poll. Mutation-verify each guard.
+
+Live: the morning content again (Office + Bedroom playing) → Arc through `household.group`, timed; a second
+`group([Arc])` and a volume read during the handoff; the end state after it; the Arc's home-theater options unchanged.
