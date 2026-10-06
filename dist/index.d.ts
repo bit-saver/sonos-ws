@@ -1294,9 +1294,13 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     private _lastTopologyKey;
     /** Group IDs, coordinators and members, without playback state. */
     private _lastMembershipKey;
+    /** A re-send Sonos refused mid-move; the next topology read retries it, whether or not membership changed. */
+    private resendAfterMove;
     /** Pending debounced topology re-read, armed by groups:1 events. */
     private topologyRefreshTimer;
     private readonly setup;
+    /** Handles whose diagnostics were declared; a re-run of first-connect setup skips them, so an unsubscribe() stays. */
+    private readonly diagnosed;
     /** Per-speaker WebSocket connections. Key is player ID. */
     private readonly speakerConnections;
     private readonly primaryHost;
@@ -1355,14 +1359,12 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
      */
     private scheduleTopologyRefresh;
     /**
-     * Subscribes every player to the events that say what an external controller did: group volume (a group set is
+     * Subscribes players to the events that say what an external controller did: group volume (a group set is
      * otherwise indistinguishable from a player set), playback, and home theater (a TV input switch).
      * Best effort and not awaited: a send to an offline speaker can wait out the whole request timeout, and diagnostics
      * must never stop or stall a household connecting. Each intent is recorded before its send, so an offline speaker's
      * are re-sent when its socket connects.
-     * Runs once, at first connect; resubscribeAll() keeps them alive after. Re-running first-connect setup — connect()
-     * while the socket is down, whether after disconnect() or mid-ladder — re-declares these intents, undoing an
-     * earlier unsubscribe() of them.
+     * Declared once per handle, so it may run whenever handles are added; resubscribeAll() keeps them alive after.
      */
     private subscribeDiagnostics;
     /**
@@ -1402,13 +1404,18 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
      */
     ungroupAll(): Promise<void>;
     /**
-     * Opens connections to all discovered speakers in parallel.
+     * Opens connections to the given speakers (default: all discovered) in parallel.
      * The primary speaker reuses the existing connection.
      */
     private connectAllSpeakers;
     /**
-     * Gets or creates a connection to a specific speaker.
-     * Returns the primary connection if the speaker is the primary host.
+     * Gives a speaker discovered after setup what setup gives every speaker it finds: its own socket (with
+     * `autoConnect`) and its diagnostics. Not awaited.
+     */
+    private adopt;
+    /**
+     * Gets or creates a connection to a specific speaker, and points the speaker's handle at a speaker socket it finds
+     * or makes. Returns the primary connection if the speaker is the primary host.
      */
     private connectToSpeaker;
     /**
@@ -1431,9 +1438,8 @@ declare class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
      */
     private handleMessage;
     /**
-     * Reconnects any per-speaker connections that have dropped, and connects
-     * to newly discovered players not yet in the speakerConnections map.
-     * Called as a safety net after the primary connection reconnects.
+     * Reconnects any per-speaker connections that have dropped. Called as a safety net after the primary connection
+     * reconnects; a speaker discovered meanwhile is adopted by refreshTopology().
      */
     private reconnectSpeakers;
     /**

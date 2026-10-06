@@ -2123,6 +2123,9 @@ var GroupingEngine = class {
 
 // src/household/SonosHousehold.ts
 var TOPOLOGY_EVENT_DEBOUNCE_MS = 250;
+function refusedMidMove(err) {
+  return err instanceof AggregateError && err.errors.every((e) => e instanceof CommandError && e.code === "groupCoordinatorChanged");
+}
 var SonosHousehold = class extends TypedEventEmitter {
   connection;
   log;
@@ -2134,9 +2137,13 @@ var SonosHousehold = class extends TypedEventEmitter {
   _lastTopologyKey = "";
   /** Group IDs, coordinators and members, without playback state. */
   _lastMembershipKey = "";
+  /** A re-send Sonos refused mid-move; the next topology read retries it, whether or not membership changed. */
+  resendAfterMove = false;
   /** Pending debounced topology re-read, armed by groups:1 events. */
   topologyRefreshTimer = null;
   setup;
+  /** Handles whose diagnostics were declared; a re-run of first-connect setup skips them, so an unsubscribe() stays. */
+  diagnosed = /* @__PURE__ */ new WeakSet();
   /** Per-speaker WebSocket connections. Key is player ID. */
   speakerConnections = /* @__PURE__ */ new Map();
   primaryHost;
@@ -2222,6 +2229,7 @@ var SonosHousehold = class extends TypedEventEmitter {
   /** Gracefully closes all WebSocket connections. */
   async disconnect() {
     this.setup.noteDisconnect();
+    this._initialConnectDone = false;
     if (this.topologyRefreshTimer) {
       clearTimeout(this.topologyRefreshTimer);
       this.topologyRefreshTimer = null;
@@ -2274,6 +2282,7 @@ var SonosHousehold = class extends TypedEventEmitter {
         const handle = new PlayerHandle(player, group, householdId, this.connection, this.connection);
         handle.setCoordinatorConnectionResolver(() => this.connectionForPlayer(handle.coordinatorId));
         this._players.set(player.id, handle);
+        if (this._initialConnectDone) this.adopt(player);
       }
     }
     for (const [id] of this._players) {
@@ -2282,7 +2291,8 @@ var SonosHousehold = class extends TypedEventEmitter {
       }
     }
     const membershipKey = result.groups.map((g) => `${g.id}:${g.coordinatorId}:${[...g.playerIds].sort().join(",")}`).sort().join("|");
-    if (this._lastMembershipKey && membershipKey !== this._lastMembershipKey) {
+    if (this._lastMembershipKey && (membershipKey !== this._lastMembershipKey || this.resendAfterMove)) {
+      this.resendAfterMove = false;
       void this.resubscribeAll();
     }
     this._lastMembershipKey = membershipKey;
@@ -2307,24 +2317,26 @@ var SonosHousehold = class extends TypedEventEmitter {
     }, TOPOLOGY_EVENT_DEBOUNCE_MS);
   }
   /**
-   * Subscribes every player to the events that say what an external controller did: group volume (a group set is
+   * Subscribes players to the events that say what an external controller did: group volume (a group set is
    * otherwise indistinguishable from a player set), playback, and home theater (a TV input switch).
    * Best effort and not awaited: a send to an offline speaker can wait out the whole request timeout, and diagnostics
    * must never stop or stall a household connecting. Each intent is recorded before its send, so an offline speaker's
    * are re-sent when its socket connects.
-   * Runs once, at first connect; resubscribeAll() keeps them alive after. Re-running first-connect setup — connect()
-   * while the socket is down, whether after disconnect() or mid-ladder — re-declares these intents, undoing an
-   * earlier unsubscribe() of them.
+   * Declared once per handle, so it may run whenever handles are added; resubscribeAll() keeps them alive after.
    */
   subscribeDiagnostics() {
     for (const handle of this._players.values()) {
+      if (this.diagnosed.has(handle)) continue;
+      this.diagnosed.add(handle);
       const subscriptions = [
         ["groupVolume", () => handle.volume.group.subscribe()],
         ["playback", () => handle.playback.subscribe()],
         ["homeTheater", () => handle.homeTheater.subscribe()]
       ];
       for (const [name, subscribe] of subscriptions) {
-        void subscribe().catch((err) => this.log.warn(`Failed to subscribe ${handle.name} to ${name} events`, err));
+        void subscribe().catch(
+          (err) => this.log.warn(`Failed to subscribe ${handle.name} to ${name} events`, err)
+        );
       }
     }
   }
@@ -2337,7 +2349,11 @@ var SonosHousehold = class extends TypedEventEmitter {
    */
   async resubscribeAll() {
     await Promise.all(
-      [...this._players.values()].map((handle) => handle.resubscribe().catch((err) => this.log.warn(`Failed to restore event subscriptions for ${handle.name}`, err)))
+      [...this._players.values()].map((handle) => handle.resubscribe().catch((err) => {
+        const midMove = refusedMidMove(err);
+        if (midMove) this.resendAfterMove = true;
+        this.log[midMove ? "debug" : "warn"](`Failed to restore event subscriptions for ${handle.name}`, err);
+      }))
     );
   }
   /**
@@ -2381,17 +2397,13 @@ var SonosHousehold = class extends TypedEventEmitter {
     await this.engine.ungroupAll();
   }
   /**
-   * Opens connections to all discovered speakers in parallel.
+   * Opens connections to the given speakers (default: all discovered) in parallel.
    * The primary speaker reuses the existing connection.
    */
-  async connectAllSpeakers() {
-    const promises = this._rawPlayers.map(async (player) => {
+  async connectAllSpeakers(players = this._rawPlayers) {
+    const promises = players.map(async (player) => {
       try {
-        const conn = await this.connectToSpeaker(player);
-        const handle = this._players.get(player.id);
-        if (handle) {
-          handle.setSpeakerConnection(conn);
-        }
+        await this.connectToSpeaker(player);
       } catch (err) {
         this.log.warn(`Failed to connect to ${player.name}:`, err);
       }
@@ -2399,8 +2411,16 @@ var SonosHousehold = class extends TypedEventEmitter {
     await Promise.all(promises);
   }
   /**
-   * Gets or creates a connection to a specific speaker.
-   * Returns the primary connection if the speaker is the primary host.
+   * Gives a speaker discovered after setup what setup gives every speaker it finds: its own socket (with
+   * `autoConnect`) and its diagnostics. Not awaited.
+   */
+  adopt(player) {
+    if (this.autoConnectSpeakers) void this.connectAllSpeakers([player]);
+    this.subscribeDiagnostics();
+  }
+  /**
+   * Gets or creates a connection to a specific speaker, and points the speaker's handle at a speaker socket it finds
+   * or makes. Returns the primary connection if the speaker is the primary host.
    */
   async connectToSpeaker(player) {
     if (player.websocketUrl) {
@@ -2414,6 +2434,7 @@ var SonosHousehold = class extends TypedEventEmitter {
     }
     const existing = this.speakerConnections.get(player.id);
     if (existing && existing.state === "connected") {
+      this._players.get(player.id)?.setSpeakerConnection(existing);
       return existing;
     }
     if (!player.websocketUrl) {
@@ -2510,9 +2531,8 @@ var SonosHousehold = class extends TypedEventEmitter {
     }
   }
   /**
-   * Reconnects any per-speaker connections that have dropped, and connects
-   * to newly discovered players not yet in the speakerConnections map.
-   * Called as a safety net after the primary connection reconnects.
+   * Reconnects any per-speaker connections that have dropped. Called as a safety net after the primary connection
+   * reconnects; a speaker discovered meanwhile is adopted by refreshTopology().
    */
   async reconnectSpeakers() {
     const reconnectPromises = [];
@@ -2521,16 +2541,6 @@ var SonosHousehold = class extends TypedEventEmitter {
         this.log.info(`Reconnecting speaker ${playerId}`);
         reconnectPromises.push(
           conn.connect().catch((err) => this.log.debug(`Failed to reconnect speaker ${playerId}:`, err))
-        );
-      }
-    }
-    for (const player of this._rawPlayers) {
-      if (!this.speakerConnections.has(player.id)) {
-        reconnectPromises.push(
-          this.connectToSpeaker(player).then((conn) => {
-            const handle = this._players.get(player.id);
-            if (handle) handle.setSpeakerConnection(conn);
-          }).catch((err) => this.log.warn(`Failed to connect new speaker ${player.name}:`, err))
         );
       }
     }
