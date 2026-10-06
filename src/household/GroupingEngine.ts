@@ -10,6 +10,17 @@ import { TopologySnapshot } from './TopologySnapshot.js';
 const POLL_INTERVAL_MS = 200;
 const POLL_DEADLINE_MS = 8000;
 
+/** How long after Sonos answers a move the next grouping call may wait for it to settle. */
+const MOVE_SETTLE_MS = 10_000;
+
+/** A transfer's move, kept for the next grouping call to wait on. */
+interface Move {
+  /** Players the move took out of the source group, minus any the transfer adds back. */
+  readonly removed: string[];
+  /** When the move stops counting. */
+  readonly until: number;
+}
+
 /**
  * Manages Sonos speaker grouping operations with robust error handling.
  *
@@ -18,6 +29,9 @@ const POLL_DEADLINE_MS = 8000;
  * {@link withRetry} for automatic recovery from stale-groupId errors.
  */
 export class GroupingEngine {
+  private chain: Promise<void> = Promise.resolve();
+  private lastMove: Move | undefined;
+
   constructor(
     private readonly householdGroups: GroupsNamespace,
     private readonly refreshTopology: () => Promise<GroupsResponse>,
@@ -28,7 +42,33 @@ export class GroupingEngine {
   /**
    * Groups the specified players. The first player in the array becomes the coordinator.
    */
-  async group(playerHandles: PlayerHandle[], options?: GroupOptions): Promise<void> {
+  group(playerHandles: PlayerHandle[], options?: GroupOptions): Promise<void> {
+    return this.inTurn(() => this.groupNow(playerHandles, options));
+  }
+
+  /** Removes a player from its current group. No-op if already solo. */
+  ungroup(player: PlayerHandle): Promise<void> {
+    return this.inTurn(() => this.ungroupNow(player));
+  }
+
+  /** Ungroups all players in the household. */
+  ungroupAll(): Promise<void> {
+    return this.inTurn(() => this.ungroupAllNow());
+  }
+
+  // ── Private helpers ─────────────────────────────────────────────────────
+
+  /**
+   * Runs grouping calls one at a time, each after the last move has settled, so every call reads the topology the
+   * previous one left. A failure rejects that call, never the chain.
+   */
+  private inTurn(task: () => Promise<void>): Promise<void> {
+    const run = this.chain.then(() => this.awaitLastMove()).then(task);
+    this.chain = run.catch(() => {});
+    return run;
+  }
+
+  private async groupNow(playerHandles: PlayerHandle[], options?: GroupOptions): Promise<void> {
     if (playerHandles.length === 0) {
       throw new SonosError(ErrorCode.ERROR_INVALID_PARAMETER, 'group() requires at least one player');
     }
@@ -110,16 +150,14 @@ export class GroupingEngine {
     await this.refreshAndSnapshot();
   }
 
-  /** Removes a player from its current group. No-op if already solo. */
-  async ungroup(player: PlayerHandle): Promise<void> {
+  private async ungroupNow(player: PlayerHandle): Promise<void> {
     const snap = await this.refreshAndSnapshot();
     if (snap.isAloneInGroup(player.id)) return;
     await this.householdGroups.createGroup([player.id]);
     await this.refreshAndSnapshot();
   }
 
-  /** Ungroups all players in the household. */
-  async ungroupAll(): Promise<void> {
+  private async ungroupAllNow(): Promise<void> {
     const snap = await this.refreshAndSnapshot();
     const multiPlayerGroups = snap.groups.filter((g) => g.playerIds.length > 1);
     for (const group of multiPlayerGroups) {
@@ -129,8 +167,6 @@ export class GroupingEngine {
       await this.refreshAndSnapshot();
     }
   }
-
-  // ── Private helpers ─────────────────────────────────────────────────────
 
   private isAlreadyGrouped(coordinatorId: string, memberIds: string[], snap: TopologySnapshot): boolean {
     const group = snap.findGroupOf(coordinatorId);
@@ -289,6 +325,10 @@ export class GroupingEngine {
       removed = sourceGroup.playerIds.filter((id) => id !== targetCoordinator.id);
       await sourceCoord.groups.setGroupMembers([targetCoordinator.id]);
     });
+    this.lastMove = {
+      removed: removed.filter((id) => !allMemberIds.includes(id)),
+      until: Date.now() + MOVE_SETTLE_MS,
+    };
 
     // A single target already plays in sync; the handoff finishes on Sonos's side.
     if (allMemberIds.length === 1) return;
@@ -305,6 +345,26 @@ export class GroupingEngine {
 
     // Step 3: add the other requested members
     await this.simpleGroup(targetCoordinator, allMemberIds);
+  }
+
+  /**
+   * Waits for the last move to settle before a grouping call reads the topology: every removed player reports IDLE.
+   * Until then the target can still sit in the source coordinator's group, or a removed player can still report audio
+   * of its own, and a call would act on it.
+   */
+  private async awaitLastMove(): Promise<void> {
+    const move = this.lastMove;
+    if (!move) return;
+    this.lastMove = undefined;
+    const left = move.until - Date.now();
+    if (left <= 0) return;
+    const settled = await this.pollUntil((res) => {
+      const snap = new TopologySnapshot(res);
+      return move.removed.every((id) => snap.findGroupOf(id)?.playbackState === 'PLAYBACK_STATE_IDLE');
+    }, left);
+    if (!settled) {
+      this.log.warn(`Last move did not settle within ${MOVE_SETTLE_MS}ms of Sonos's answer`);
+    }
   }
 
   /**
