@@ -5,7 +5,7 @@
 same evening after the whole-branch review: the source is left paused, not idle, so the single-player source search
 gained a guard (Behavior). **Superseded by the 2026-10-05 fourth addendum at the end:** transfers only move the source
 group with `setGroupMembers`; the copy failed in production and in later live checks (the addenda in between are the
-history).
+history). The 2026-10-05 fifth addendum adds the wait that makes a second command right after a move safe.
 
 ## Why
 
@@ -353,3 +353,52 @@ transfer returns while the handoff is still in progress (`( B* + A )`), with no 
 
 Live: the morning content again (Office + Bedroom playing) → Arc through `household.group`, timed; a second
 `group([Arc])` and a volume read during the handoff; the end state after it; the Arc's home-theater options unchanged.
+
+## 2026-10-05 fifth addendum: the next grouping call waits for the last move to settle
+
+**Status:** Approved by the owner 2026-10-05 22:24 CDT ("go with whatever you'd recommend"); the turn-taking and the
+PAUSED check were added after code review found near-simultaneous calls and paused moves uncovered. Replaces the fourth
+addendum's "a command during the handoff" bullet; the rest of the fourth addendum stands.
+
+### Why
+
+Live 2026-10-05 12:17, the deployed move: Sonos answered `group arc` after 5.4 s with `Arc*:PLAYING | Bedroom*:IDLE |
+Office*:PLAYING`. Office, which the move had removed, reported PLAYING for another 0.8 s. A second `group arc` 40 ms
+later took it as the source, moved Office's empty group onto the Arc, and silenced the Arc.
+
+Skipping removed players as sources (the 10-05 handoff's plan) fixes that case only. When Sonos answers before the
+handoff, the Arc still sits in `( Bedroom* + Arc )`: the search would skip Bedroom, find nothing, and `group()` would
+fall through to `createGroup([Arc])`, pulling the Arc out of the playing group; `group all` and `ungroup` have the same
+hole. Every reader of the topology would need its own exception.
+
+### Design
+
+- `group()`, `ungroup()` and `ungroupAll()` take turns: they run one at a time on a promise chain (the
+  `ConnectionSetup.runAfterSetup` idiom), so two commands arriving together — Neurotto does not serialize them — never
+  both read the topology before either acts. A failure rejects only its own call.
+- `transferAudio()` records the move once Sonos answers: the players it removed, minus any the transfer adds back, and
+  a 10 s window (`MOVE_SETTLE_MS`). A refused move records nothing.
+- Each call, in its turn, first `awaitLastMove()`: take the move, and while its window is open `pollUntil` no removed
+  player is in a group with audio (PLAYING or PAUSED), for at most the rest of the window and at most 8 s. That also
+  covers the target still sitting in the source coordinator's group, since that coordinator is a removed player. A move
+  that does not settle logs a warning and the call goes ahead.
+- Everything after that reads settled topology, so the existing logic is unchanged.
+
+### Behavior
+
+- A second `group arc` right after a move sends nothing: it waits ~1 s (Sonos answered after the handoff) or until the
+  handoff ends, up to ~7 s (Sonos answered first). The first `group arc` stays at ~5.5 s.
+- A command sent while another grouping command runs waits for it; one Sonos never answers holds later grouping
+  commands until it times out (Neurotto: the default 120 s). Volume and playback do not wait.
+- A removed speaker that genuinely starts playing within 10 s of the answer delays the next call until the window ends
+  (at most 8 s), then is taken as a source as before; after 10 s it is a source at once, with no extra read.
+
+### Testing
+
+TDD in `tests/household/GroupingEngine.test.ts`, `the next call after a move`: a removed player still reporting
+PLAYING, and PAUSED after a paused move; Sonos answering before the handoff (for `group`, `ungroup` and `ungroupAll`);
+a call sent before Sonos answers; the 8 s deadline; the window's end; a refused move; a member an explicit transfer
+adds back; an old move. Each guard mutation-verified (14 mutations, each failing its own test).
+
+Live: the owner's Alexa morning playlist on `( Office + Bedroom )`, then `group([Arc])` twice back to back and a
+volume read; the topology for ~15 s after; then House of Auto gets the sha and timings before the deploy.
