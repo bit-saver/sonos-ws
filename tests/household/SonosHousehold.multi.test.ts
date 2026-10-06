@@ -307,6 +307,26 @@ describe('subscription upkeep', () => {
     await vi.waitFor(() => expect(logged(level)).toBe(true));
     expect(logged(level === 'debug' ? 'warn' : 'debug')).toBe(false);
   });
+
+  it('re-sends on the next topology read after a mid-move refusal, even with membership unchanged', async () => {
+    const log = logger();
+    const household = await connectedHousehold(solo, { logger: log });
+    let moving = true;
+    socket(OFFICE_IP).send.mockImplementation(async ([headers]: any) => {
+      if (moving && headers.command === 'subscribe') throw new CommandError('groupCoordinatorChanged', 'refused');
+      return [{ success: true }, {}];
+    });
+
+    socket(OFFICE_IP)._emit('connected');
+    await vi.waitFor(() =>
+      expect(log.debug).toHaveBeenCalledWith('Failed to restore event subscriptions for Office', expect.anything()));
+    moving = false;
+    const before = sentVia(OFFICE_IP, 'homeTheater:1', 'subscribe').length;
+
+    await household.refreshTopology();
+
+    await vi.waitFor(() => expect(sentVia(OFFICE_IP, 'homeTheater:1', 'subscribe').length).toBeGreaterThan(before));
+  });
 });
 
 describe('adopting a speaker discovered after setup', () => {

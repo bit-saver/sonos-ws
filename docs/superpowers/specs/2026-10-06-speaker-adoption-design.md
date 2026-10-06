@@ -112,3 +112,11 @@ TDD in `tests/household/`, mutation-verifying each guard:
 `npm run build` + `chore: rebuild dist`, merge, House of Auto and Neurotto told, deploy per memory
 `feedback_deploy_sonos_ws_to_neurotto` (one restart). Live: after the deploy, the next regroup logs no
 `Failed to restore event subscriptions` warn.
+
+## 2026-10-06 notes from review
+
+- The fit review made `subscribeDiagnostics()` parameterless (it is idempotent, so it declares only undeclared handles)
+  and `adopt(player)` reuse `connectAllSpeakers([player])`; `connectToSpeaker()` points a returning speaker's handle at
+  its live socket.
+- The final review found the debug log assumed a later re-send nothing guaranteed. A refused mid-move re-send now arms
+  a one-shot re-send on the next topology read, whatever the membership.

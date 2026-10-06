@@ -27,8 +27,8 @@ import type { NamespaceContext } from '../namespaces/BaseNamespace.js';
 const TOPOLOGY_EVENT_DEBOUNCE_MS = 250;
 
 /**
- * Whether Sonos refused a re-send only because the group's coordinator is moving, as it does mid-regroup. The
- * membership change that ends the move re-sends, so such a failure is not worth a warning.
+ * Whether Sonos refused a re-send only because the group's coordinator is moving, as it does mid-regroup. The next
+ * topology read re-sends, so such a failure is not worth a warning.
  */
 function refusedMidMove(err: unknown): boolean {
   return err instanceof AggregateError
@@ -88,6 +88,8 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   private _lastTopologyKey = '';
   /** Group IDs, coordinators and members, without playback state. */
   private _lastMembershipKey = '';
+  /** A re-send Sonos refused mid-move; the next topology read retries it, whether or not membership changed. */
+  private resendAfterMove = false;
   /** Pending debounced topology re-read, armed by groups:1 events. */
   private topologyRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly setup: ConnectionSetup;
@@ -274,13 +276,14 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       }
     }
 
-    // Membership, not playback state (which flips on every play/pause), decides whether subscriptions moved.
-    // The first read has nothing to compare against; setup restores subscriptions itself.
+    // Membership, not playback state (which flips on every play/pause), decides whether subscriptions moved;
+    // so does a re-send Sonos refused mid-move. The first read has nothing to compare against; setup restores them.
     const membershipKey = result.groups
       .map((g) => `${g.id}:${g.coordinatorId}:${[...g.playerIds].sort().join(',')}`)
       .sort()
       .join('|');
-    if (this._lastMembershipKey && membershipKey !== this._lastMembershipKey) {
+    if (this._lastMembershipKey && (membershipKey !== this._lastMembershipKey || this.resendAfterMove)) {
+      this.resendAfterMove = false;
       void this.resubscribeAll();
     }
     this._lastMembershipKey = membershipKey;
@@ -349,11 +352,11 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   private async resubscribeAll(): Promise<void> {
     await Promise.all(
       [...this._players.values()].map((handle) =>
-        handle.resubscribe().catch((err: unknown) =>
-          this.log[refusedMidMove(err) ? 'debug' : 'warn'](
-            `Failed to restore event subscriptions for ${handle.name}`,
-            err,
-          ))),
+        handle.resubscribe().catch((err: unknown) => {
+          const midMove = refusedMidMove(err);
+          if (midMove) this.resendAfterMove = true;
+          this.log[midMove ? 'debug' : 'warn'](`Failed to restore event subscriptions for ${handle.name}`, err);
+        })),
     );
   }
 
@@ -426,8 +429,8 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   }
 
   /**
-   * Gets or creates a connection to a specific speaker, and points the speaker's handle at it.
-   * Returns the primary connection if the speaker is the primary host.
+   * Gets or creates a connection to a specific speaker, and points the speaker's handle at a speaker socket it finds
+   * or makes. Returns the primary connection if the speaker is the primary host.
    */
   private async connectToSpeaker(player: Player): Promise<SonosConnection> {
     // If this speaker is the primary host, reuse the primary connection
