@@ -12,6 +12,7 @@ import type { Logger } from '../util/logger.js';
 import { noopLogger } from '../util/logger.js';
 import { SonosError } from '../errors/SonosError.js';
 import { ConnectionError } from '../errors/ConnectionError.js';
+import { CommandError } from '../errors/CommandError.js';
 import { ErrorCode } from '../types/errors.js';
 import { PlayerHandle } from '../player/PlayerHandle.js';
 import { GroupingEngine } from './GroupingEngine.js';
@@ -24,6 +25,15 @@ import type { NamespaceContext } from '../namespaces/BaseNamespace.js';
  * burst to go quiet means the one read that follows sees the settled state.
  */
 const TOPOLOGY_EVENT_DEBOUNCE_MS = 250;
+
+/**
+ * Whether Sonos refused a re-send only because the group's coordinator is moving, as it does mid-regroup. The
+ * membership change that ends the move re-sends, so such a failure is not worth a warning.
+ */
+function refusedMidMove(err: unknown): boolean {
+  return err instanceof AggregateError
+    && err.errors.every((e: unknown) => e instanceof CommandError && e.code === 'groupCoordinatorChanged');
+}
 
 /**
  * Configuration options for creating a {@link SonosHousehold} instance.
@@ -334,13 +344,17 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
    * - the end of setup and of each primary reconnect
    * - a speaker's own socket reconnecting
    * - a membership change (a player that leaves a group gets a new group ID)
-   * Re-sending a live subscription is harmless, so nothing tracks which ones died.
+   * Re-sending a live subscription is harmless, so nothing tracks which ones died. A re-send refused mid-regroup logs
+   * at debug.
    */
   private async resubscribeAll(): Promise<void> {
     await Promise.all(
       [...this._players.values()].map((handle) =>
         handle.resubscribe().catch((err: unknown) =>
-          this.log.warn(`Failed to restore event subscriptions for ${handle.name}`, err))),
+          this.log[refusedMidMove(err) ? 'debug' : 'warn'](
+            `Failed to restore event subscriptions for ${handle.name}`,
+            err,
+          ))),
     );
   }
 

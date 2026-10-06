@@ -6,6 +6,7 @@ import { SonosHousehold } from '../../src/household/SonosHousehold.js';
 import type { SonosHouseholdOptions } from '../../src/household/SonosHousehold.js';
 import type { GroupsResponse } from '../../src/types/groups.js';
 import { ConnectionError } from '../../src/errors/ConnectionError.js';
+import { CommandError } from '../../src/errors/CommandError.js';
 import { ErrorCode } from '../../src/types/errors.js';
 
 const instances: any[] = [];
@@ -276,6 +277,30 @@ describe('subscription upkeep', () => {
 
     await vi.waitFor(() => expect(wantedOn(KITCHEN_IP, 'playerVolume:1', { playerId: 'RINCON_KITCHEN' })).toBe(2));
     expect(wantedOn(PRIMARY, 'playerVolume:1', { playerId: 'RINCON_KITCHEN' })).toBe(0);
+  });
+
+  it.each([
+    { why: 'only because the coordinator is moving', level: 'debug', code: () => 'groupCoordinatorChanged' },
+    { why: 'for another reason', level: 'warn', code: () => 'ERROR_COMMAND_FAILED' },
+    {
+      why: 'partly for another reason',
+      level: 'warn',
+      code: (namespace: string) => (namespace === 'groupVolume:1' ? 'groupCoordinatorChanged' : 'ERROR_COMMAND_FAILED'),
+    },
+  ] as const)('logs a re-send Sonos refuses $why at $level', async ({ level, code }) => {
+    const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    await connectedHousehold(solo, { logger: log });
+    socket(OFFICE_IP).send.mockImplementation(async ([headers]: any) => {
+      if (headers.command === 'subscribe') throw new CommandError(code(headers.namespace), 'refused');
+      return [{ success: true }, {}];
+    });
+
+    socket(OFFICE_IP)._emit('connected');
+
+    const logged = (at: 'debug' | 'warn') =>
+      log[at].mock.calls.some((call: unknown[]) => call[0] === 'Failed to restore event subscriptions for Office');
+    await vi.waitFor(() => expect(logged(level)).toBe(true));
+    expect(logged(level === 'debug' ? 'warn' : 'debug')).toBe(false);
   });
 });
 
