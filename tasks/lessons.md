@@ -87,3 +87,16 @@ taken as a source. Each live check cost the owner his music, and one cost him a 
 **How to apply:** before calling a Sonos change verified, reproduce the production trigger itself (here: the owner's
 Alexa routine on the same speakers), then send the command a caller would plausibly send next (a repeat, a volume
 press) inside the window the change opens. A live check of one call in isolation proves only that call.
+
+## 2026-10-05/06 — A settle condition keyed on the states you listed misses the ones you didn't
+
+The second-command guard went through three settle conditions. "Removed players are not sources" (the handoff's plan)
+missed the target still sitting in the old coordinator's group. "No removed player in a PLAYING group" missed paused
+moves; adding PAUSED missed a BUFFERING handoff. Each hole was found by a reviewer constructing the next state, not by
+me. What ended it was keying on the end state Sonos always reaches — every removed player IDLE — instead of
+enumerating the transient ones. Same session, same shape: recording the move "before the send" still left the ~30 ms
+before it, closed only by making the calls take turns.
+
+**How to apply:** when a guard waits out a transient, define "done" as the known end state, not as the absence of the
+transients you have seen; and when a guard protects against concurrent callers, check every arrival time (before the
+first call reads, during its send, after its answer), or serialize the callers so there is only one.
