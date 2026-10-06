@@ -10,6 +10,18 @@ import { TopologySnapshot } from './TopologySnapshot.js';
 const POLL_INTERVAL_MS = 200;
 const POLL_DEADLINE_MS = 8000;
 
+/** How long after Sonos answers a move the next grouping call still checks that it has settled. */
+const MOVE_SETTLE_MS = 10_000;
+
+/** A transfer's move, kept until the next grouping call has seen it settle. */
+interface Move {
+  readonly target: string;
+  /** Players the move took out of the source group, minus any the transfer adds back. */
+  removed: string[];
+  /** When the move stops counting; open until Sonos answers. */
+  until: number;
+}
+
 /**
  * Manages Sonos speaker grouping operations with robust error handling.
  *
@@ -18,6 +30,8 @@ const POLL_DEADLINE_MS = 8000;
  * {@link withRetry} for automatic recovery from stale-groupId errors.
  */
 export class GroupingEngine {
+  private lastMove: Move | undefined;
+
   constructor(
     private readonly householdGroups: GroupsNamespace,
     private readonly refreshTopology: () => Promise<GroupsResponse>,
@@ -33,6 +47,7 @@ export class GroupingEngine {
       throw new SonosError(ErrorCode.ERROR_INVALID_PARAMETER, 'group() requires at least one player');
     }
 
+    await this.awaitLastMove();
     let snap = await this.refreshAndSnapshot();
 
     // Single player
@@ -112,6 +127,7 @@ export class GroupingEngine {
 
   /** Removes a player from its current group. No-op if already solo. */
   async ungroup(player: PlayerHandle): Promise<void> {
+    await this.awaitLastMove();
     const snap = await this.refreshAndSnapshot();
     if (snap.isAloneInGroup(player.id)) return;
     await this.householdGroups.createGroup([player.id]);
@@ -120,6 +136,7 @@ export class GroupingEngine {
 
   /** Ungroups all players in the household. */
   async ungroupAll(): Promise<void> {
+    await this.awaitLastMove();
     const snap = await this.refreshAndSnapshot();
     const multiPlayerGroups = snap.groups.filter((g) => g.playerIds.length > 1);
     for (const group of multiPlayerGroups) {
@@ -276,6 +293,7 @@ export class GroupingEngine {
     // Step 1: move the source group itself to the target. Sonos adds the target at once and hands it the coordinator
     // role seconds later; the players it removes end up idle.
     let removed: string[] = [];
+    const move: Move = { target: targetCoordinator.id, removed: [], until: Infinity };
     await this.withRetry(async () => {
       const snap = await this.refreshAndSnapshot();
       const sourceGroup = snap.findGroupOf(source.id);
@@ -287,8 +305,15 @@ export class GroupingEngine {
         throw new SonosError(ErrorCode.GROUP_OPERATION_FAILED, `Cannot find coordinator for source "${source.name}"`);
       }
       removed = sourceGroup.playerIds.filter((id) => id !== targetCoordinator.id);
+      // Recorded before sending, so a call made while Sonos answers waits as well
+      move.removed = removed.filter((id) => !allMemberIds.includes(id));
+      this.lastMove = move;
       await sourceCoord.groups.setGroupMembers([targetCoordinator.id]);
+    }).catch((err: unknown) => {
+      if (this.lastMove === move) this.lastMove = undefined;
+      throw err;
     });
+    move.until = Date.now() + MOVE_SETTLE_MS;
 
     // A single target already plays in sync; the handoff finishes on Sonos's side.
     if (allMemberIds.length === 1) return;
@@ -305,6 +330,28 @@ export class GroupingEngine {
 
     // Step 3: add the other requested members
     await this.simpleGroup(targetCoordinator, allMemberIds);
+  }
+
+  /**
+   * Waits for the last move to settle before a grouping call reads the topology: the target leads its group, and no
+   * removed player is in a playing group. Until then a call would find the target inside the source coordinator's
+   * group, or a removed player still reporting PLAYING, and act on it.
+   */
+  private async awaitLastMove(): Promise<void> {
+    const move = this.lastMove;
+    if (!move) return;
+    if (Date.now() < move.until) {
+      const settled = await this.pollUntil((res) => {
+        const own = res.groups.find((g) => g.playerIds.includes(move.target));
+        return own?.coordinatorId === move.target && !res.groups.some(
+          (g) => g.playbackState === 'PLAYBACK_STATE_PLAYING' && g.playerIds.some((id) => move.removed.includes(id)),
+        );
+      });
+      if (!settled) {
+        this.log.warn(`Last move did not settle within ${POLL_DEADLINE_MS}ms`);
+      }
+    }
+    if (this.lastMove === move) this.lastMove = undefined;
   }
 
   /**
