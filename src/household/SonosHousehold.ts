@@ -188,6 +188,8 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   /** Gracefully closes all WebSocket connections. */
   async disconnect(): Promise<void> {
     this.setup.noteDisconnect();
+    // A topology read that lands from here on adopts nothing, so no socket opens after the map is cleared.
+    this._initialConnectDone = false;
     if (this.topologyRefreshTimer) {
       clearTimeout(this.topologyRefreshTimer);
       this.topologyRefreshTimer = null;
@@ -250,6 +252,8 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
         // Set at creation, so a handle made after setup (a new speaker) routes group commands correctly too.
         handle.setCoordinatorConnectionResolver(() => this.connectionForPlayer(handle.coordinatorId));
         this._players.set(player.id, handle);
+        // Setup covers the handles it finds; one found later is adopted here.
+        if (this._initialConnectDone) this.adopt(handle, player);
       }
     }
 
@@ -404,6 +408,19 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   }
 
   /**
+   * Gives a speaker discovered after setup what setup gives every speaker it finds: its own socket (with
+   * `autoConnect`) and its diagnostics. Not awaited.
+   */
+  private adopt(handle: PlayerHandle, player: Player): void {
+    if (this.autoConnectSpeakers) {
+      void this.connectToSpeaker(player).catch(
+        (err: unknown) => this.log.warn(`Failed to connect to ${player.name}:`, err),
+      );
+    }
+    this.subscribeDiagnostics([handle]);
+  }
+
+  /**
    * Gets or creates a connection to a specific speaker.
    * Returns the primary connection if the speaker is the primary host.
    */
@@ -549,9 +566,8 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   }
 
   /**
-   * Reconnects any per-speaker connections that have dropped, and connects
-   * to newly discovered players not yet in the speakerConnections map.
-   * Called as a safety net after the primary connection reconnects.
+   * Reconnects any per-speaker connections that have dropped. Called as a safety net after the primary connection
+   * reconnects; a speaker discovered meanwhile is adopted by refreshTopology().
    */
   private async reconnectSpeakers(): Promise<void> {
     const reconnectPromises: Promise<void>[] = [];
@@ -562,21 +578,6 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
         reconnectPromises.push(
           conn.connect().catch((err: unknown) =>
             this.log.debug(`Failed to reconnect speaker ${playerId}:`, err)),
-        );
-      }
-    }
-
-    // Connect any newly discovered players not in the map
-    for (const player of this._rawPlayers) {
-      if (!this.speakerConnections.has(player.id)) {
-        reconnectPromises.push(
-          this.connectToSpeaker(player)
-            .then((conn) => {
-              const handle = this._players.get(player.id);
-              if (handle) handle.setSpeakerConnection(conn);
-            })
-            .catch((err: unknown) =>
-              this.log.warn(`Failed to connect new speaker ${player.name}:`, err)),
         );
       }
     }

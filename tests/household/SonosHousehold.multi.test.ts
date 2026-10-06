@@ -87,6 +87,14 @@ const officeUnderBedroom = {
   players: [ARC, OFFICE, BED],
 } as GroupsResponse;
 
+const withKitchen = {
+  groups: [
+    ...solo.groups,
+    { id: 'G_KIT', name: 'Kitchen', coordinatorId: 'RINCON_KITCHEN', playerIds: ['RINCON_KITCHEN'] },
+  ],
+  players: [ARC, OFFICE, BED, KITCHEN],
+} as GroupsResponse;
+
 const socket = (host: string) => {
   const found = instances.find((i) => i.host === host);
   if (!found) throw new Error(`no socket for ${host}`);
@@ -258,22 +266,61 @@ describe('subscription upkeep', () => {
     expect(sentVia(BED_IP, 'playerVolume:1', 'subscribe')).toHaveLength(0);
   });
 
-  it("re-sends a new speaker's player-level subscriptions only on its own socket once that connects", async () => {
+  it("sends a new speaker's player-level subscriptions on its own socket and re-sends them there", async () => {
     const household = await connectedHousehold(solo);
-    topology = {
-      groups: [...solo.groups, { id: 'G_KIT', name: 'Kitchen', coordinatorId: 'RINCON_KITCHEN', playerIds: ['RINCON_KITCHEN'] }],
-      players: [ARC, OFFICE, BED, KITCHEN],
-    } as GroupsResponse;
+    topology = withKitchen;
     await household.refreshTopology();
-    // Kitchen has no socket of its own yet, so this goes out on the primary.
-    await household.player('Kitchen').volume.subscribe();
-    expect(wantedOn(PRIMARY, 'playerVolume:1', { playerId: 'RINCON_KITCHEN' })).toBe(1);
 
-    // A primary reconnect opens Kitchen's own socket.
+    await household.player('Kitchen').volume.subscribe();
+    socket(KITCHEN_IP)._emit('connected');
+
+    await vi.waitFor(() => expect(wantedOn(KITCHEN_IP, 'playerVolume:1', { playerId: 'RINCON_KITCHEN' })).toBe(2));
+    expect(wantedOn(PRIMARY, 'playerVolume:1', { playerId: 'RINCON_KITCHEN' })).toBe(0);
+  });
+});
+
+describe('adopting a speaker discovered after setup', () => {
+  const diagnostics = ['groupVolume:1', 'playback:1', 'homeTheater:1'];
+  const kitchenDiagnosticsVia = (host: string) => diagnostics.map((namespace) =>
+    sentVia(host, namespace, 'subscribe').some((h: any) => h.groupId === 'G_KIT' || h.playerId === 'RINCON_KITCHEN'));
+
+  it('opens its own socket and declares its diagnostics there', async () => {
+    const household = await connectedHousehold(solo);
+
+    topology = withKitchen;
+    await household.refreshTopology();
+
+    expect(socket(KITCHEN_IP).state).toBe('connected');
+    await vi.waitFor(() => expect(kitchenDiagnosticsVia(KITCHEN_IP)).toEqual([true, true, true]));
+  });
+
+  it('declares its diagnostics but opens no socket under autoConnect: false', async () => {
+    const household = await connectedHousehold(solo, { autoConnect: false });
+
+    topology = withKitchen;
+    await household.refreshTopology();
+
+    await vi.waitFor(() => expect(kitchenDiagnosticsVia(PRIMARY)).toEqual([true, true, true]));
+    expect(instances.map((i) => i.host)).toEqual([PRIMARY]);
+  });
+
+  it('opens no speaker socket on a primary reconnect under autoConnect: false', async () => {
+    await connectedHousehold(solo, { autoConnect: false });
+
     await fireConnected(PRIMARY);
 
-    expect(wantedOn(PRIMARY, 'playerVolume:1', { playerId: 'RINCON_KITCHEN' })).toBe(1);
-    expect(wantedOn(KITCHEN_IP, 'playerVolume:1', { playerId: 'RINCON_KITCHEN' })).toBeGreaterThan(0);
+    expect(instances.map((i) => i.host)).toEqual([PRIMARY]);
+  });
+
+  it('adopts nothing from a topology read that lands once disconnect() has begun', async () => {
+    const household = await connectedHousehold(solo);
+    topology = withKitchen;
+
+    const read = household.refreshTopology();
+    await household.disconnect();
+    await read;
+
+    expect(instances.some((i) => i.host === KITCHEN_IP)).toBe(false);
   });
 });
 
