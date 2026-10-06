@@ -263,7 +263,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
         handle.setCoordinatorConnectionResolver(() => this.connectionForPlayer(handle.coordinatorId));
         this._players.set(player.id, handle);
         // Setup covers the handles it finds; one found later is adopted here.
-        if (this._initialConnectDone) this.adopt(handle, player);
+        if (this._initialConnectDone) this.adopt(player);
       }
     }
 
@@ -320,10 +320,10 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
    * Best effort and not awaited: a send to an offline speaker can wait out the whole request timeout, and diagnostics
    * must never stop or stall a household connecting. Each intent is recorded before its send, so an offline speaker's
    * are re-sent when its socket connects.
-   * Declared once per handle; resubscribeAll() keeps them alive after.
+   * Declared once per handle, so it may run whenever handles are added; resubscribeAll() keeps them alive after.
    */
-  private subscribeDiagnostics(handles: Iterable<PlayerHandle>): void {
-    for (const handle of handles) {
+  private subscribeDiagnostics(): void {
+    for (const handle of this._players.values()) {
       if (this.diagnosed.has(handle)) continue;
       this.diagnosed.add(handle);
       const subscriptions: [string, () => Promise<void>][] = [
@@ -344,8 +344,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
    * - the end of setup and of each primary reconnect
    * - a speaker's own socket reconnecting
    * - a membership change (a player that leaves a group gets a new group ID)
-   * Re-sending a live subscription is harmless, so nothing tracks which ones died. A re-send refused mid-regroup logs
-   * at debug.
+   * Re-sending a live subscription is harmless, so nothing tracks which ones died.
    */
   private async resubscribeAll(): Promise<void> {
     await Promise.all(
@@ -403,11 +402,11 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   }
 
   /**
-   * Opens connections to all discovered speakers in parallel.
+   * Opens connections to the given speakers (default: all discovered) in parallel.
    * The primary speaker reuses the existing connection.
    */
-  private async connectAllSpeakers(): Promise<void> {
-    const promises = this._rawPlayers.map(async (player) => {
+  private async connectAllSpeakers(players: Player[] = this._rawPlayers): Promise<void> {
+    const promises = players.map(async (player) => {
       try {
         await this.connectToSpeaker(player);
       } catch (err) {
@@ -421,13 +420,9 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
    * Gives a speaker discovered after setup what setup gives every speaker it finds: its own socket (with
    * `autoConnect`) and its diagnostics. Not awaited.
    */
-  private adopt(handle: PlayerHandle, player: Player): void {
-    if (this.autoConnectSpeakers) {
-      void this.connectToSpeaker(player).catch(
-        (err: unknown) => this.log.warn(`Failed to connect to ${player.name}:`, err),
-      );
-    }
-    this.subscribeDiagnostics([handle]);
+  private adopt(player: Player): void {
+    if (this.autoConnectSpeakers) void this.connectAllSpeakers([player]);
+    this.subscribeDiagnostics();
   }
 
   /**
@@ -628,7 +623,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
         // speaker whose socket is laddering would otherwise hold up this setup — that speaker's own 'connected'
         // listener re-sends its intents when its socket returns.
         void this.resubscribeAll();
-        this.subscribeDiagnostics(this._players.values());
+        this.subscribeDiagnostics();
         this._initialConnectDone = true;
       } catch (err) {
         this.log.warn('Failed initial setup on connect', err);

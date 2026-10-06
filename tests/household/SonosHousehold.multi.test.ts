@@ -107,11 +107,16 @@ const fireConnected = async (host: string) => {
   await Promise.all(socket(host)._listeners.get('connected').map((h: () => unknown) => h()));
 };
 
-/** Headers of every command sent through a host's socket, optionally filtered. */
-const sentVia = (host: string, namespace?: string, command?: string) =>
-  socket(host).send.mock.calls
-    .map(([req]: any) => req[0])
+/** Headers of every command sent through any socket a host has had, optionally filtered. */
+const sentVia = (host: string, namespace?: string, command?: string) => {
+  socket(host); // an unknown host throws
+  return instances
+    .filter((i) => i.host === host)
+    .flatMap((i) => i.send.mock.calls.map(([req]: any) => req[0]))
     .filter((h: any) => (!namespace || h.namespace === namespace) && (!command || h.command === command));
+};
+
+const logger = () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() });
 
 async function connectedHousehold(
   start: GroupsResponse,
@@ -288,7 +293,7 @@ describe('subscription upkeep', () => {
       code: (namespace: string) => (namespace === 'groupVolume:1' ? 'groupCoordinatorChanged' : 'ERROR_COMMAND_FAILED'),
     },
   ] as const)('logs a re-send Sonos refuses $why at $level', async ({ level, code }) => {
-    const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const log = logger();
     await connectedHousehold(solo, { logger: log });
     socket(OFFICE_IP).send.mockImplementation(async ([headers]: any) => {
       if (headers.command === 'subscribe') throw new CommandError(code(headers.namespace), 'refused');
@@ -387,19 +392,14 @@ describe('diagnostic subscriptions', () => {
 
   it('keeps a diagnostic unsubscribed through disconnect() and connect()', async () => {
     const household = await connectedHousehold(solo);
-    // connect() after disconnect() opens new sockets to the same hosts, so count across all of them.
-    const subscribes = (host: string, namespace: string) => instances
-      .filter((i) => i.host === host)
-      .flatMap((i) => i.send.mock.calls.map(([req]: any) => req[0]))
-      .filter((h: any) => h.namespace === namespace && h.command === 'subscribe').length;
     await household.player('Office').homeTheater.unsubscribe();
-    const before = subscribes(OFFICE_IP, 'homeTheater:1');
+    const before = sentVia(OFFICE_IP, 'homeTheater:1', 'subscribe').length;
 
     await household.disconnect();
     await household.connect();
 
-    expect(subscribes(OFFICE_IP, 'homeTheater:1')).toBe(before);
-    expect(subscribes(BED_IP, 'homeTheater:1')).toBeGreaterThan(1);
+    expect(sentVia(OFFICE_IP, 'homeTheater:1', 'subscribe').length).toBe(before);
+    expect(sentVia(BED_IP, 'homeTheater:1', 'subscribe').length).toBeGreaterThan(1);
   });
 });
 
@@ -424,7 +424,6 @@ describe('speaker socket errors', () => {
   const refused = () => new ConnectionError(ErrorCode.CONNECTION_FAILED, 'Failed to connect: ECONNREFUSED');
   const slowed = () =>
     new ConnectionError(ErrorCode.RECONNECT_SLOWED, 'Reconnect slowed after 94 attempts; retrying every 300000ms');
-  const logger = () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() });
   const officeLines = (log: any, level: 'warn' | 'debug') =>
     log[level].mock.calls.map((call: unknown[]) => String(call[0])).filter((l: string) => l.startsWith('Speaker Office'));
 
