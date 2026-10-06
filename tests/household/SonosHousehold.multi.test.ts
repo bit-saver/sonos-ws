@@ -293,6 +293,23 @@ describe('diagnostic subscriptions', () => {
       unansweredSubscribes.delete(OFFICE_IP);
     }
   });
+
+  it('keeps a diagnostic unsubscribed through disconnect() and connect()', async () => {
+    const household = await connectedHousehold(solo);
+    // connect() after disconnect() opens new sockets to the same hosts, so count across all of them.
+    const subscribes = (host: string, namespace: string) => instances
+      .filter((i) => i.host === host)
+      .flatMap((i) => i.send.mock.calls.map(([req]: any) => req[0]))
+      .filter((h: any) => h.namespace === namespace && h.command === 'subscribe').length;
+    await household.player('Office').homeTheater.unsubscribe();
+    const before = subscribes(OFFICE_IP, 'homeTheater:1');
+
+    await household.disconnect();
+    await household.connect();
+
+    expect(subscribes(OFFICE_IP, 'homeTheater:1')).toBe(before);
+    expect(subscribes(BED_IP, 'homeTheater:1')).toBeGreaterThan(1);
+  });
 });
 
 describe('reconnect setup does not stall on a stuck resubscribe', () => {

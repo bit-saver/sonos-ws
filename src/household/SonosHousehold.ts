@@ -82,6 +82,9 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   private topologyRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly setup: ConnectionSetup;
 
+  /** Handles whose diagnostics were declared; a re-run of first-connect setup skips them, so an unsubscribe() stays. */
+  private readonly diagnosed = new WeakSet<PlayerHandle>();
+
   /** Per-speaker WebSocket connections. Key is player ID. */
   private readonly speakerConnections = new Map<string, SonosConnection>();
   private readonly primaryHost: string;
@@ -298,24 +301,26 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   }
 
   /**
-   * Subscribes every player to the events that say what an external controller did: group volume (a group set is
+   * Subscribes players to the events that say what an external controller did: group volume (a group set is
    * otherwise indistinguishable from a player set), playback, and home theater (a TV input switch).
    * Best effort and not awaited: a send to an offline speaker can wait out the whole request timeout, and diagnostics
    * must never stop or stall a household connecting. Each intent is recorded before its send, so an offline speaker's
    * are re-sent when its socket connects.
-   * Runs once, at first connect; resubscribeAll() keeps them alive after. Re-running first-connect setup — connect()
-   * while the socket is down, whether after disconnect() or mid-ladder — re-declares these intents, undoing an
-   * earlier unsubscribe() of them.
+   * Declared once per handle; resubscribeAll() keeps them alive after.
    */
-  private subscribeDiagnostics(): void {
-    for (const handle of this._players.values()) {
+  private subscribeDiagnostics(handles: Iterable<PlayerHandle>): void {
+    for (const handle of handles) {
+      if (this.diagnosed.has(handle)) continue;
+      this.diagnosed.add(handle);
       const subscriptions: [string, () => Promise<void>][] = [
         ['groupVolume', () => handle.volume.group.subscribe()],
         ['playback', () => handle.playback.subscribe()],
         ['homeTheater', () => handle.homeTheater.subscribe()],
       ];
       for (const [name, subscribe] of subscriptions) {
-        void subscribe().catch((err: unknown) => this.log.warn(`Failed to subscribe ${handle.name} to ${name} events`, err));
+        void subscribe().catch(
+          (err: unknown) => this.log.warn(`Failed to subscribe ${handle.name} to ${name} events`, err),
+        );
       }
     }
   }
@@ -610,7 +615,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
         // speaker whose socket is laddering would otherwise hold up this setup — that speaker's own 'connected'
         // listener re-sends its intents when its socket returns.
         void this.resubscribeAll();
-        this.subscribeDiagnostics();
+        this.subscribeDiagnostics(this._players.values());
         this._initialConnectDone = true;
       } catch (err) {
         this.log.warn('Failed initial setup on connect', err);
