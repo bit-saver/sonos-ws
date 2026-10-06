@@ -357,7 +357,8 @@ Live: the morning content again (Office + Bedroom playing) → Arc through `hous
 ## 2026-10-05 fifth addendum: the next grouping call waits for the last move to settle
 
 **Status:** Approved by the owner 2026-10-05 22:24 CDT ("go with whatever you'd recommend"); the turn-taking and the
-PAUSED check were added after code review found near-simultaneous calls and paused moves uncovered. Replaces the fourth
+"every removed player IDLE" check were added after two code reviews found near-simultaneous calls and paused or
+buffering moves uncovered. Replaces the fourth
 addendum's "a command during the handoff" bullet; the rest of the fourth addendum stands.
 
 ### Why
@@ -378,10 +379,10 @@ hole. Every reader of the topology would need its own exception.
   both read the topology before either acts. A failure rejects only its own call.
 - `transferAudio()` records the move once Sonos answers: the players it removed, minus any the transfer adds back, and
   a 10 s window (`MOVE_SETTLE_MS`). A refused move records nothing.
-- Each call, in its turn, first `awaitLastMove()`: take the move, and while its window is open `pollUntil` no removed
-  player is in a group with audio (PLAYING or PAUSED), for at most the rest of the window and at most 8 s. That also
-  covers the target still sitting in the source coordinator's group, since that coordinator is a removed player. A move
-  that does not settle logs a warning and the call goes ahead.
+- Each call, in its turn, first `awaitLastMove()`: take the move, and while its window is open `pollUntil` every
+  removed player reports IDLE, for the rest of the window. That also covers the target still sitting in the source
+  coordinator's group, whatever that group reports, since that coordinator is a removed player. A move that does not
+  settle logs a warning and the call goes ahead.
 - Everything after that reads settled topology, so the existing logic is unchanged.
 
 ### Behavior
@@ -390,15 +391,16 @@ hole. Every reader of the topology would need its own exception.
   handoff ends, up to ~7 s (Sonos answered first). The first `group arc` stays at ~5.5 s.
 - A command sent while another grouping command runs waits for it; one Sonos never answers holds later grouping
   commands until it times out (Neurotto: the default 120 s). Volume and playback do not wait.
-- A removed speaker that genuinely starts playing within 10 s of the answer delays the next call until the window ends
-  (at most 8 s), then is taken as a source as before; after 10 s it is a source at once, with no extra read.
+- A removed speaker that genuinely starts playing within 10 s of the answer delays the next call until the window
+  ends, then is taken as a source as before; after 10 s it is a source at once, with no extra read.
 
 ### Testing
 
 TDD in `tests/household/GroupingEngine.test.ts`, `the next call after a move`: a removed player still reporting
-PLAYING, and PAUSED after a paused move; Sonos answering before the handoff (for `group`, `ungroup` and `ungroupAll`);
-a call sent before Sonos answers; the 8 s deadline; the window's end; a refused move; a member an explicit transfer
-adds back; an old move. Each guard mutation-verified (14 mutations, each failing its own test).
+PLAYING, and PAUSED after a paused move; Sonos answering before the handoff (for `group`, `ungroup` and `ungroupAll`),
+and while the moved group reports BUFFERING; a call sent before Sonos answers; giving up (with a warning) when the
+window ends; a call late in the window; a move waited on only once; a refused move; a member an explicit transfer adds
+back; an old move. Each guard mutation-verified (16 mutations, each failing its own test).
 
 Live: the owner's Alexa morning playlist on `( Office + Bedroom )`, then `group([Arc])` twice back to back and a
 volume read; the topology for ~15 s after; then House of Auto gets the sha and timings before the deploy.

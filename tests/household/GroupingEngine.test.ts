@@ -332,6 +332,21 @@ describe('GroupingEngine', () => {
         expect(state()).toEqual(['A:PLAYING', 'B:IDLE', 'C:IDLE']);
       });
 
+      it('waits for the handoff while the moved group reports BUFFERING', async () => {
+        moveShows(
+          [makeGroup('G_B', ['B', 'A'], 'BUFFERING'), makeGroup('G_C', ['C'], 'IDLE')],
+          [1000, [makeGroup('G_B', ['B', 'A'], 'PLAYING'), makeGroup('G_C', ['C'], 'IDLE')]],
+          [7000, settled()],
+        );
+
+        await transferToArc();
+        await finishesWithin(8000, transferToArc);
+
+        expect(players.get('B')!.groups.setGroupMembers).toHaveBeenCalledTimes(1);
+        expect(householdGroups.createGroup).not.toHaveBeenCalled();
+        expect(state()).toEqual(['A:PLAYING', 'B:IDLE', 'C:IDLE']);
+      });
+
       it.each([
         ['ungroup(A)', () => engine.ungroup(arc())],
         ['ungroupAll()', () => engine.ungroupAll()],
@@ -365,13 +380,27 @@ describe('GroupingEngine', () => {
         expect(state()).toEqual(['A:PLAYING', 'B:IDLE', 'C:IDLE']);
       });
 
-      it('stops waiting at the deadline when a removed player keeps playing, then takes it as a source', async () => {
+      it('gives up when the move stops counting and takes a still-playing removed player as a source', async () => {
+        const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+        engine = new GroupingEngine(householdGroups, refreshTopology, players, log);
         moveShows(cStillPlaying());
 
         await transferToArc();
-        await finishesWithin(9000, transferToArc);
+        await finishesWithin(10_500, transferToArc);
 
+        expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('did not settle'));
         expect(players.get('C')!.groups.setGroupMembers).toHaveBeenCalledWith(['A']);
+      });
+
+      it('waits on a move only once', async () => {
+        moveShows(cStillPlaying(), [800, settled()]);
+
+        await transferToArc();
+        await finishesWithin(2000, transferToArc);
+        const reads = householdGroups.getGroups.mock.calls.length;
+        await finishesWithin(100, () => engine.ungroup(arc()));
+
+        expect(householdGroups.getGroups.mock.calls.length).toBe(reads);
       });
 
       it('does not wait after a move Sonos refused', async () => {

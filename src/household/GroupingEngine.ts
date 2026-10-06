@@ -10,7 +10,7 @@ import { TopologySnapshot } from './TopologySnapshot.js';
 const POLL_INTERVAL_MS = 200;
 const POLL_DEADLINE_MS = 8000;
 
-/** How long after Sonos answers a move the next grouping call still waits for it to settle. */
+/** How long after Sonos answers a move the next grouping call may wait for it to settle. */
 const MOVE_SETTLE_MS = 10_000;
 
 /** A transfer's move, kept for the next grouping call to wait on. */
@@ -348,9 +348,9 @@ export class GroupingEngine {
   }
 
   /**
-   * Waits for the last move to settle before a grouping call reads the topology: no removed player is in a group with
-   * audio. Until then the target can still sit in the source coordinator's group, or a removed player can still report
-   * PLAYING or PAUSED on its own, and a call would act on it.
+   * Waits for the last move to settle before a grouping call reads the topology: every removed player reports IDLE.
+   * Until then the target can still sit in the source coordinator's group, or a removed player can still report audio
+   * of its own, and a call would act on it.
    */
   private async awaitLastMove(): Promise<void> {
     const move = this.lastMove;
@@ -358,16 +358,12 @@ export class GroupingEngine {
     this.lastMove = undefined;
     const left = move.until - Date.now();
     if (left <= 0) return;
-    const deadline = Math.min(left, POLL_DEADLINE_MS);
-    const settled = await this.pollUntil(
-      (res) => !res.groups.some(
-        (g) => (g.playbackState === 'PLAYBACK_STATE_PLAYING' || g.playbackState === 'PLAYBACK_STATE_PAUSED')
-          && g.playerIds.some((id) => move.removed.includes(id)),
-      ),
-      deadline,
-    );
+    const settled = await this.pollUntil((res) => {
+      const snap = new TopologySnapshot(res);
+      return move.removed.every((id) => snap.findGroupOf(id)?.playbackState === 'PLAYBACK_STATE_IDLE');
+    }, left);
     if (!settled) {
-      this.log.warn(`Last move did not settle within ${deadline}ms`);
+      this.log.warn(`Last move did not settle within ${MOVE_SETTLE_MS}ms of Sonos's answer`);
     }
   }
 
