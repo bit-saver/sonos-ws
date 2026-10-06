@@ -147,6 +147,15 @@ describe('GroupingEngine', () => {
       topology.groups = groups;
     }
 
+    // Under fake timers: runs `call` and checks it has finished within `ms`.
+    async function finishesWithin(ms: number, call: () => Promise<void>) {
+      let done = false;
+      const running = call().then(() => { done = true; });
+      await vi.advanceTimersByTimeAsync(ms);
+      expect(done).toBe(true);
+      await running;
+    }
+
     beforeEach(() => {
       householdGroups.createGroup.mockImplementation(createGroup);
       for (const [id, handle] of players) {
@@ -237,11 +246,7 @@ describe('GroupingEngine', () => {
       });
       vi.useFakeTimers();
       try {
-        let done = false;
-        const grouping = engine.group([players.get('A')!], { transfer: true }).then(() => { done = true; });
-        await vi.advanceTimersByTimeAsync(100);
-        expect(done).toBe(true);
-        await grouping;
+        await finishesWithin(100, () => engine.group([players.get('A')!], { transfer: true }));
         expect(householdGroups.createGroup).not.toHaveBeenCalled();
         expect(state()).toEqual(['B+A:PLAYING', 'C:IDLE']);
       } finally {
@@ -288,14 +293,6 @@ describe('GroupingEngine', () => {
           for (const [ms, groups] of later) setTimeout(() => startWith(...groups), ms);
           return Promise.resolve();
         });
-      }
-
-      async function finishesWithin(ms: number, call: () => Promise<void>) {
-        let done = false;
-        const running = call().then(() => { done = true; });
-        await vi.advanceTimersByTimeAsync(ms);
-        expect(done).toBe(true);
-        await running;
       }
 
       beforeEach(() => {
@@ -348,7 +345,7 @@ describe('GroupingEngine', () => {
         expect(state()).toEqual(['A:PLAYING', 'B:IDLE', 'C:IDLE']);
       });
 
-      it('makes a call sent before Sonos answers the move wait as well', async () => {
+      it('runs a call sent before Sonos answers the move after it, once the move has settled', async () => {
         // Sonos adds A and removes C at once, but answers only once A leads, 5 s later.
         vi.mocked(players.get('B')!.groups.setGroupMembers).mockImplementation(() => {
           startWith(makeGroup('G_B', ['B', 'A'], 'PLAYING'), makeGroup('G_C', ['C'], 'IDLE'));
@@ -394,21 +391,28 @@ describe('GroupingEngine', () => {
         expect(state()).toEqual(['A:PLAYING', 'B:IDLE', 'C:IDLE']);
       });
 
-      it('waits for the target to lead its group when the transfer adds the source coordinator back', async () => {
-        startWith(makeGroup('G_A', ['A'], 'IDLE'), makeGroup('G_C', ['C', 'B'], 'PLAYING'));
-        // C's move: Sonos adds A and removes B at once; C hands A the coordinator role 7 s later.
-        vi.mocked(players.get('C')!.groups.setGroupMembers).mockImplementation(() => {
-          startWith(makeGroup('G_C', ['C', 'A'], 'PLAYING'), makeGroup('G_B', ['B'], 'IDLE'));
-          setTimeout(() => startWith(...settled()), 7000);
-          return Promise.resolve();
-        });
+      it('does not take a removed player that still reports PAUSED as a source after moving paused audio', async () => {
+        startWith(makeGroup('G_A', ['A'], 'IDLE'), makeGroup('G_B', ['B', 'C'], 'PAUSED'));
+        moveShows(
+          [makeGroup('G_B', ['A'], 'PAUSED'), makeGroup('G_x', ['B'], 'IDLE'), makeGroup('G_C', ['C'], 'PAUSED')],
+          [800, [makeGroup('G_B', ['A'], 'PAUSED'), makeGroup('G_x', ['B'], 'IDLE'), makeGroup('G_C', ['C'], 'IDLE')]],
+        );
 
-        const first = engine.group([arc(), players.get('C')!], { transfer: { id: 'B' } });
-        await vi.advanceTimersByTimeAsync(1000);
-        await finishesWithin(8000, transferToArc);
-        await first;
+        await transferToArc();
+        await finishesWithin(2000, transferToArc);
 
-        expect(players.get('C')!.groups.setGroupMembers).toHaveBeenCalledTimes(1);
+        expect(players.get('C')!.groups.setGroupMembers).not.toHaveBeenCalled();
+        expect(state()).toEqual(['A:PAUSED', 'B:IDLE', 'C:IDLE']);
+      });
+
+      it('waits no longer than the move counts', async () => {
+        await transferToArc();
+        await vi.advanceTimersByTimeAsync(9000);
+        startWith(makeGroup('G_A', ['A'], 'IDLE'), makeGroup('G_B', ['B'], 'IDLE'), makeGroup('G_C', ['C'], 'PLAYING'));
+
+        await finishesWithin(1500, transferToArc);
+
+        expect(players.get('C')!.groups.setGroupMembers).toHaveBeenCalledWith(['A']);
       });
 
       it('takes a removed player as a source again once the move is old', async () => {
@@ -418,6 +422,7 @@ describe('GroupingEngine', () => {
 
         await finishesWithin(100, transferToArc);
 
+        expect(householdGroups.getGroups).not.toHaveBeenCalled();
         expect(players.get('C')!.groups.setGroupMembers).toHaveBeenCalledWith(['A']);
       });
     });

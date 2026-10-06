@@ -352,6 +352,9 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   /**
    * Groups the specified players. The first player in the array becomes the coordinator.
    *
+   * Grouping calls (this, {@link ungroup} and {@link ungroupAll}) run one at a time, and a call right after an audio
+   * transfer first waits, up to 8 s, for Sonos to finish moving the group.
+   *
    * @param players - Players to group. First player becomes coordinator.
    * @param options - Grouping options including audio transfer behavior.
    * @throws {SonosError} With code `INVALID_PARAMETER` if players array is empty.

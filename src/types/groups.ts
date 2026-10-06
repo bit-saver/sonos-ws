@@ -94,8 +94,9 @@ export interface GroupOptions {
    * - A player handle reference: transfer audio from that specific player.
    *   Throws if that player is not actively playing or paused.
    *
-   * Transferring moves the source group itself to the target; the call returns once Sonos has added the target, and
-   * the players the audio leaves end up solo and idle when Sonos finishes the handoff a few seconds later.
+   * Transferring moves the source group itself to the target. For a single target the call returns once Sonos has
+   * added it; for several, once they are grouped. The players the audio leaves end up solo and idle when Sonos finishes
+   * the handoff a few seconds later, and the next grouping call first waits for that, up to 8 s.
    */
   transfer?: boolean | { readonly id: string };
 }
