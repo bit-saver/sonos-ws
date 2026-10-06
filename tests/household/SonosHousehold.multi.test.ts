@@ -294,6 +294,25 @@ describe('adopting a speaker discovered after setup', () => {
     await vi.waitFor(() => expect(kitchenDiagnosticsVia(KITCHEN_IP)).toEqual([true, true, true]));
   });
 
+  it("points a returning speaker's new handle at the socket it kept", async () => {
+    const household = await connectedHousehold(solo);
+    topology = withKitchen;
+    await household.refreshTopology();
+    topology = solo;
+    await household.refreshTopology();
+    topology = withKitchen;
+    await household.refreshTopology();
+
+    await household.player('Kitchen').volume.subscribe();
+
+    expect(sentVia(KITCHEN_IP, 'playerVolume:1', 'subscribe')).toEqual([
+      expect.objectContaining({ playerId: 'RINCON_KITCHEN' }),
+    ]);
+    expect(sentVia(PRIMARY, 'playerVolume:1', 'subscribe').filter((h: any) => h.playerId === 'RINCON_KITCHEN'))
+      .toHaveLength(0);
+    expect(instances.filter((i) => i.host === KITCHEN_IP)).toHaveLength(1);
+  });
+
   it('declares its diagnostics but opens no socket under autoConnect: false', async () => {
     const household = await connectedHousehold(solo, { autoConnect: false });
 

@@ -395,11 +395,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   private async connectAllSpeakers(): Promise<void> {
     const promises = this._rawPlayers.map(async (player) => {
       try {
-        const conn = await this.connectToSpeaker(player);
-        const handle = this._players.get(player.id);
-        if (handle) {
-          handle.setSpeakerConnection(conn);
-        }
+        await this.connectToSpeaker(player);
       } catch (err) {
         this.log.warn(`Failed to connect to ${player.name}:`, err);
       }
@@ -421,7 +417,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
   }
 
   /**
-   * Gets or creates a connection to a specific speaker.
+   * Gets or creates a connection to a specific speaker, and points the speaker's handle at it.
    * Returns the primary connection if the speaker is the primary host.
    */
   private async connectToSpeaker(player: Player): Promise<SonosConnection> {
@@ -438,6 +434,8 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
     // Return existing connection if already connected
     const existing = this.speakerConnections.get(player.id);
     if (existing && existing.state === 'connected') {
+      // A returning speaker's new handle starts on the primary.
+      this._players.get(player.id)?.setSpeakerConnection(existing);
       return existing;
     }
 
