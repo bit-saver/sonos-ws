@@ -6,6 +6,7 @@ import { SonosHousehold } from '../../src/household/SonosHousehold.js';
 import type { SonosHouseholdOptions } from '../../src/household/SonosHousehold.js';
 import type { GroupsResponse } from '../../src/types/groups.js';
 import { ConnectionError } from '../../src/errors/ConnectionError.js';
+import { CommandError } from '../../src/errors/CommandError.js';
 import { ErrorCode } from '../../src/types/errors.js';
 
 const instances: any[] = [];
@@ -87,6 +88,14 @@ const officeUnderBedroom = {
   players: [ARC, OFFICE, BED],
 } as GroupsResponse;
 
+const withKitchen = {
+  groups: [
+    ...solo.groups,
+    { id: 'G_KIT', name: 'Kitchen', coordinatorId: 'RINCON_KITCHEN', playerIds: ['RINCON_KITCHEN'] },
+  ],
+  players: [ARC, OFFICE, BED, KITCHEN],
+} as GroupsResponse;
+
 const socket = (host: string) => {
   const found = instances.find((i) => i.host === host);
   if (!found) throw new Error(`no socket for ${host}`);
@@ -98,11 +107,16 @@ const fireConnected = async (host: string) => {
   await Promise.all(socket(host)._listeners.get('connected').map((h: () => unknown) => h()));
 };
 
-/** Headers of every command sent through a host's socket, optionally filtered. */
-const sentVia = (host: string, namespace?: string, command?: string) =>
-  socket(host).send.mock.calls
-    .map(([req]: any) => req[0])
+/** Headers of every command sent through any socket a host has had, optionally filtered. */
+const sentVia = (host: string, namespace?: string, command?: string) => {
+  socket(host); // an unknown host throws
+  return instances
+    .filter((i) => i.host === host)
+    .flatMap((i) => i.send.mock.calls.map(([req]: any) => req[0]))
     .filter((h: any) => (!namespace || h.namespace === namespace) && (!command || h.command === command));
+};
+
+const logger = () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() });
 
 async function connectedHousehold(
   start: GroupsResponse,
@@ -258,22 +272,124 @@ describe('subscription upkeep', () => {
     expect(sentVia(BED_IP, 'playerVolume:1', 'subscribe')).toHaveLength(0);
   });
 
-  it("re-sends a new speaker's player-level subscriptions only on its own socket once that connects", async () => {
+  it("sends a new speaker's player-level subscriptions on its own socket and re-sends them there", async () => {
     const household = await connectedHousehold(solo);
-    topology = {
-      groups: [...solo.groups, { id: 'G_KIT', name: 'Kitchen', coordinatorId: 'RINCON_KITCHEN', playerIds: ['RINCON_KITCHEN'] }],
-      players: [ARC, OFFICE, BED, KITCHEN],
-    } as GroupsResponse;
+    topology = withKitchen;
     await household.refreshTopology();
-    // Kitchen has no socket of its own yet, so this goes out on the primary.
-    await household.player('Kitchen').volume.subscribe();
-    expect(wantedOn(PRIMARY, 'playerVolume:1', { playerId: 'RINCON_KITCHEN' })).toBe(1);
 
-    // A primary reconnect opens Kitchen's own socket.
+    await household.player('Kitchen').volume.subscribe();
+    socket(KITCHEN_IP)._emit('connected');
+
+    await vi.waitFor(() => expect(wantedOn(KITCHEN_IP, 'playerVolume:1', { playerId: 'RINCON_KITCHEN' })).toBe(2));
+    expect(wantedOn(PRIMARY, 'playerVolume:1', { playerId: 'RINCON_KITCHEN' })).toBe(0);
+  });
+
+  it.each([
+    { why: 'only because the coordinator is moving', level: 'debug', code: () => 'groupCoordinatorChanged' },
+    { why: 'for another reason', level: 'warn', code: () => 'ERROR_COMMAND_FAILED' },
+    {
+      why: 'partly for another reason',
+      level: 'warn',
+      code: (namespace: string) => (namespace === 'groupVolume:1' ? 'groupCoordinatorChanged' : 'ERROR_COMMAND_FAILED'),
+    },
+  ] as const)('logs a re-send Sonos refuses $why at $level', async ({ level, code }) => {
+    const log = logger();
+    await connectedHousehold(solo, { logger: log });
+    socket(OFFICE_IP).send.mockImplementation(async ([headers]: any) => {
+      if (headers.command === 'subscribe') throw new CommandError(code(headers.namespace), 'refused');
+      return [{ success: true }, {}];
+    });
+
+    socket(OFFICE_IP)._emit('connected');
+
+    const logged = (at: 'debug' | 'warn') =>
+      log[at].mock.calls.some((call: unknown[]) => call[0] === 'Failed to restore event subscriptions for Office');
+    await vi.waitFor(() => expect(logged(level)).toBe(true));
+    expect(logged(level === 'debug' ? 'warn' : 'debug')).toBe(false);
+  });
+
+  it('re-sends on the next topology read after a mid-move refusal, even with membership unchanged', async () => {
+    const log = logger();
+    const household = await connectedHousehold(solo, { logger: log });
+    let moving = true;
+    socket(OFFICE_IP).send.mockImplementation(async ([headers]: any) => {
+      if (moving && headers.command === 'subscribe') throw new CommandError('groupCoordinatorChanged', 'refused');
+      return [{ success: true }, {}];
+    });
+
+    socket(OFFICE_IP)._emit('connected');
+    await vi.waitFor(() =>
+      expect(log.debug).toHaveBeenCalledWith('Failed to restore event subscriptions for Office', expect.anything()));
+    moving = false;
+    const before = sentVia(OFFICE_IP, 'homeTheater:1', 'subscribe').length;
+
+    await household.refreshTopology();
+
+    await vi.waitFor(() => expect(sentVia(OFFICE_IP, 'homeTheater:1', 'subscribe').length).toBeGreaterThan(before));
+  });
+});
+
+describe('adopting a speaker discovered after setup', () => {
+  const diagnostics = ['groupVolume:1', 'playback:1', 'homeTheater:1'];
+  const kitchenDiagnosticsVia = (host: string) => diagnostics.map((namespace) =>
+    sentVia(host, namespace, 'subscribe').some((h: any) => h.groupId === 'G_KIT' || h.playerId === 'RINCON_KITCHEN'));
+
+  it('opens its own socket and declares its diagnostics there', async () => {
+    const household = await connectedHousehold(solo);
+
+    topology = withKitchen;
+    await household.refreshTopology();
+
+    expect(socket(KITCHEN_IP).state).toBe('connected');
+    await vi.waitFor(() => expect(kitchenDiagnosticsVia(KITCHEN_IP)).toEqual([true, true, true]));
+  });
+
+  it("points a returning speaker's new handle at the socket it kept", async () => {
+    const household = await connectedHousehold(solo);
+    topology = withKitchen;
+    await household.refreshTopology();
+    topology = solo;
+    await household.refreshTopology();
+    topology = withKitchen;
+    await household.refreshTopology();
+
+    await household.player('Kitchen').volume.subscribe();
+
+    expect(sentVia(KITCHEN_IP, 'playerVolume:1', 'subscribe')).toEqual([
+      expect.objectContaining({ playerId: 'RINCON_KITCHEN' }),
+    ]);
+    expect(sentVia(PRIMARY, 'playerVolume:1', 'subscribe').filter((h: any) => h.playerId === 'RINCON_KITCHEN'))
+      .toHaveLength(0);
+    expect(instances.filter((i) => i.host === KITCHEN_IP)).toHaveLength(1);
+  });
+
+  it('declares its diagnostics but opens no socket under autoConnect: false', async () => {
+    const household = await connectedHousehold(solo, { autoConnect: false });
+
+    topology = withKitchen;
+    await household.refreshTopology();
+
+    await vi.waitFor(() => expect(kitchenDiagnosticsVia(PRIMARY)).toEqual([true, true, true]));
+    expect(instances.map((i) => i.host)).toEqual([PRIMARY]);
+  });
+
+  it('opens no speaker socket on a primary reconnect under autoConnect: false', async () => {
+    await connectedHousehold(solo, { autoConnect: false });
+
     await fireConnected(PRIMARY);
 
-    expect(wantedOn(PRIMARY, 'playerVolume:1', { playerId: 'RINCON_KITCHEN' })).toBe(1);
-    expect(wantedOn(KITCHEN_IP, 'playerVolume:1', { playerId: 'RINCON_KITCHEN' })).toBeGreaterThan(0);
+    expect(instances.map((i) => i.host)).toEqual([PRIMARY]);
+  });
+
+  it('adopts nothing from a topology read that lands once disconnect() has begun', async () => {
+    const household = await connectedHousehold(solo);
+    topology = withKitchen;
+
+    const read = household.refreshTopology();
+    await household.disconnect();
+    await read;
+
+    expect(instances.some((i) => i.host === KITCHEN_IP)).toBe(false);
   });
 });
 
@@ -292,6 +408,18 @@ describe('diagnostic subscriptions', () => {
     } finally {
       unansweredSubscribes.delete(OFFICE_IP);
     }
+  });
+
+  it('keeps a diagnostic unsubscribed through disconnect() and connect()', async () => {
+    const household = await connectedHousehold(solo);
+    await household.player('Office').homeTheater.unsubscribe();
+    const before = sentVia(OFFICE_IP, 'homeTheater:1', 'subscribe').length;
+
+    await household.disconnect();
+    await household.connect();
+
+    expect(sentVia(OFFICE_IP, 'homeTheater:1', 'subscribe').length).toBe(before);
+    expect(sentVia(BED_IP, 'homeTheater:1', 'subscribe').length).toBeGreaterThan(1);
   });
 });
 
@@ -316,7 +444,6 @@ describe('speaker socket errors', () => {
   const refused = () => new ConnectionError(ErrorCode.CONNECTION_FAILED, 'Failed to connect: ECONNREFUSED');
   const slowed = () =>
     new ConnectionError(ErrorCode.RECONNECT_SLOWED, 'Reconnect slowed after 94 attempts; retrying every 300000ms');
-  const logger = () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() });
   const officeLines = (log: any, level: 'warn' | 'debug') =>
     log[level].mock.calls.map((call: unknown[]) => String(call[0])).filter((l: string) => l.startsWith('Speaker Office'));
 
