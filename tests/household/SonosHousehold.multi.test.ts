@@ -348,7 +348,8 @@ describe('a speaker leaving or joining the household', () => {
     await household.refreshTopology();
 
     expect(lines(log, 'warn')).toEqual(['Bedroom left the household: Sonos no longer lists it']);
-    expect(lines(log, 'info')).toContain('Bedroom joined the household');
+    const joined = lines(log, 'info').filter((line: string) => line.includes('joined'));
+    expect(joined).toEqual(['Bedroom joined the household']);
   });
 });
 

@@ -269,8 +269,8 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       }
     }
 
-    // Remove players that no longer exist. Every grouping call then fails for that one, so say so: a primary can drop
-    // a speaker that is still online.
+    // Remove players that no longer exist. A grouping call naming one then fails, so say so: a primary can stop
+    // listing a speaker that is still online.
     for (const [id, handle] of this._players) {
       if (!result.players.some((p) => p.id === id)) {
         this._players.delete(id);
