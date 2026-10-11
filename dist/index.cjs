@@ -2285,9 +2285,10 @@ var SonosHousehold = class extends TypedEventEmitter {
         if (this._initialConnectDone) this.adopt(player);
       }
     }
-    for (const [id] of this._players) {
+    for (const [id, handle] of this._players) {
       if (!result.players.some((p) => p.id === id)) {
         this._players.delete(id);
+        this.log.warn(`${handle.name} left the household: Sonos no longer lists it`);
       }
     }
     const membershipKey = result.groups.map((g) => `${g.id}:${g.coordinatorId}:${[...g.playerIds].sort().join(",")}`).sort().join("|");
@@ -2415,6 +2416,7 @@ var SonosHousehold = class extends TypedEventEmitter {
    * `autoConnect`) and its diagnostics. Not awaited.
    */
   adopt(player) {
+    this.log.info(`${player.name} joined the household`);
     if (this.autoConnectSpeakers) void this.connectAllSpeakers([player]);
     this.subscribeDiagnostics();
   }
