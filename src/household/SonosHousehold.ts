@@ -269,10 +269,12 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
       }
     }
 
-    // Remove players that no longer exist
-    for (const [id] of this._players) {
+    // Remove players that no longer exist. A grouping call naming one then fails, so say so: a primary can stop
+    // listing a speaker that is still online.
+    for (const [id, handle] of this._players) {
       if (!result.players.some((p) => p.id === id)) {
         this._players.delete(id);
+        this.log.warn(`${handle.name} left the household: Sonos no longer lists it`);
       }
     }
 
@@ -424,6 +426,7 @@ export class SonosHousehold extends TypedEventEmitter<SonosHouseholdEvents> {
    * `autoConnect`) and its diagnostics. Not awaited.
    */
   private adopt(player: Player): void {
+    this.log.info(`${player.name} joined the household`);
     if (this.autoConnectSpeakers) void this.connectAllSpeakers([player]);
     this.subscribeDiagnostics();
   }
