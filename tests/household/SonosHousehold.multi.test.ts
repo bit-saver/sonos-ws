@@ -329,6 +329,29 @@ describe('subscription upkeep', () => {
   });
 });
 
+describe('a speaker leaving or joining the household', () => {
+  const withoutBedroom = {
+    groups: solo.groups.filter((g) => g.id !== 'G_BED'),
+    players: [ARC, OFFICE],
+  } as GroupsResponse;
+  const lines = (log: ReturnType<typeof logger>, level: 'info' | 'warn') =>
+    log[level].mock.calls.map((call: unknown[]) => String(call[0])).filter((line: string) => line.includes('Bedroom'));
+
+  it('warns once when Sonos stops listing a speaker, and logs its return at info', async () => {
+    const log = logger();
+    const household = await connectedHousehold(solo, { logger: log });
+
+    topology = withoutBedroom;
+    await household.refreshTopology();
+    await household.refreshTopology();
+    topology = solo;
+    await household.refreshTopology();
+
+    expect(lines(log, 'warn')).toEqual(['Bedroom left the household: Sonos no longer lists it']);
+    expect(lines(log, 'info')).toContain('Bedroom joined the household');
+  });
+});
+
 describe('adopting a speaker discovered after setup', () => {
   const diagnostics = ['groupVolume:1', 'playback:1', 'homeTheater:1'];
   const kitchenDiagnosticsVia = (host: string) => diagnostics.map((namespace) =>
